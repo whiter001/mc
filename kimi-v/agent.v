@@ -18,19 +18,30 @@ pub mut:
 	on_delta    ?fn (string) // regular content
 	on_thinking ?fn (string) // reasoning/thinking content
 	on_tool     ?fn (string, string) // (name, args)
+	// Compaction callback: invoked when context is compacted. Args are
+	// (estimated_tokens_before, estimated_tokens_after). The TUI uses
+	// this to surface a system block.
+	on_compact ?fn (int, int)
 	// Cancellation channel: caller sends to this to abort an in-flight
 	// step. The provider's read loop polls it; step() also selects on it
 	// so it can return promptly. The runner should reset the channel at
 	// the start of each turn (one-shot semantics, cap 1).
 	cancel_ch chan int
+	// Compaction config. context_window = model's max input tokens;
+	// compact_threshold = fraction above which we trigger compaction.
+	// Defaults: 128k window, 0.6 threshold (self-use aggressive).
+	context_window    int = default_context_window
+	compact_threshold f32 = default_compact_threshold
 }
 
 pub fn new_agent(provider Provider, system string) Agent {
 	return Agent{
-		provider:   provider
-		system:     system
-		registry:   new_registry()
-		cancel_ch:  chan int{cap: 1}
+		provider:         provider
+		system:           system
+		registry:         new_registry()
+		cancel_ch:        chan int{cap: 1}
+		context_window:   default_context_window
+		compact_threshold: default_compact_threshold
 	}
 }
 

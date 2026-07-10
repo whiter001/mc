@@ -29,6 +29,11 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 	mut last_text := ''
 
 	for turn in 0 .. a.max_turns {
+		// Compact before each step so we never send an oversized request
+		// that the model would reject. Failure is non-fatal (logged inside
+		// compact()); we'd rather lose a turn than crash the loop.
+		a.compact(mut sess) or {}
+
 		step := a.step(sess)!
 
 		// Persist the assistant turn (text + tool calls).
