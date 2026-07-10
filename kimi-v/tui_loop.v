@@ -46,6 +46,7 @@ pub:
 	input_tokens int
 	output_tokens int
 	final_text   string
+	thinking_text string
 	err          string
 }
 
@@ -59,12 +60,13 @@ pub fn status_tool_result(name string, result string, is_err bool) TuiStatus {
 	return TuiStatus{ kind: .tool_result, tool_name: name, tool_result: result, tool_is_err: is_err }
 }
 
-pub fn status_finished(input_tokens int, output_tokens int, final_text string) TuiStatus {
+pub fn status_finished(input_tokens int, output_tokens int, final_text string, thinking_text string) TuiStatus {
 	return TuiStatus{
 		kind: .finished
 		input_tokens: input_tokens
 		output_tokens: output_tokens
 		final_text: final_text
+		thinking_text: thinking_text
 	}
 }
 
@@ -164,12 +166,16 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 
 	for {
 		msg := <-submit_ch or { break }
-		// The on_delta callback accumulates streamed text into the local
-		// text buffer; the consumer (main loop) reads it via state.streaming
-		// after we set the streaming_done flag.
+		// The on_delta / on_thinking callbacks accumulate streamed chunks
+		// into local buffers; the consumer (main loop) reads them via
+		// state.streaming after we set the streaming_done flag.
 		mut text_acc := strings.Builder{}
+		mut thinking_acc := strings.Builder{}
 		agent.on_delta = fn [mut text_acc] (chunk string) {
 			text_acc.write_string(chunk)
+		}
+		agent.on_thinking = fn [mut thinking_acc] (chunk string) {
+			thinking_acc.write_string(chunk)
 		}
 
 		sess.append_user(msg.prompt)
@@ -181,8 +187,9 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 		}
 
 		// Push a finished status with the accumulated text. The main loop
-		// promotes this to a permanent block.
-		status_ch <- status_finished(res.usage.input_tokens, res.usage.output_tokens, text_acc.str())
+		// promotes these to permanent blocks.
+		status_ch <- status_finished(res.usage.input_tokens, res.usage.output_tokens,
+			text_acc.str(), thinking_acc.str())
 	}
 }
 
@@ -212,6 +219,14 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 			state.status = 'idle'
 		}
 		.finished {
+			// Push thinking block first (above the answer) so it renders
+			// as context for the assistant response below it.
+			if s.thinking_text.len > 0 {
+				state.blocks << Block{
+					kind: .thinking
+					text: s.thinking_text
+				}
+			}
 			if s.final_text.len > 0 {
 				state.blocks << Block{
 					kind: .assistant

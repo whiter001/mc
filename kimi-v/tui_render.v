@@ -131,6 +131,13 @@ fn render_block(b Block) []string {
 		.assistant {
 			return wrap_lines(b.text, '', '')
 		}
+		.thinking {
+			// Reasoning content (k1.5 / R1 style). Dim gray with a brain
+			// emoji on the first line so it's visually distinct from the
+			// final assistant answer that follows.
+			prefix := '${esc_gray}💭 ${esc_reset}${esc_dim}'
+			return wrap_lines(b.text, prefix, '${esc_dim}')
+		}
 		.tool_call {
 			head := '${esc_cyan}⚙ ${b.tool_name}${esc_reset}${esc_dim}(${b.tool_args})${esc_reset}'
 			return [head]

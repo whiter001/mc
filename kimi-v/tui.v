@@ -177,6 +177,7 @@ pub mut:
 pub enum BlockKind {
 	user
 	assistant
+	thinking
 	tool_call
 	tool_result
 	system
