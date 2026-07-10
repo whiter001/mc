@@ -1,0 +1,23 @@
+# Build outputs
+kimi
+kimi-debug
+*.exe
+*.out
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# V internal
+.vmodules/
+
+# Runtime / session data
+.sessions/
+.cache/
+config.local.toml
+auth.enc
