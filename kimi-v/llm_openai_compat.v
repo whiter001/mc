@@ -23,13 +23,19 @@ pub mut:
 
 // ---- Wire types (only the fields we actually need) -----------------------
 
+struct StreamOptions {
+	include_usage bool @[json: include_usage]
+}
+
 struct OaiRequestT {
-	model       string        @[json: model]
-	messages    []OaiMessageT @[json: messages]
-	tools       []OaiToolT    @[json: tools]
-	temperature f32           @[json: temperature]
-	max_tokens  int           @[json: max_tokens]
-	stream      bool          @[json: stream]
+	model           string         @[json: model]
+	messages        []OaiMessageT  @[json: messages]
+	tools           []OaiToolT     @[json: tools]
+	temperature     f32            @[json: temperature]
+	max_tokens      int            @[json: max_tokens]
+	stream          bool           @[json: stream]
+	reasoning_split bool           @[json: reasoning_split]
+	stream_options  ?StreamOptions  @[json: stream_options]
 }
 
 struct OaiMessageT {
@@ -136,6 +142,8 @@ fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
 		temperature: req.temperature
 		max_tokens:  req.max_tokens
 		stream:      false
+		reasoning_split: true
+		stream_options:  none
 	}
 }
 
@@ -242,6 +250,8 @@ fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT 
 		temperature: req.temperature
 		max_tokens:  req.max_tokens
 		stream:      true
+		reasoning_split: true
+		stream_options:  StreamOptions{ include_usage: true }
 	}
 }
 

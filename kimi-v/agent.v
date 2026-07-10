@@ -15,8 +15,9 @@ pub mut:
 	registry  ToolRegistry
 	// When non-nil, the agent streams deltas as it receives them. Used by
 	// the TUI; P0 single-shot mode ignores it.
-	on_delta ?fn (string)
-	on_tool  ?fn (string, string) // (name, args)
+	on_delta    ?fn (string) // regular content
+	on_thinking ?fn (string) // reasoning/thinking content
+	on_tool     ?fn (string, string) // (name, args)
 }
 
 pub fn new_agent(provider Provider, system string) Agent {
@@ -85,6 +86,11 @@ pub fn (mut a Agent) step(sess Session) !StepResult {
 				text_acc << ev.content
 				if cb := a.on_delta {
 					cb(ev.content)
+				}
+			}
+			.thinking {
+				if cb := a.on_thinking {
+					cb(ev.thinking)
 				}
 			}
 			.tool_call {

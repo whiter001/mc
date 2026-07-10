@@ -367,9 +367,10 @@ pub:
 
 struct OaiStreamDelta {
 pub:
-	content    string                      @[json: content]
-	role       string                      @[json: role]
-	tool_calls ?[]OaiStreamToolCallPartial @[json: tool_calls]
+	content         string                      @[json: content]
+	reasoning_content string                   @[json: reasoning_content]
+	role           string                      @[json: role]
+	tool_calls     ?[]OaiStreamToolCallPartial @[json: tool_calls]
 }
 
 struct OaiStreamToolCallPartial {
@@ -421,6 +422,14 @@ fn (mut p SseParser) feed(event_data string, out chan ChatEvent) {
 	chunk := json.decode(OaiStreamChunk, event_data) or { return }
 
 	for choice in chunk.choices {
+		// Thinking / reasoning delta (MiniMax-M3 with reasoning_split=true)
+		if choice.delta.reasoning_content.len > 0 {
+			out <- ChatEvent{
+				kind:     .thinking
+				thinking: choice.delta.reasoning_content
+			}
+		}
+
 		// Text delta
 		if choice.delta.content.len > 0 {
 			p.saw_content = true

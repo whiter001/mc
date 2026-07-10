@@ -226,6 +226,11 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 		stdout_flush()
 	}
 
+	a.on_thinking = fn [log] (chunk string) {
+		print('\x1b[90m${chunk}\x1b[0m') // grey
+		stdout_flush()
+	}
+
 	mut sess := if cli.continue_session.len > 0 {
 		log.info('resuming session: ${cli.continue_session}')
 		load(cli.continue_session)!

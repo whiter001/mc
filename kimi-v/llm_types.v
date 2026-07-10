@@ -84,6 +84,8 @@ pub:
 	kind ChatEventKind
 	// delta fields
 	content string
+	// thinking fields (MiniMax-M3 reasoning)
+	thinking string
 	// tool_call fields
 	id        string
 	name      string
@@ -99,6 +101,7 @@ pub:
 
 pub enum ChatEventKind {
 	delta
+	thinking
 	tool_call
 	finish
 	usage
