@@ -107,7 +107,19 @@ fn render_conversation(s TuiState, max_rows int) []string {
 			lines = lines[lines.len - max_rows..]
 		}
 	}
-	// Include the streaming text as a final in-progress block.
+	// Include in-progress streaming as the final blocks: thinking first
+	// (above the answer), then the assistant text. Renders live as chunks
+	// arrive via state.streaming_thinking / state.streaming.
+	if s.streaming_thinking.len > 0 {
+		thinking := render_block(Block{
+			kind: .thinking
+			text: s.streaming_thinking
+		})
+		lines << thinking
+		if lines.len > max_rows {
+			lines = lines[lines.len - max_rows..]
+		}
+	}
 	if s.streaming.len > 0 || s.streaming_done {
 		streamed := render_block(Block{
 			kind: .assistant

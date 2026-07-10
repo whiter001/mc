@@ -11,7 +11,6 @@
 module main
 
 import time
-import strings
 
 // TuiLoopResult tells main() how to proceed after the loop exits.
 pub enum TuiLoopResult {
@@ -30,6 +29,8 @@ pub:
 // names, which makes payload access painful).
 pub enum StatusKind {
 	started
+	delta            // regular content chunk (assistant text)
+	thinking_delta   // reasoning/thinking chunk (k1.5 / R1 style)
 	tool_call
 	tool_result
 	finished
@@ -39,18 +40,30 @@ pub enum StatusKind {
 pub struct TuiStatus {
 pub:
 	kind         StatusKind
+	// Streaming payload: the chunk text for .delta / .thinking_delta.
+	// The consumer appends it to the appropriate TuiState streaming field.
+	chunk        string
 	tool_name    string
 	tool_args    string
 	tool_result  string
 	tool_is_err  bool
 	input_tokens int
 	output_tokens int
-	final_text   string
-	thinking_text string
+	// When the run ends, the streamed content lives in `state.streaming` /
+	// `state.streaming_thinking`; the main loop promotes those to permanent
+	// blocks. We no longer carry the full text in the status message.
 	err          string
 }
 
 pub fn status_started() TuiStatus { return TuiStatus{ kind: .started } }
+
+pub fn status_delta(chunk string) TuiStatus {
+	return TuiStatus{ kind: .delta, chunk: chunk }
+}
+
+pub fn status_thinking_delta(chunk string) TuiStatus {
+	return TuiStatus{ kind: .thinking_delta, chunk: chunk }
+}
 
 pub fn status_tool_call(name string, args string) TuiStatus {
 	return TuiStatus{ kind: .tool_call, tool_name: name, tool_args: args }
@@ -60,13 +73,11 @@ pub fn status_tool_result(name string, result string, is_err bool) TuiStatus {
 	return TuiStatus{ kind: .tool_result, tool_name: name, tool_result: result, tool_is_err: is_err }
 }
 
-pub fn status_finished(input_tokens int, output_tokens int, final_text string, thinking_text string) TuiStatus {
+pub fn status_finished(input_tokens int, output_tokens int) TuiStatus {
 	return TuiStatus{
 		kind: .finished
 		input_tokens: input_tokens
 		output_tokens: output_tokens
-		final_text: final_text
-		thinking_text: thinking_text
 	}
 }
 
@@ -166,16 +177,14 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 
 	for {
 		msg := <-submit_ch or { break }
-		// The on_delta / on_thinking callbacks accumulate streamed chunks
-		// into local buffers; the consumer (main loop) reads them via
-		// state.streaming after we set the streaming_done flag.
-		mut text_acc := strings.Builder{}
-		mut thinking_acc := strings.Builder{}
-		agent.on_delta = fn [mut text_acc] (chunk string) {
-			text_acc.write_string(chunk)
+		// Per-chunk forward to the TUI: every delta / thinking chunk the
+		// agent emits becomes a status, so the render loop paints tokens
+		// in real time (back-pressured via the channel's natural blocking).
+		agent.on_delta = fn [status_ch] (chunk string) {
+			status_ch <- status_delta(chunk)
 		}
-		agent.on_thinking = fn [mut thinking_acc] (chunk string) {
-			thinking_acc.write_string(chunk)
+		agent.on_thinking = fn [status_ch] (chunk string) {
+			status_ch <- status_thinking_delta(chunk)
 		}
 
 		sess.append_user(msg.prompt)
@@ -186,10 +195,10 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 			continue
 		}
 
-		// Push a finished status with the accumulated text. The main loop
-		// promotes these to permanent blocks.
-		status_ch <- status_finished(res.usage.input_tokens, res.usage.output_tokens,
-			text_acc.str(), thinking_acc.str())
+		// Signal "stream done" — the consumer promotes whatever has
+		// accumulated in state.streaming / state.streaming_thinking into
+		// permanent blocks.
+		status_ch <- status_finished(res.usage.input_tokens, res.usage.output_tokens)
 	}
 }
 
@@ -199,7 +208,24 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 		.started {
 			state.status = 'thinking...'
 			state.streaming = ''
+			state.streaming_thinking = ''
 			state.streaming_done = false
+		}
+		.delta {
+			// Regular assistant text chunk. Append to the in-progress
+			// streaming buffer; the render loop will re-paint every frame.
+			state.streaming += s.chunk
+			// Promote status once we leave the "waiting on first token" state.
+			if state.status == 'thinking...' {
+				state.status = 'generating...'
+			}
+		}
+		.thinking_delta {
+			// Reasoning/thinking chunk (k1.5 / R1 style). Append to its
+			// own buffer so the render can show the dim 💭 block above
+			// the (yet-to-arrive) answer.
+			state.streaming_thinking += s.chunk
+			state.status = 'thinking...'
 		}
 		.tool_call {
 			state.blocks << Block{
@@ -219,21 +245,23 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 			state.status = 'idle'
 		}
 		.finished {
-			// Push thinking block first (above the answer) so it renders
-			// as context for the assistant response below it.
-			if s.thinking_text.len > 0 {
+			// Promote the streamed content into permanent blocks. Thinking
+			// goes first so the rendered order matches kimi-code: dim
+			// reasoning above, then the assistant answer below.
+			if state.streaming_thinking.len > 0 {
 				state.blocks << Block{
 					kind: .thinking
-					text: s.thinking_text
+					text: state.streaming_thinking
 				}
 			}
-			if s.final_text.len > 0 {
+			if state.streaming.len > 0 {
 				state.blocks << Block{
 					kind: .assistant
-					text: s.final_text
+					text: state.streaming
 				}
 			}
 			state.streaming = ''
+			state.streaming_thinking = ''
 			state.streaming_done = true
 			state.input_tokens += s.input_tokens
 			state.output_tokens += s.output_tokens

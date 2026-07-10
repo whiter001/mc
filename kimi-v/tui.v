@@ -153,9 +153,14 @@ pub mut:
 	// Each block is a self-contained chunk (user text, assistant text
 	// being streamed, tool call + result, etc.).
 	blocks      []Block
-	// Currently-streaming assistant text for the latest block (so we can
-	// re-render mid-stream without committing to a final block).
+	// Currently-streaming assistant text for the latest turn. Grows
+	// chunk-by-chunk as the LLM emits tokens; promoted to a permanent
+	// `.assistant` block when the turn finishes.
 	streaming   string
+	// Currently-streaming reasoning/thinking text (k1.5 / R1 style). Same
+	// lifecycle as `streaming` but rendered separately (dim, 💭 prefix)
+	// above the eventual answer.
+	streaming_thinking string
 	// Stream has finished for the current block (allows render loop to
 	// promote `streaming` into a permanent block).
 	streaming_done bool
