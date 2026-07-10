@@ -106,7 +106,8 @@ pub enum KeyKind {
 	kill_word
 	interrupt
 	clear_screen
-	submit_other  // Alt-Enter / Ctrl-J — same as enter but for multiline hint
+	insert_newline  // Shift+Enter / Alt+Enter — insert literal \n into the buffer
+	submit_other    // Ctrl-J — alternative submit (same as Enter)
 	esc
 }
 
@@ -237,7 +238,7 @@ fn (mut r StdinReader) read_esc_sequence() KeyEvent {
 	b := r.read_byte() or { return KeyEvent{ kind: .esc } }
 	match b {
 		`[` {
-			// CSI: \e[X or \e[X~
+			// CSI: \e[X or \e[X~ or \e[X;Y~ (modified keys)
 			c := r.read_byte() or { return KeyEvent{ kind: .esc } }
 			match c {
 				`A` { return KeyEvent{ kind: .up } }
@@ -254,10 +255,33 @@ fn (mut r StdinReader) read_esc_sequence() KeyEvent {
 					}
 					return KeyEvent{ kind: .esc }
 				}
+				`1` {
+					// Modified Enter keys: ESC [ 13 ; <modifier> ~
+					// e.g. 13;2~ = Shift+Enter, 13;5~ = Ctrl+Enter.
+					// We only treat Shift+Enter (modifier 2) as a literal
+					// newline; Ctrl+Enter would clash with Ctrl-J submit.
+					semi := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					if semi != `;` {
+						return KeyEvent{ kind: .esc }
+					}
+					// Read the modifier digit and trailing ~.
+					mod1 := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					tilde := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					if tilde == `~` && mod1 == `2` {
+						return KeyEvent{ kind: .insert_newline }
+					}
+					return KeyEvent{ kind: .esc }
+				}
 				else {
 					return KeyEvent{ kind: .esc }
 				}
 			}
+		}
+		key_enter {
+			// ESC + Enter byte = Alt+Enter. Treat as literal newline so
+			// users on terminals that don't send CSI 13;2~ still have
+			// a way to break the line.
+			return KeyEvent{ kind: .insert_newline }
 		}
 		else {
 			// Single ESC, or ESC + letter (Alt-key chord). We treat any
@@ -298,6 +322,11 @@ pub fn (mut b InputBuf) apply(ev KeyEvent) bool {
 	match ev.kind {
 		.char {
 			b.insert(ev.text)
+		}
+		.insert_newline {
+			// Multi-line: insert a literal \n at the cursor. Submit is
+			// reserved for plain Enter / Ctrl-J.
+			b.insert('\n')
 		}
 		.backspace {
 			b.backspace()

@@ -28,7 +28,7 @@ import strings
 //   row 2:    status
 //   rows 3..(rows-reserved-2): conversation scrollback
 //   row rows-reserved-1: separator
-//   rows (rows-reserved)..rows: input box (1-2 lines reserved)
+//   rows (rows-reserved)..rows: input box (1+ lines, multi-line capable)
 fn render(s TuiState, ib InputBuf) string {
 	mut buf := strings.Builder{}
 
@@ -39,9 +39,20 @@ fn render(s TuiState, ib InputBuf) string {
 	// Clear the whole screen.
 	buf.write_string(esc + '[2J')
 
-	// Compute reserved rows.
-	reserved := 3 // 1 header + 1 status + 1 separator; input takes 1-2
-	mut conv_rows := s.rows - reserved - 1 // leave 1 row for input
+	// Compute the input area height. Multi-line input grows with the
+	// number of \n in the buffer; cap at max_input_rows so a runaway
+	// paste can't eat the whole screen.
+	mut max_input_rows := if s.rows / 4 < 8 { s.rows / 4 } else { 8 }
+	if max_input_rows < 1 { max_input_rows = 1 }
+	mut input_rows := input_line_count(ib.text)
+	if input_rows > max_input_rows {
+		input_rows = max_input_rows
+	}
+	if input_rows < 1 { input_rows = 1 }
+
+	// Reserved: 1 header + 1 status + 1 separator + input_rows.
+	reserved := 3 + input_rows
+	mut conv_rows := s.rows - reserved
 	if conv_rows < 3 { conv_rows = 3 }
 
 	// 1. Header.
@@ -82,10 +93,28 @@ fn render(s TuiState, ib InputBuf) string {
 	buf.write_string(esc_reset)
 	buf.write_string('\n')
 
-	// 5. Input box. We show "> text" with cursor positioned correctly.
+	// 5. Input box. We show "❯ <text>" split on \n; first line gets the
+	// prompt prefix, continuation lines are indented to align under it.
 	render_input(mut buf, ib, s.cols)
 
 	return buf.str()
+}
+
+// input_line_count returns how many screen rows the input buffer will
+// occupy when rendered. It's 1 + the number of \n in the text. Soft-
+// wrapping long single lines isn't counted (we accept overflow today;
+// fixed-width terminals with sane widths won't see this in practice).
+fn input_line_count(text string) int {
+	if text.len == 0 {
+		return 1
+	}
+	mut n := 1
+	for i := 0; i < text.len; i++ {
+		if text[i] == `\n` {
+			n++
+		}
+	}
+	return n
 }
 
 // render_conversation walks the blocks list (most recent first), renders
@@ -195,18 +224,51 @@ fn wrap_lines(text string, first_prefix string, rest_prefix string) []string {
 	return out
 }
 
-// render_input writes the input box (> <text>) into the provided buffer.
+// render_input writes the input box (❯ <text>) into the provided buffer.
+// Splits on \n so the user can type multi-line prompts: the first line
+// gets the "❯ " prefix, each continuation line gets a 2-space indent
+// to keep text aligned under the prompt.
+//
+// Cursor positioning is left at the end of the buffer (we don't try to
+// position the visible cursor mid-line — that needs absolute ANSI
+// cursor addressing and tracking of (row, col) instead of a flat byte
+// offset, which is a follow-up).
 fn render_input(mut buf strings.Builder, ib InputBuf, cols int) {
-	// Show "> <text>" with a visible cursor.
-	buf.write_string(esc_green)
-	buf.write_string('❯ ')
-	buf.write_string(esc_reset)
-	buf.write_string(ib.text)
-	// Position cursor: after "> " prefix + ib.cursor characters of text.
-	// We don't reposition cursor via ANSI; we just write a space and let
-	// the next read_key run reset things. This is acceptable for full
-	// repaint — the cursor blinks at the end of the line until next
-	// keystroke.
+	// Empty input: just show the prompt, no text, cursor at column 2.
+	if ib.text.len == 0 {
+		buf.write_string(esc_green)
+		buf.write_string('❯ ')
+		buf.write_string(esc_reset)
+		buf.write_string(cursor_show())
+		return
+	}
+	// Split on \n and render each segment on its own visual line.
+	mut first := true
+	mut start := 0
+	for i := 0; i <= ib.text.len; i++ {
+		at_end := i == ib.text.len
+		at_newline := !at_end && ib.text[i] == `\n`
+		if at_end || at_newline {
+			if first {
+				buf.write_string(esc_green)
+				buf.write_string('❯ ')
+				buf.write_string(esc_reset)
+				first = false
+			} else {
+				buf.write_string('  ')
+			}
+			buf.write_string(ib.text[start..i])
+			// Pad to end of row so the previous content is fully
+			// overwritten (we cleared the whole screen at frame start,
+			// but each line needs its own newline terminator).
+			if !at_end {
+				buf.write_string('\n')
+			}
+			start = i + 1
+		}
+	}
+	// Trailing space for the blinking cursor. Drop the cursor on the
+	// last visual line; the user can type to extend.
 	buf.write_string(' ')
 	buf.write_string(cursor_show())
 }
