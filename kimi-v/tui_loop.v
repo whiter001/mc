@@ -96,6 +96,9 @@ pub fn status_cancelled() TuiStatus {
 pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	mut state := new_tui_state()
 	mut ib := new_input_buf()
+	// Load persisted history before entering raw mode so any I/O error
+	// (e.g. missing file) is handled cleanly without flashing the TUI.
+	ib.history = load_history()
 
 	if !enter_tui() {
 		return .fallback_to_stdout
@@ -174,6 +177,12 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	}
 
 	leave_tui()
+	// Persist history after leaving raw mode — write failures here
+	// shouldn't crash the TUI; we just log and move on. The user can
+	// still quit; they'll lose history but the session itself is fine.
+	save_history(ib.history) or {
+		eprintln('[warn] failed to save history: ${err.msg()}')
+	}
 	return .clean_exit
 }
 

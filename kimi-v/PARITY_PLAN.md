@@ -43,7 +43,7 @@
 | P0.5 流式 | ✅ | 真 SSE，HTTP/HTTPS 都走通 |
 | P0.6 Usage | ✅ | finish event 带 token |
 | P1 TUI | ✅ | alt-screen + raw mode + 30fps 全帧 |
-| **P1.5 TUI 打磨** | 🚧 3/4 | 已做：thinking 接线 + streaming delta 实时渲染 + Ctrl-C 取消；剩 多行 / 历史 |
+| **P1.5 TUI 打磨** | ✅ 4/4 | thinking 接线 + streaming delta 实时渲染 + Ctrl-C 取消 + 多行输入 + 历史持久化。Phase 1 闭环。|
 | P2 web_fetch + 审批 | ❌ | |
 | P3 MCP + OAuth | ❌（v0.3 optional） | |
 | P4 ACP | ❌ | |
@@ -70,8 +70,8 @@
 |---|---|---|
 | streaming delta 实时渲染 | ✅ (2026-07-11) | `StatusKind.delta` / `.thinking_delta` + 状态机切到 `state.streaming` / `state.streaming_thinking`，render 区分静态/流式；back-pressure 走 `status_ch` 容量 |
 | Ctrl-C 取消 | ✅ (2026-07-11) | `Provider.chat(req, out, cancel_ch)` 接口加 cancel_ch；`SseParser.feed` + `read_sse_stream` 在每行 read / 每个 send 前 select 一下；`Agent.cancel_ch` cap 1 one-shot；TUI 走 watcher 转发，cancel 时启 drainer goroutine 排空 event 通道让 provider 顺利 close；partial thinking + answer 都提 block 后插 `[cancelled]` system block |
-| 多行输入 | ⏳ | Shift+Enter / Ctrl-J 走 `KeyEvent.kind = .newline` |
-| 历史持久化 | ⏳ | TUI 退出写 `~/.local/share/kimi/history`，启动时载入 |
+| 多行输入 | ✅ (2026-07-11) | `KeyKind.insert_newline` 接 Shift+Enter (CSI 13;2~) + Alt+Enter (ESC \r)；`render_input` 按 \n 切多行，首行 `❯ `，续行 2 字符缩进；layout 动态算 `input_rows`（cap = min(rows/4, 8)）。粘贴多行会提前 submit（raw \n 映射成 .enter）是已知坑，bracketed paste mode 单独立 todo |
+| 历史持久化 | ✅ (2026-07-11) | `<config_dir>/history`，用 0x1E (RS) 分隔（多行 prompt 透传），save 时 dedup 保留最近 + cap 500；可 `KIMI_HISTORY_FILE` 覆盖；6 个 unit test 全过 |
 | `/usage` `/compact` slash | ⏳ | `/usage` 调 `agent_loop` 的 usage 字段；`/compact` 走 compaction（见 Phase 1.5） |
 | Stdin 健壮退出 | ⏳ | SIGPIPE / EIO 路径 `leave_tui` + 退码区分 |
 
