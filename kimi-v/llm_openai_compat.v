@@ -48,7 +48,22 @@ struct OaiToolT {
 struct OaiToolFnT {
 	name        string @[json: name]
 	description string @[json: description]
-	parameters  string @[json: parameters] // JSON Schema object as string
+	parameters  RawJson @[json: parameters] // Raw JSON object (no extra quotes)
+}
+
+// RawJson is a wrapper that serializes its string value as-is (not as a quoted string).
+// This lets us pass pre-encoded JSON objects without re-parsing them.
+struct RawJson {
+mut:
+	data string
+}
+
+fn (r RawJson) str() string {
+	return r.data
+}
+
+fn (r RawJson) json() string {
+	return r.data
 }
 
 struct OaiToolCallT {
@@ -113,18 +128,7 @@ fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
 		}
 	}
 
-	mut tools := []OaiToolT{}
-	for t in req.tools {
-		tools << OaiToolT{
-			typ:      'function'
-			function: OaiToolFnT{
-				name:        t.name
-				description: t.description
-				parameters:  t.parameters
-			}
-		}
-	}
-
+	tools := build_tools_array(req.tools)
 	return OaiRequestT{
 		model:       req.model
 		messages:    msgs
@@ -133,6 +137,21 @@ fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
 		max_tokens:  req.max_tokens
 		stream:      false
 	}
+}
+
+fn build_tools_array(tools []ToolDef) []OaiToolT {
+	mut out := []OaiToolT{cap: tools.len}
+	for t in tools {
+		out << OaiToolT{
+			typ:      'function'
+			function: OaiToolFnT{
+				name:        t.name
+				description: t.description
+				parameters:  RawJson{t.parameters}
+			}
+		}
+	}
+	return out
 }
 
 fn parse_finish_reason(s string) FinishReason {
@@ -215,18 +234,7 @@ fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT 
 		}
 	}
 
-	mut tools := []OaiToolT{cap: req.tools.len}
-	for t in req.tools {
-		tools << OaiToolT{
-			typ:      'function'
-			function: OaiToolFnT{
-				name:        t.name
-				description: t.description
-				parameters:  t.parameters
-			}
-		}
-	}
-
+	tools := build_tools_array(req.tools)
 	return OaiRequestT{
 		model:       req.model
 		messages:    msgs
