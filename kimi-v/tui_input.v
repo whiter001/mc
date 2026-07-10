@@ -26,35 +26,11 @@
 //
 // The input box is multi-line: Shift+Enter or literal newlines (we treat
 // Ctrl-J as submit, raw \n from paste also submits).
-
-// tui_input.v — keyboard handling for the input box.
 //
-// We do NOT use any heavyweight input library. In raw mode stdin delivers
-// one byte at a time; we accumulate bytes into a buffer and parse special
-// sequences (escape codes for arrow keys, ctrl-letter combos, etc.).
-//
-// Supported key bindings:
-//
-//   printable characters          insert at cursor
-//   Enter                         submit input
-//   Ctrl-J                        also submit (alternative to Enter)
-//   Backspace / Ctrl-H            delete char before cursor
-//   Delete                        delete char at cursor
-//   Ctrl-A / Home                 cursor to start of line
-//   Ctrl-E / End                  cursor to end of line
-//   Ctrl-B / Left arrow            cursor one char left
-//   Ctrl-F / Right arrow           cursor one char right
-//   Ctrl-N / Down arrow            history next
-//   Ctrl-P / Up arrow              history prev
-//   Ctrl-K                        kill to end of line
-//   Ctrl-U                        kill to start of line
-//   Ctrl-W                        kill previous word
-//   Ctrl-C                        signal interrupt (handled by main loop)
-//   Ctrl-L                        clear screen (handled by render loop)
-//   Esc, Esc                      exit TUI
-//
-// The input box is multi-line: Shift+Enter or literal newlines (we treat
-// Ctrl-J as submit, raw \n from paste also submits).
+// All cursor movement and edit operations walk by Unicode codepoint, not
+// by byte — so multi-byte characters (CJK, emoji, accented Latin) are
+// deleted and navigated as a single unit. See prev_codepoint_start and
+// codepoint_len below.
 
 module main
 
@@ -315,6 +291,40 @@ pub fn new_input_buf() InputBuf {
 	}
 }
 
+// prev_codepoint_start returns the byte offset of the codepoint ending at
+// (or containing) `pos` — i.e. the boundary we land on when stepping one
+// character to the left. Walks back over UTF-8 continuation bytes
+// (0b10xxxxxx) to find the start of the codepoint. Returns 0 for pos <= 0.
+fn prev_codepoint_start(s string, pos int) int {
+	if pos <= 0 {
+		return 0
+	}
+	mut p := pos - 1
+	for p > 0 && (s[p] & 0xC0) == 0x80 {
+		p--
+	}
+	return p
+}
+
+// codepoint_len returns the byte length of the codepoint starting at `pos`.
+// For invalid lead bytes, returns 1 so callers always make progress.
+fn codepoint_len(s string, pos int) int {
+	if pos >= s.len {
+		return 0
+	}
+	b0 := s[pos]
+	if (b0 & 0x80) == 0 {
+		return 1
+	} else if (b0 & 0xE0) == 0xC0 {
+		return 2
+	} else if (b0 & 0xF0) == 0xE0 {
+		return 3
+	} else if (b0 & 0xF8) == 0xF0 {
+		return 4
+	}
+	return 1
+}
+
 // apply mutates the buffer according to a KeyEvent. Returns true if the
 // event was a Submit (Enter / Ctrl-J), so the caller knows to send the
 // buffer to the agent.
@@ -336,12 +346,12 @@ pub fn (mut b InputBuf) apply(ev KeyEvent) bool {
 		}
 		.left {
 			if b.cursor > 0 {
-				b.cursor--
+				b.cursor = prev_codepoint_start(b.text, b.cursor)
 			}
 		}
 		.right {
 			if b.cursor < b.text.len {
-				b.cursor++
+				b.cursor += codepoint_len(b.text, b.cursor)
 			}
 		}
 		.home {
@@ -392,36 +402,45 @@ fn (mut b InputBuf) insert(s string) {
 	b.cursor += s.len
 }
 
-// backspace removes the character before the cursor.
+// backspace removes the codepoint before the cursor (UTF-8 aware: deletes
+// all bytes of one character, not just one byte).
 fn (mut b InputBuf) backspace() {
 	if b.cursor == 0 {
 		return
 	}
-	b.text = b.text[..b.cursor - 1] + b.text[b.cursor..]
-	b.cursor--
+	start := prev_codepoint_start(b.text, b.cursor)
+	b.text = b.text[..start] + b.text[b.cursor..]
+	b.cursor = start
 }
 
-// delete_forward removes the character at the cursor.
+// delete_forward removes the codepoint at the cursor (UTF-8 aware).
 fn (mut b InputBuf) delete_forward() {
 	if b.cursor >= b.text.len {
 		return
 	}
-	b.text = b.text[..b.cursor] + b.text[b.cursor + 1..]
+	n := codepoint_len(b.text, b.cursor)
+	b.text = b.text[..b.cursor] + b.text[b.cursor + n..]
 }
 
-// kill_word removes the word before the cursor (Ctrl-W).
+// kill_word removes the word before the cursor (Ctrl-W). Walks by codepoint
+// so multi-byte characters are treated as single units.
 fn (mut b InputBuf) kill_word() {
 	if b.cursor == 0 {
 		return
 	}
 	mut end := b.cursor
-	// First skip trailing whitespace.
+	// First skip trailing whitespace (ASCII — byte-walk is fine).
 	for end > 0 && b.text[end - 1] in [` `, `\t`] {
 		end--
 	}
-	// Then skip word characters.
-	for end > 0 && b.text[end - 1] != ` ` && b.text[end - 1] != `\t` {
-		end--
+	// Then skip word codepoints backwards.
+	for end > 0 {
+		start := prev_codepoint_start(b.text, end)
+		cb := b.text[start]
+		if cb == ` ` || cb == `\t` {
+			break
+		}
+		end = start
 	}
 	b.text = b.text[..end] + b.text[b.cursor..]
 	b.cursor = end
