@@ -175,7 +175,7 @@ fn parse_finish_reason(s string) FinishReason {
 
 // ---- chat() implementation ----------------------------------------------
 
-pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent) ! {
+pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	// P0.6: real streaming for both http:// and https://. streaming.v's
 	// http_post_streaming() dispatches by URL scheme; HTTPS uses the
 	// OpenSSL binding (net.openssl) for true wire-level streaming.
@@ -189,7 +189,7 @@ pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent) ! {
 	}
 
 	if parsed_url.scheme == 'http' || parsed_url.scheme == 'https' {
-		chat_streaming_http(p, parsed_url, req, out) or {
+		chat_streaming_http(p, parsed_url, req, out, cancel_ch) or {
 			out <- ChatEvent{
 				kind: .err_kind
 				err:  'streaming failed: ${err.msg()}'
@@ -198,17 +198,21 @@ pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent) ! {
 	} else {
 		// Anything else (e.g. file://, ws://): fall back to non-streaming
 		// POST via V's stdlib HTTP client.
-		chat_buffered_https(p, req, out)
+		chat_buffered_https(p, req, out, cancel_ch)
 	}
 	// Sentinel: the consumer reads events until it sees this, then knows
 	// the stream is fully drained. Required because `finish` and `usage`
 	// arrive in separate chunks and the consumer must keep reading past
 	// `finish` to capture `usage`.
+	//
+	// Always sent, even after a cancel — the agent has spawned a
+	// drainer goroutine on cancel to absorb any buffered events; the
+	// sentinel lets the drainer exit cleanly when it then sees `close`.
 	out <- ChatEvent{ kind: .end_of_stream }
 	out.close()
 }
 
-fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, out chan ChatEvent) ! {
+fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	wire := build_streaming_request(p, req)
 	body := json.encode(wire)
 
@@ -216,7 +220,7 @@ fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, o
 		'Authorization': 'Bearer ${p.api_key}'
 	})!
 
-	read_sse_stream(mut reader, out)!
+	read_sse_stream(mut reader, out, cancel_ch)!
 }
 
 fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT {
@@ -255,7 +259,11 @@ fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT 
 	}
 }
 
-fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEvent) {
+fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEvent, cancel_ch chan int) {
+	// Non-streaming fallback: a single blocking HTTP call. The cancel
+	// channel isn't checked here because the fetch runs to completion
+	// (or fails); cancellation at this layer is best-effort.
+	_ = cancel_ch
 	wire := p.build_request(req)
 	body := json.encode(wire)
 

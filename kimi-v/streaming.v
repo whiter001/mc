@@ -418,10 +418,19 @@ fn new_sse_parser() SseParser {
 	}
 }
 
-fn (mut p SseParser) feed(event_data string, out chan ChatEvent) {
+fn (mut p SseParser) feed(event_data string, out chan ChatEvent, cancel_ch chan int) {
 	chunk := json.decode(OaiStreamChunk, event_data) or { return }
 
 	for choice in chunk.choices {
+		// Non-blocking cancel check before each choice's processing.
+		select {
+			_ := <-cancel_ch {
+				return
+			}
+			1 * time.millisecond {
+				// no cancel signal in time; fall through
+			}
+		}
 		// Thinking / reasoning delta (MiniMax-M3 with reasoning_split=true)
 		if choice.delta.reasoning_content.len > 0 {
 			out <- ChatEvent{
@@ -504,15 +513,27 @@ fn (mut p SseParser) feed(event_data string, out chan ChatEvent) {
 }
 
 // read_sse_stream drives a StreamReader, parses SSE events, and emits
-// ChatEvents into `out`. Returns when the connection closes or the stream
-// signals [DONE].
-fn read_sse_stream(mut reader StreamReader, out chan ChatEvent) ! {
+// ChatEvents into `out`. Returns when the connection closes, the stream
+// signals [DONE], or a value is received on `cancel_ch`.
+fn read_sse_stream(mut reader StreamReader, out chan ChatEvent, cancel_ch chan int) ! {
 	defer {
 		reader.close()
 	}
 
 	mut current_data := strings.Builder{}
 	for {
+		// Check for cancellation before each read. Non-blocking: if
+		// cancel_ch is empty, fall through to read_line. We poll rather
+		// than use a select on the socket because V's StreamReader API
+		// is blocking.
+		select {
+			_ := <-cancel_ch {
+				return
+			}
+			1 * time.millisecond {
+				// no cancel signal in time; fall through
+			}
+		}
 		line := reader.read_line() or { break }
 		if line.len == 0 {
 			// End of one SSE event — dispatch if there's data.
@@ -523,7 +544,7 @@ fn read_sse_stream(mut reader StreamReader, out chan ChatEvent) ! {
 					return
 				}
 				mut parser := new_sse_parser()
-				parser.feed(data, out)
+				parser.feed(data, out, cancel_ch)
 			}
 			continue
 		}

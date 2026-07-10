@@ -43,7 +43,7 @@
 | P0.5 流式 | ✅ | 真 SSE，HTTP/HTTPS 都走通 |
 | P0.6 Usage | ✅ | finish event 带 token |
 | P1 TUI | ✅ | alt-screen + raw mode + 30fps 全帧 |
-| **P1.5 TUI 打磨** | 🚧 2/4 | 已做：thinking 接线 + streaming delta 实时渲染；剩 Ctrl-C 取消 / 多行 / 历史 |
+| **P1.5 TUI 打磨** | 🚧 3/4 | 已做：thinking 接线 + streaming delta 实时渲染 + Ctrl-C 取消；剩 多行 / 历史 |
 | P2 web_fetch + 审批 | ❌ | |
 | P3 MCP + OAuth | ❌（v0.3 optional） | |
 | P4 ACP | ❌ | |
@@ -69,7 +69,7 @@
 | 任务 | 状态 | 关键点 |
 |---|---|---|
 | streaming delta 实时渲染 | ✅ (2026-07-11) | `StatusKind.delta` / `.thinking_delta` + 状态机切到 `state.streaming` / `state.streaming_thinking`，render 区分静态/流式；back-pressure 走 `status_ch` 容量 |
-| Ctrl-C 取消 | ⏳ | provider 加 cancellation flag，TCP read 走 ctx |
+| Ctrl-C 取消 | ✅ (2026-07-11) | `Provider.chat(req, out, cancel_ch)` 接口加 cancel_ch；`SseParser.feed` + `read_sse_stream` 在每行 read / 每个 send 前 select 一下；`Agent.cancel_ch` cap 1 one-shot；TUI 走 watcher 转发，cancel 时启 drainer goroutine 排空 event 通道让 provider 顺利 close；partial thinking + answer 都提 block 后插 `[cancelled]` system block |
 | 多行输入 | ⏳ | Shift+Enter / Ctrl-J 走 `KeyEvent.kind = .newline` |
 | 历史持久化 | ⏳ | TUI 退出写 `~/.local/share/kimi/history`，启动时载入 |
 | `/usage` `/compact` slash | ⏳ | `/usage` 调 `agent_loop` 的 usage 字段；`/compact` 走 compaction（见 Phase 1.5） |

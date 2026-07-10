@@ -18,13 +18,19 @@ pub mut:
 	on_delta    ?fn (string) // regular content
 	on_thinking ?fn (string) // reasoning/thinking content
 	on_tool     ?fn (string, string) // (name, args)
+	// Cancellation channel: caller sends to this to abort an in-flight
+	// step. The provider's read loop polls it; step() also selects on it
+	// so it can return promptly. The runner should reset the channel at
+	// the start of each turn (one-shot semantics, cap 1).
+	cancel_ch chan int
 }
 
 pub fn new_agent(provider Provider, system string) Agent {
 	return Agent{
-		provider: provider
-		system:   system
-		registry: new_registry()
+		provider:   provider
+		system:     system
+		registry:   new_registry()
+		cancel_ch:  chan int{cap: 1}
 	}
 }
 
@@ -64,7 +70,7 @@ pub fn (mut a Agent) step(sess Session) !StepResult {
 	req := a.build_request(sess)
 	ch := chan ChatEvent{cap: 32}
 
-	go a.provider.chat(req, ch)
+	go a.provider.chat(req, ch, a.cancel_ch)
 
 	mut result := StepResult{
 		tool_calls: []ToolCall{}
@@ -80,59 +86,78 @@ pub fn (mut a Agent) step(sess Session) !StepResult {
 	mut saw_finish := false
 
 	for {
-		ev := <-ch or { break }
-		match ev.kind {
-			.delta {
-				text_acc << ev.content
-				if cb := a.on_delta {
-					cb(ev.content)
-				}
-			}
-			.thinking {
-				if cb := a.on_thinking {
-					cb(ev.thinking)
-				}
-			}
-			.tool_call {
-				result.tool_calls << ToolCall{
-					id:        ev.id
-					name:      ev.name
-					arguments: ev.arguments
-				}
-				if cb := a.on_tool {
-					cb(ev.name, ev.arguments)
-				}
-			}
-			.usage {
-				usage_input = ev.input_tokens
-				usage_output = ev.output_tokens
-				if saw_finish {
-					result.finish = FinishEvent{
-						reason:        result.finish.reason
-						input_tokens:  usage_input
-						output_tokens: usage_output
+		select {
+			ev := <-ch {
+				match ev.kind {
+					.delta {
+						text_acc << ev.content
+						if cb := a.on_delta {
+							cb(ev.content)
+						}
+					}
+					.thinking {
+						if cb := a.on_thinking {
+							cb(ev.thinking)
+						}
+					}
+					.tool_call {
+						result.tool_calls << ToolCall{
+							id:        ev.id
+							name:      ev.name
+							arguments: ev.arguments
+						}
+						if cb := a.on_tool {
+							cb(ev.name, ev.arguments)
+						}
+					}
+					.usage {
+						usage_input = ev.input_tokens
+						usage_output = ev.output_tokens
+						if saw_finish {
+							result.finish = FinishEvent{
+								reason:        result.finish.reason
+								input_tokens:  usage_input
+								output_tokens: usage_output
+							}
+						}
+					}
+					.finish {
+						result.finish = FinishEvent{
+							reason:        ev.reason
+							input_tokens:  usage_input
+							output_tokens: usage_output
+						}
+						saw_finish = true
+					}
+					.end_of_stream {
+						result.text = text_acc.join('')
+						return result
+					}
+					.err_kind {
+						return error('provider error: ${ev.err}')
 					}
 				}
 			}
-			.finish {
-				result.finish = FinishEvent{
-					reason:        ev.reason
-					input_tokens:  usage_input
-					output_tokens: usage_output
-				}
-				saw_finish = true
-			}
-			.end_of_stream {
-				break
-			}
-			.err_kind {
-				return error('provider error: ${ev.err}')
+			<-a.cancel_ch {
+				// Cancellation requested. Spawn a drainer so the provider
+				// goroutine can keep writing to `ch` (and close it) without
+				// blocking on a full buffered channel — the agent has
+				// already stopped reading. The drainer exits when the
+				// channel is closed.
+				go fn (ch chan ChatEvent) {
+					for {
+						_ := <-ch or { return }
+					}
+				}(ch)
+				return error('cancelled')
 			}
 		}
 	}
-
-	result.text = text_acc.join('')
-	return result
+	// Unreachable in practice — the select always returns from one of
+	// its branches — but V requires a return here for control-flow
+	// analysis. If we ever land here, the channel was closed without a
+	// proper `.end_of_stream` sentinel; treat it as a clean end.
+	return error('stream ended without sentinel')
 }
 
 pub struct StepResult {

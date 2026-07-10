@@ -34,6 +34,7 @@ pub enum StatusKind {
 	tool_call
 	tool_result
 	finished
+	cancelled        // user interrupted the current turn
 	errored
 }
 
@@ -85,6 +86,10 @@ pub fn status_errored(err string) TuiStatus {
 	return TuiStatus{ kind: .errored, err: err }
 }
 
+pub fn status_cancelled() TuiStatus {
+	return TuiStatus{ kind: .cancelled }
+}
+
 // run_tui is the main interactive loop. Returns:
 //   - .clean_exit on user request (Esc Esc or /exit)
 //   - .fallback_to_stdout if TUI can't initialize (non-TTY)
@@ -99,9 +104,12 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	key_ch := chan KeyEvent{cap: 16}
 	submit_ch := chan SubmitMsg{cap: 4}
 	status_ch := chan TuiStatus{cap: 32}
+	// Buffered cap 1 so the main loop can drop a signal non-blockingly;
+	// one in-flight cancel at a time is enough.
+	cancel_request_ch := chan int{cap: 1}
 
 	spawn key_reader_loop(key_ch)
-	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch)
+	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch, cancel_request_ch)
 
 	state.should_exit = false
 	state.should_interrupt = false
@@ -133,6 +141,20 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 					drain_keys = false
 				}
 			}
+		}
+
+		// Forward pending interrupt request to the agent runner. We
+		// use a non-blocking send so a duplicate Ctrl-C while we're
+		// already cancelling doesn't pile up. Only forward if a turn
+		// is actually in progress; an idle-time Ctrl-C would otherwise
+		// consume the next turn's signal.
+		if state.should_interrupt && state.status != 'idle' {
+			select {
+				cancel_request_ch <- 1 {}
+				else {}
+			}
+			state.should_interrupt = false
+			state.status = 'cancelling...'
 		}
 
 		now_ms := time.now().unix_milli()
@@ -169,7 +191,7 @@ fn key_reader_loop(key_ch chan KeyEvent) {
 
 // agent_runner_loop consumes SubmitMsg and runs the agent, pushing status
 // updates as it goes.
-fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus) {
+fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int) {
 	mut agent := new_agent(provider, cfg.system_prompt)
 	agent.max_turns = cfg.max_turns
 	agent.registry = default_registry(cfg.cwd)
@@ -187,14 +209,52 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 			status_ch <- status_thinking_delta(chunk)
 		}
 
+		// Reset cancel channel for this turn (one-shot semantics, cap 1).
+		agent.cancel_ch = chan int{cap: 1}
+
+		// Spawn a watcher goroutine that forwards Ctrl-C requests from
+		// the main loop to the agent's cancel channel. The watcher exits
+		// when the run finishes (we signal via watcher_exit).
+		watcher_exit := chan int{cap: 1}
+		spawn fn (agent &Agent, cancel_request_ch chan int, watcher_exit chan int) {
+			for {
+				// Drain one of the two channels each iteration. Whichever
+				// has a value first wins. We avoid select-with-two-chan-
+				// receives because V's parser is unreliable for that shape
+				// inside spawn closures.
+				select {
+					_ := <-cancel_request_ch {
+						// Forward: signal the agent to abort. The agent's
+						// step() selects on this channel and returns
+						// error('cancelled') promptly.
+						agent.cancel_ch <- 1 or {}
+					}
+					1 * time.millisecond {
+						// No cancel request this tick; check for exit.
+					}
+				}
+				_ = <-watcher_exit or { continue }
+				return
+			}
+		}(&agent, cancel_request_ch, watcher_exit)
+
 		sess.append_user(msg.prompt)
 		status_ch <- status_started()
 
 		res := agent.run(mut sess) or {
-			status_ch <- status_errored(err.msg())
+			// Tell the watcher to stop, then translate the error into a
+			// user-friendly status. Cancel is a user-initiated interrupt,
+			// not a real error.
+			watcher_exit <- 1
+			if err.msg() == 'cancelled' {
+				status_ch <- status_cancelled()
+			} else {
+				status_ch <- status_errored(err.msg())
+			}
 			continue
 		}
 
+		watcher_exit <- 1
 		// Signal "stream done" — the consumer promotes whatever has
 		// accumulated in state.streaming / state.streaming_thinking into
 		// permanent blocks.
@@ -271,6 +331,31 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 			state.blocks << Block{
 				kind: .system
 				text: 'error: ${s.err}'
+			}
+			state.status = 'idle'
+		}
+		.cancelled {
+			// Promote any partial streamed content into permanent blocks
+			// before clearing, so the user can see what was produced
+			// before the interrupt. Same logic as .finished.
+			if state.streaming_thinking.len > 0 {
+				state.blocks << Block{
+					kind: .thinking
+					text: state.streaming_thinking
+				}
+			}
+			if state.streaming.len > 0 {
+				state.blocks << Block{
+					kind: .assistant
+					text: state.streaming
+				}
+			}
+			state.streaming = ''
+			state.streaming_thinking = ''
+			state.streaming_done = true
+			state.blocks << Block{
+				kind: .system
+				text: '[cancelled]'
 			}
 			state.status = 'idle'
 		}
