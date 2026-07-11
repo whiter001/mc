@@ -117,6 +117,12 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	// before the user answers the first one.
 	approval_ch := chan ApprovalRequest{cap: 4}
 	decision_ch := chan ApprovalDecision{cap: 1}
+	// Steer flow: while the agent is streaming, the user can press
+	// Ctrl-S to inject the current input box contents as a new user
+	// message. The agent loop's step() selects on this channel and
+	// returns when a steer arrives so the loop can call step() again.
+	// cap 4 so multiple typed-and-entered steers can queue.
+	steer_ch := chan string{cap: 4}
 	// Shutdown channel: signal handlers (SIGHUP / SIGTERM) push 1 here;
 	// the main loop picks it up on its next iteration and unwinds.
 	shutdown_ch := chan int{cap: 1}
@@ -124,7 +130,7 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 
 	spawn key_reader_loop(key_ch)
 	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch, cancel_request_ch,
-		approval_ch, decision_ch)
+		approval_ch, decision_ch, steer_ch)
 
 	state.should_exit = false
 	state.should_interrupt = false
@@ -156,7 +162,8 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 		for drain_keys {
 			select {
 				ev := <-key_ch {
-					handle_key(ev, mut state, mut ib, submit_ch, mut cfg, decision_ch)
+					handle_key(ev, mut state, mut ib, submit_ch, mut cfg, decision_ch,
+						steer_ch)
 				}
 				1 * time.millisecond {
 					drain_keys = false
@@ -232,7 +239,7 @@ fn key_reader_loop(key_ch chan KeyEvent) {
 
 // agent_runner_loop consumes SubmitMsg and runs the agent, pushing status
 // updates as it goes.
-fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision) {
+fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision, steer_ch chan string) {
 	mut agent := new_agent(provider, cfg.system_prompt)
 	agent.max_turns = cfg.max_turns
 	agent.registry = default_registry(cfg.cwd)
@@ -247,6 +254,11 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 	agent.approved_tools = cfg.approved_tools
 	// yolo propagates too; toggled at runtime via /yolo slash.
 	agent.yolo = cfg.yolo
+	// Steer channel: the TUI pushes the user's current input box
+	// contents here during a streaming turn. The agent's step() selects
+	// on it and returns so the main loop can call step() again with
+	// the appended user message.
+	agent.steer_ch = steer_ch
 	// Wire up the TUI-owned approval channels. The agent blocks on
 	// decision_ch when it hits a risky tool; the TUI main loop pumps
 	// the request through to a modal and feeds the answer back here.
@@ -422,7 +434,7 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 // handle_key applies a KeyEvent to the input buffer or other state.
 // May push a SubmitMsg to submit_ch, run a shell command, or trigger
 // a slash command.
-fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision) {
+fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision, steer_ch chan string) {
 	// EOF from stdin: pipe broken, TTY disconnected. Trigger a clean
 	// shutdown so the user doesn't get stuck in raw mode.
 	if ev.kind == .stdin_eof {
@@ -482,6 +494,34 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 	if ev.kind == .interrupt {
 		state.should_interrupt = true
 		state.status = 'interrupt requested...'
+		return
+	}
+	// Ctrl-S during a streaming turn: inject the current input box
+	// contents as a new user message. The agent's step() returns when
+	// it sees the steer and the main loop calls step() again with the
+	// appended message. The input buffer is consumed but not cleared
+	// (we want the user to see what they just steered with). A no-op
+	// when the agent isn't running (Ctrl-S in idle state).
+	if ev.kind == .steer {
+		if state.status == 'idle' {
+			// No agent turn to steer. Treat as a hint.
+			state.status = 'idle (Ctrl-S: nothing to steer)'
+			return
+		}
+		prompt := ib.text.trim_space()
+		if prompt.len == 0 {
+			state.status = 'steer: empty input, ignored'
+			return
+		}
+		// Surface the steered message as a system block so the user can
+		// see what's being sent. Distinct from a `.user` block because
+		// it's mid-turn, not a fresh prompt.
+		state.blocks << Block{
+			kind: .system
+			text: '⤳ steer: ${prompt}'
+		}
+		steer_ch <- prompt or {}
+		state.status = 'steering...'
 		return
 	}
 	if ev.kind == .clear_screen {

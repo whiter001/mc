@@ -34,7 +34,7 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 		// compact()); we'd rather lose a turn than crash the loop.
 		a.compact(mut sess) or {}
 
-		step := a.step(sess)!
+		step := a.step(mut sess)!
 
 		// Persist the assistant turn (text + tool calls).
 		sess.append_assistant(step.text, step.tool_calls)

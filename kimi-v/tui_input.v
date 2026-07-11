@@ -54,6 +54,7 @@ pub const ctrl_k        = 11
 pub const ctrl_l        = 12
 pub const ctrl_n        = 14
 pub const ctrl_p        = 16
+pub const ctrl_s        = 19
 pub const ctrl_u        = 21
 pub const ctrl_w        = 23
 
@@ -85,6 +86,9 @@ pub enum KeyKind {
 	insert_newline  // Shift+Enter / Alt+Enter — insert literal \n into the buffer
 	submit_other    // Ctrl-J — alternative submit (same as Enter)
 	esc
+	steer           // Ctrl-S — inject the current input into a running turn
+	                // (the agent sees it at the next interruptible point,
+	                // without waiting for the current turn to finish)
 	stdin_eof       // sentinel pushed by the reader when stdin closes
 	                // (pipe broken, TTY disconnected, etc.). The TUI
 	                // main loop sees this and exits cleanly.
@@ -144,6 +148,9 @@ pub fn (mut r StdinReader) read_key() KeyEvent {
 		}
 		ctrl_l {
 			return KeyEvent{ kind: .clear_screen }
+		}
+		ctrl_s {
+			return KeyEvent{ kind: .steer }
 		}
 		ctrl_d {
 			// Ctrl-D on empty input = EOF; we treat it as interrupt to be safe.

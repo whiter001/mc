@@ -273,3 +273,24 @@ fn test_apply_insert_then_backspace_round_trip() {
 	assert b.text == ''
 	assert b.cursor == 0
 }
+
+// ---------- Ctrl-S / steer (Phase 1.5) -----------------------------------
+
+fn test_ctrl_s_constant_matches_ascii() {
+	// ctrl_s must be 0x13 (19) so a raw terminal byte decodes to the
+	// right key. If we ever change the wiring (e.g. switch to a CSI
+	// sequence), this guard catches it.
+	assert ctrl_s == 19
+}
+
+fn test_steer_kind_does_not_consume_input() {
+	// The .steer key is a SIGNAL, not an edit. It must not modify the
+	// input buffer (the actual apppending happens server-side in the
+	// TUI's handle_key, not in InputBuf.apply).
+	mut b := new_input_buf()
+	b.insert('try grep in src/ instead')
+	b.apply(KeyEvent{ kind: .steer })
+	assert b.text == 'try grep in src/ instead'
+	assert b.cursor == b.text.len
+}
+

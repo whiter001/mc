@@ -27,6 +27,15 @@ pub mut:
 	// so it can return promptly. The runner should reset the channel at
 	// the start of each turn (one-shot semantics, cap 1).
 	cancel_ch chan int
+	// Steer channel: the TUI sends the user's current input box contents
+	// here during a streaming turn. step() selects on it alongside the
+	// chunk channel; when a steer message arrives, it's appended to the
+	// session as a new user message and step() returns so the agent
+	// loop can call step() again on the updated session. The user
+	// doesn't have to interrupt + retype — they can redirect the agent
+	// mid-turn. cap 4 so multiple keystrokes can queue if the agent is
+	// busy with tool execution.
+	steer_ch chan string
 	// Compaction config. context_window = model's max input tokens;
 	// compact_threshold = fraction above which we trigger compaction.
 	// Defaults: 128k window, 0.6 threshold (self-use aggressive).
@@ -61,6 +70,7 @@ pub fn new_agent(provider Provider, system string) Agent {
 		system:           system
 		registry:         new_registry()
 		cancel_ch:        chan int{cap: 1}
+		steer_ch:         chan string{cap: 4}
 		context_window:   default_context_window
 		compact_threshold: default_compact_threshold
 		approval_ch:      chan ApprovalRequest{cap: 4}
@@ -103,7 +113,13 @@ pub fn (a Agent) build_request(sess Session) ChatRequest {
 // The channel is closed by the provider goroutine (it sends a
 // `.end_of_stream` sentinel and then closes). We keep reading past
 // `.finish` to capture the trailing `.usage` chunk.
-pub fn (mut a Agent) step(sess Session) !StepResult {
+//
+// During a streaming turn the user can press Ctrl-S to inject a new
+// user message ("steer"). We select on a.steer_ch alongside the chunk
+// channel; on a steer we append it to `sess` and return immediately
+// so the main loop can call step() again with the updated history.
+// cap 4 on the channel lets multiple steers queue during tool exec.
+pub fn (mut a Agent) step(mut sess Session) !StepResult {
 	req := a.build_request(sess)
 	ch := chan ChatEvent{cap: 32}
 
@@ -174,6 +190,19 @@ pub fn (mut a Agent) step(sess Session) !StepResult {
 						return error('provider error: ${ev.err}')
 					}
 				}
+			}
+			steer := <-a.steer_ch {
+				// Mid-turn user intervention. Append the new user
+				// message to the session and return whatever we've
+				// accumulated so far. The main loop will call step()
+				// again; the next LLM call will see the steered
+				// message in its history. The model will likely
+				// abandon the current response (we don't surface a
+				// "the user interrupted you" prefix; the model
+				// notices the new user message on its own).
+				sess.append_user(steer)
+				result.text = text_acc.join('')
+				return result
 			}
 			<-a.cancel_ch {
 				// Cancellation requested. Spawn a drainer so the provider
