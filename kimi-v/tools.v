@@ -117,8 +117,19 @@ pub fn (t WriteFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 		}
 	}
 
+	// Sandbox: refuse paths that resolve outside the tool's cwd.
+	// We use the tool's configured cwd, not ctx.cwd — the tool was
+	// constructed with its own sandbox root, which is what main/TUI
+	// passes in from the user's session directory.
+	safe_path := resolve_within(t.cwd, path) or {
+		return ToolResult{
+			content:  err.msg()
+			is_error: true
+		}
+	}
+
 	// Create parent directories.
-	parent := os.dir(path)
+	parent := os.dir(safe_path)
 	if parent.len > 0 && !os.is_dir(parent) {
 		os.mkdir_all(parent) or {
 			return ToolResult{
@@ -128,14 +139,14 @@ pub fn (t WriteFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 		}
 	}
 
-	os.write_file(path, content) or {
+	os.write_file(safe_path, content) or {
 		return ToolResult{
 			content:  'write failed: ${err.msg()}'
 			is_error: true
 		}
 	}
 	return ToolResult{
-		content: 'wrote ${content.len} bytes to ${path}'
+		content: 'wrote ${content.len} bytes to ${safe_path}'
 	}
 }
 
@@ -186,7 +197,15 @@ pub fn (t EditFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 		}
 	}
 
-	content := os.read_file(path) or {
+	// Sandbox: refuse paths that resolve outside the tool's cwd.
+	safe_path := resolve_within(t.cwd, path) or {
+		return ToolResult{
+			content:  err.msg()
+			is_error: true
+		}
+	}
+
+	content := os.read_file(safe_path) or {
 		return ToolResult{
 			content:  'read failed: ${err.msg()}'
 			is_error: true
@@ -208,14 +227,14 @@ pub fn (t EditFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	}
 
 	new_content := content.replace(old_text, new_text)
-	os.write_file(path, new_content) or {
+	os.write_file(safe_path, new_content) or {
 		return ToolResult{
 			content:  'write failed: ${err.msg()}'
 			is_error: true
 		}
 	}
 	return ToolResult{
-		content: 'edited ${path} (1 replacement)'
+		content: 'edited ${safe_path} (1 replacement)'
 	}
 }
 

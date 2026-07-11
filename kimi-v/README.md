@@ -6,7 +6,7 @@
 
 ---
 
-## 当前状态：**P0 + P0.5 + P0.6 + P1 跑通** ✅
+## 当前状态：**P0 + P0.5 + P0.6 + P1 + P1.5 + P2 跑通** ✅
 
 - ✅ **`v .` 0 错误编译**
 - ✅ **二进制 1.8 MB**（`v -prod`）
@@ -16,19 +16,21 @@
 - ✅ **工具调用增量累积**（tool_call arguments 跨 chunk 拼接）
 - ✅ **Usage 透出** — finish event 现在带 `input_tokens` / `output_tokens`
 - ✅ **完整 TOML 解析** — `vlib/toml` 模块；user/project/env/CLI 四层合并
-- ✅ **内置工具**：`read_file` / `write_file` / `edit_file` / `bash` / `glob` / `grep`
+- ✅ **内置工具**：`read_file` / `write_file` / `edit_file` / `bash` / `glob` / `grep` / `web_fetch`
 - ✅ **OpenAI 兼容 provider**（Kimi、OpenAI、DeepSeek、OpenRouter 通用）
 - ✅ **多层 config**（CLI > env > project > user > default）
 - ✅ **跨平台路径**（XDG / macOS / Windows）
 - ✅ **Session 持久化**（写 TOML）
 - ✅ **P1 TUI**：alt-screen + raw mode + 30fps 全帧重绘
-- ✅ **Slash 命令**：`/help` `/clear` `/login` `/model` `/tokens` `/exit`
+- ✅ **P1.5**：流式 token 实时渲染 / Ctrl-C 中断 / 多行输入 / 历史持久化 / **context 压缩（60% 触发）**
+- ✅ **P2 审批**：`bash` / `write_file` / `edit_file` / `web_fetch` 走 TUI 模态 y/n
+- ✅ **P2 配置化审批**：`risky_tools` via `config.toml` 或 `KIMI_RISKY_TOOLS`
+- ✅ **P2 sandbox**：`write_file` / `edit_file` 拒绝 `..` 逃逸到 cwd 外
+- ✅ **Slash 命令**：`/help` `/clear` `/login` `/model` `/tokens` `/usage` `/compact` `/exit`
 - ✅ **键盘**：字符输入 / Enter / Backspace / Ctrl-A / Ctrl-E / Ctrl-U / Ctrl-W / Esc Esc 退出
 
 ### 还没做（按 PLAN.md 阶段）
 
-- [ ] **P1.5**：streaming delta 实时渲染到 TUI / Ctrl-C 中断 agent goroutine / multiline 输入 / 历史持久化
-- [ ] P2 web_fetch + 安全审批
 - [ ] P3 MCP client + OAuth
 - [ ] P4 ACP server
 - [ ] P5 子 agent + hooks + skills
@@ -121,7 +123,8 @@ KIMI_MODEL=moonshot-v1-8k \
 | `/clear` | 清空会话 |
 | `/login` | 提示去另一个 shell 跑 `kimi login`（TUI 暂不读密码） |
 | `/model NAME` | 切换模型 |
-| `/tokens` | 显示当前 session 累计 token 用量 |
+| `/tokens` / `/usage` | 显示当前 session 累计 token 用量 |
+| `/compact` | 提示下次 turn 触发 context 压缩（自动 60% 触发） |
 | `/exit` / `/quit` | 离开 TUI |
 
 Flags：
@@ -137,6 +140,28 @@ Flags：
 | `--max-turns` | `32` |
 | `--max-tokens` | `4096` |
 | `--log-level` | env: `KIMI_LOG_LEVEL` |
+
+### 审批 & sandbox
+
+默认 `bash` / `write_file` / `edit_file` / `web_fetch` 跑前会弹模态要 y/n（`read_file` /
+`glob` / `grep` 走 auto-allow）。要自定义把列表写到 `config.toml`：
+
+```toml
+risky_tools = ["bash"]              # 只要 bash 问；其它写操作放行
+# risky_tools = []                  # 全放行（不推荐）
+# risky_tools = ["bash", "web_fetch"]  # 只问这两个
+```
+
+或者环境变量（逗号分隔，CI / 临时实验方便）：
+
+```sh
+KIMI_RISKY_TOOLS="bash,web_fetch" ./bin/kimi
+```
+
+`write_file` / `edit_file` 还会被 sandbox 拦在 session cwd 之外 —— `..` 逃逸、
+绝对路径指别处、共享前缀的兄弟目录（`/sandbox-evil` vs `/sandbox`）一律拒绝，
+错误信息直接告诉模型为什么。`bash` 暂不做 sandbox（解析 shell 成本太高，
+自用靠审批 + 自己眼睛看）。
 
 ### 流式 vs HTTPS 说明
 
@@ -168,17 +193,22 @@ kimi-v/
 ├── agent_loop.v         # think-act-observe 主循环
 ├── agent_tool_registry.v
 │
-├── tools.v              # 6 个内置工具 + 手写 match_glob
+├── tools.v              # 7 个内置工具 + 手写 match_glob
+├── tools_web_fetch.v    # web_fetch 实现（HTTP + HTML→text）
 │
 ├── config_loader.v      # 多层 config
 ├── config_paths.v
 │
 ├── session_store.v
 │
+├── sandbox.v            # write_file/edit_file cwd 边界检查
+├── approval.v           # risky-tool 审批流（pure helpers + channel struct）
+├── compaction.v         # context-window 压缩（60% 触发）
+│
 ├── tui.v                # P1 TUI: ANSI helpers, raw mode, alt screen
 ├── tui_input.v          # StdinReader (fd_read), KeyEvent, InputBuf + history
 ├── tui_render.v         # 全帧渲染: header / status / blocks / separator / input
-├── tui_loop.v           # main loop: key/status channels, slash commands
+├── tui_loop.v           # main loop: key/status/approval channels, slash commands
 │
 ├── util_log.v
 └── util_jsonrpc.v       # JSON-RPC（MCP/ACP 用，P3/P4）
@@ -261,14 +291,13 @@ Provider.chat()
 
 ## 已知的限制
 
-- **P1 streaming delta 未实时渲染到 TUI**：当前 agent runner 只在 turn 结束时 push `status_finished`，中间 chunk 没转发到 `state.streaming`。要等 P1.5 加 channel relay
-- **P1 Ctrl-C 不中断 agent goroutine**：interrupt 标志位已设但 provider 的 HTTP 调用没收 SIGINT；要等 P1.5 plumb cancellation
-- **P1 multiline 输入未启用**：Shift+Enter / Ctrl-J 当前都当 Enter 处理
-- **P1 历史不持久化**：重启 TUI 后 history 是空的
+- **Bash 不做 sandbox**：解析 shell 太复杂，靠审批 + 用户眼睛盯。`write_file` / `edit_file` 已做路径边界
+- **审批每次都问**：还没实现"approve for the rest of the session"（`ApprovalDecision.remember` 字段已预留）
 - **Grep 是字串匹配**：没接正则（`name.matches(rx)` 在 V 0.5 里不可用，手写 glob 已经替换）
 - **Glob 手写**：`*` `?` 支持，复杂模式不支持
 - **TLS 证书验证**：默认接受所有证书（自签名友好），生产用法需要传 `SSLConnectConfig{ verify: '/path/to/ca.pem' }`
 - **Agent 的 channel lifecycle**：provider goroutine 在写完所有事件后 close channel；Agent.step 读 `.end_of_stream` sentinel 后退出
+- **V test 框架对 spawn goroutine 不友好**：跑完测试后 spawned goroutine 不退出，整个 process 会 hang。channel-based 的端到端测试只能手动验；policy / helper 走单测。
 
 ---
 

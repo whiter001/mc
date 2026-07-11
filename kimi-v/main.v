@@ -220,6 +220,11 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	mut a := new_agent(provider, system)
 	a.max_turns = cfg.max_turns
 	a.registry = default_registry(cfg.cwd)
+	// Apply user-configured risky-tools list (config.toml /
+	// KIMI_RISKY_TOOLS). Empty means "use the built-in default".
+	if cfg.risky_tools.len > 0 {
+		a.risky_tools = cfg.risky_tools
+	}
 
 	a.on_delta = fn [log] (chunk string) {
 		print(chunk)

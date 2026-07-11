@@ -28,6 +28,13 @@ pub mut:
 	max_turns  int = 32
 	max_tokens int = 4096
 
+	// ---- Permissions ----
+	// Names of tools that always require user approval before running.
+	// If empty, falls back to `default_risky_tools` from approval.v.
+	// Populated from config.toml (`risky_tools = [...]`) and the
+	// `KIMI_RISKY_TOOLS` env var (comma-separated).
+	risky_tools []string
+
 	// ---- Misc ----
 	cwd string
 }
@@ -68,7 +75,7 @@ pub fn load_config(cli_overrides Config) !Config {
 	return cfg
 }
 
-fn apply_toml(mut cfg Config, raw string) {
+pub fn apply_toml(mut cfg Config, raw string) {
 	// Parse the TOML document. `toml.parse_text` returns Doc; we use
 	// `.value(key)` for each known field. Missing keys yield `Null` and
 	// are skipped.
@@ -92,9 +99,25 @@ fn apply_toml(mut cfg Config, raw string) {
 	if v7 !is toml.Null { cfg.max_turns = v7.int() }
 	v8 := doc.value('max_tokens')
 	if v8 !is toml.Null { cfg.max_tokens = v8.int() }
+	v9 := doc.value('risky_tools')
+	if v9 !is toml.Null {
+		// TOML arrays land as []toml.Any; coerce each element to a string.
+		// Non-string elements (e.g. numbers) fall back to `.str()` so we
+		// still produce something usable instead of silently dropping the
+		// whole list.
+		arr := v9.array()
+		mut risky := []string{cap: arr.len}
+		for item in arr {
+			s := item.string()
+			if s.len > 0 {
+				risky << s
+			}
+		}
+		cfg.risky_tools = risky
+	}
 }
 
-fn apply_env(mut cfg Config) {
+pub fn apply_env(mut cfg Config) {
 	v := os.getenv('KIMI_PROVIDER')
 	if v.len > 0 { cfg.provider = v }
 	v2 := os.getenv('KIMI_API_BASE')
@@ -107,6 +130,18 @@ fn apply_env(mut cfg Config) {
 	if v5.len > 0 { cfg.system_prompt = v5 }
 	v6 := os.getenv('KIMI_LOG_LEVEL')
 	if v6.len > 0 { cfg.log_level = v6 }
+	v7 := os.getenv('KIMI_RISKY_TOOLS')
+	if v7.len > 0 {
+		// Comma-separated; trim whitespace and drop empties.
+		mut risky := []string{}
+		for raw in v7.split(',') {
+			s := raw.trim_space()
+			if s.len > 0 {
+				risky << s
+			}
+		}
+		cfg.risky_tools = risky
+	}
 }
 
 fn apply_cli(mut cfg Config, cli Config) {

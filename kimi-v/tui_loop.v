@@ -217,6 +217,11 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 	mut agent := new_agent(provider, cfg.system_prompt)
 	agent.max_turns = cfg.max_turns
 	agent.registry = default_registry(cfg.cwd)
+	// Apply user-configured risky-tools list (config.toml /
+	// KIMI_RISKY_TOOLS). Empty means "use the built-in default".
+	if cfg.risky_tools.len > 0 {
+		agent.risky_tools = cfg.risky_tools
+	}
 	// Wire up the TUI-owned approval channels. The agent blocks on
 	// decision_ch when it hits a risky tool; the TUI main loop pumps
 	// the request through to a modal and feeds the answer back here.
