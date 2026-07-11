@@ -161,6 +161,10 @@ pub mut:
 	should_exit bool
 	// Whether the user requested interrupt of the current turn.
 	should_interrupt bool
+	// Pending approval request. When set, the render loop draws a modal
+	// overlay and the key loop routes y/n to the agent's decision
+	// channel instead of the input buffer.
+	pending_approval ?ApprovalRequest
 }
 
 // Block kinds for the conversation display.

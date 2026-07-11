@@ -110,9 +110,16 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	// Buffered cap 1 so the main loop can drop a signal non-blockingly;
 	// one in-flight cancel at a time is enough.
 	cancel_request_ch := chan int{cap: 1}
+	// Approval flow: the agent sends an ApprovalRequest on approval_ch
+	// when it hits a risky tool, then blocks waiting for the decision.
+	// cap 4 because multiple tool calls in one step can all queue up
+	// before the user answers the first one.
+	approval_ch := chan ApprovalRequest{cap: 4}
+	decision_ch := chan ApprovalDecision{cap: 1}
 
 	spawn key_reader_loop(key_ch)
-	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch, cancel_request_ch)
+	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch, cancel_request_ch,
+		approval_ch, decision_ch)
 
 	state.should_exit = false
 	state.should_interrupt = false
@@ -128,6 +135,12 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 				s := <-status_ch {
 					handle_status(s, mut state)
 				}
+				req := <-approval_ch {
+					// Risky tool call pending — render the modal and wait
+					// for the user's y/n.
+					state.pending_approval = req
+					state.status = 'awaiting approval: ${req.tool_name}'
+				}
 				1 * time.millisecond {
 					drain_status = false
 				}
@@ -138,7 +151,7 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 		for drain_keys {
 			select {
 				ev := <-key_ch {
-					handle_key(ev, mut state, mut ib, submit_ch, mut cfg)
+					handle_key(ev, mut state, mut ib, submit_ch, mut cfg, decision_ch)
 				}
 				1 * time.millisecond {
 					drain_keys = false
@@ -200,10 +213,15 @@ fn key_reader_loop(key_ch chan KeyEvent) {
 
 // agent_runner_loop consumes SubmitMsg and runs the agent, pushing status
 // updates as it goes.
-fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int) {
+fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision) {
 	mut agent := new_agent(provider, cfg.system_prompt)
 	agent.max_turns = cfg.max_turns
 	agent.registry = default_registry(cfg.cwd)
+	// Wire up the TUI-owned approval channels. The agent blocks on
+	// decision_ch when it hits a risky tool; the TUI main loop pumps
+	// the request through to a modal and feeds the answer back here.
+	agent.approval_ch = approval_ch
+	agent.decision_ch = decision_ch
 	mut sess := new_session(cfg.cwd)
 
 	for {
@@ -373,7 +391,38 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 
 // handle_key applies a KeyEvent to the input buffer or other state.
 // May push a SubmitMsg to submit_ch.
-fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config) {
+fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision) {
+	// If a risky tool is awaiting approval, route y/n to the decision
+	// channel and ignore everything else (modal is modal — user can't
+	// type in the input box while it's up).
+	if state.pending_approval != none {
+		if ev.kind == .char {
+			if ev.text == 'y' || ev.text == 'Y' {
+				req := state.pending_approval or { return }
+				decision_ch <- ApprovalDecision{ id: req.id, approved: true } or {}
+				state.pending_approval = none
+				state.status = 'running...'
+				return
+			}
+			if ev.text == 'n' || ev.text == 'N' {
+				req := state.pending_approval or { return }
+				decision_ch <- ApprovalDecision{ id: req.id, approved: false } or {}
+				state.pending_approval = none
+				state.status = 'denied'
+				return
+			}
+		}
+		if ev.kind == .esc {
+			// Esc inside the modal = deny (consistent with "Esc = cancel" elsewhere).
+			req := state.pending_approval or { return }
+			decision_ch <- ApprovalDecision{ id: req.id, approved: false } or {}
+			state.pending_approval = none
+			state.status = 'denied'
+			return
+		}
+		// Eat all other keys while the modal is up.
+		return
+	}
 	if ev.kind == .esc {
 		state.should_exit = true
 		return

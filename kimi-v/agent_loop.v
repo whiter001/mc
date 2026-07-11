@@ -68,6 +68,30 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 				sess.append_tool_result(call.id, call.name, 'unknown tool: ${call.name}')
 				continue
 			}
+
+			// Risky tools (bash, write_file, edit_file, web_fetch) require
+			// user approval before running. Send the request and block
+			// until the TUI replies. If the decision channel is closed
+			// (e.g. TUI exited mid-turn) treat as denied.
+			if needs_approval(call.name, a.risky_tools) {
+				a.next_approval_id++
+				a.approval_ch <- ApprovalRequest{
+					id:        a.next_approval_id
+					tool_name: call.name
+					args:      call.arguments
+				}
+				decision := <-a.decision_ch or {
+					ApprovalDecision{
+						id:       a.next_approval_id
+						approved: false
+					}
+				}
+				if !decision.approved {
+					sess.append_tool_result(call.id, call.name, '[user denied this action]')
+					continue
+				}
+			}
+
 			spawned++
 			go fn (call ToolCall, t Tool, ctx ToolContext, ch chan ToolExecResult) {
 				r := execute_tool(t, call.arguments, ctx)

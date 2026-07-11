@@ -97,7 +97,37 @@ fn render(s TuiState, ib InputBuf) string {
 	// prompt prefix, continuation lines are indented to align under it.
 	render_input(mut buf, ib)
 
+	// 6. Approval modal (drawn last so it sits on top of the input row).
+	if req := s.pending_approval {
+		render_approval_modal(mut buf, req, s.cols)
+	}
+
 	return buf.str()
+}
+
+// render_approval_modal draws a single-line "y/n" prompt anchored to the
+// bottom of the screen. We use a single bright row instead of a centered
+// box to keep the diff small; users on narrow terminals still see the
+// prompt and the tool name.
+fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, cols int) {
+	// Truncate the args display so a 4KB bash command doesn't flood the
+	// modal. 200 chars is enough to see what's about to run.
+	preview := if req.args.len > 200 { req.args[..200] + '...' } else { req.args }
+	// Move to the last line; clear it; write the prompt; show cursor.
+	buf.write_string(esc + '[${0};1H')
+	buf.write_string(esc + '[2K')
+	buf.write_string(esc_bg_blue)
+	buf.write_string(esc + '[97m') // bright white
+	buf.write_string('  ⚠ approve ${req.tool_name}? ')
+	buf.write_string(esc_reset)
+	buf.write_string(esc_bg_blue)
+	buf.write_string(esc_gray)
+	buf.write_string(preview.replace('\n', ' '))
+	buf.write_string('  ')
+	buf.write_string(esc + '[97m')
+	buf.write_string('[y]es  [n]o')
+	buf.write_string(esc_reset)
+	buf.write_string(cursor_show())
 }
 
 // input_line_count returns how many screen rows the input buffer will

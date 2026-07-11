@@ -32,6 +32,18 @@ pub mut:
 	// Defaults: 128k window, 0.6 threshold (self-use aggressive).
 	context_window    int = default_context_window
 	compact_threshold f32 = default_compact_threshold
+	// Approval flow: when a risky tool is called, the agent sends an
+	// ApprovalRequest on approval_ch and blocks on decision_ch waiting
+	// for the user's answer. The TUI owns the other ends.
+	approval_ch  chan ApprovalRequest
+	decision_ch  chan ApprovalDecision
+	// Tools that always require approval. Defaults to bash + write_file
+	// + edit_file + web_fetch. Configurable; the TUI sets this from its
+	// own config (which may overlay permissions.toml in a follow-up).
+	risky_tools []string = default_risky_tools
+	// Monotonic id for approval requests. Bumped per request so the TUI
+	// can match a response back to a request even if multiple are queued.
+	next_approval_id u64
 }
 
 pub fn new_agent(provider Provider, system string) Agent {
@@ -42,6 +54,9 @@ pub fn new_agent(provider Provider, system string) Agent {
 		cancel_ch:        chan int{cap: 1}
 		context_window:   default_context_window
 		compact_threshold: default_compact_threshold
+		approval_ch:      chan ApprovalRequest{cap: 4}
+		decision_ch:      chan ApprovalDecision{cap: 1}
+		risky_tools:      default_risky_tools.clone()
 	}
 }
 
