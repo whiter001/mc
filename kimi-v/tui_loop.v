@@ -244,6 +244,8 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 	// mutate cfg.approved_tools on 'a' and the agent sees it on the
 	// next tool call).
 	agent.approved_tools = cfg.approved_tools
+	// yolo propagates too; toggled at runtime via /yolo slash.
+	agent.yolo = cfg.yolo
 	// Wire up the TUI-owned approval channels. The agent blocks on
 	// decision_ch when it hits a risky tool; the TUI main loop pumps
 	// the request through to a modal and feeds the answer back here.
@@ -505,7 +507,7 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 		'help' {
 			state.blocks << Block{
 				kind: .system
-				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /exit        leave TUI'
+				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /exit        leave TUI'
 			}
 		}
 		'clear' {
@@ -561,6 +563,28 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 				text: 'compaction runs automatically at 60% of the context window. ' +
 					'current est tokens: ${est}.\n' +
 					'to trigger now, send any message — the next turn compacts if over threshold.'
+			}
+		}
+		'yolo', 'yes' {
+			// `/yolo [on|off]` toggles yolo mode. With no arg, flips the
+			// current state. With explicit `on`/`off`, forces the value.
+			// Mutates cfg.yolo in place; the agent_runner_loop already
+			// shares the reference so the next tool call sees the change.
+			mut target := !cfg.yolo
+			if parts.len >= 2 {
+				match parts[1] {
+					'on' { target = true }
+					'off' { target = false }
+					'true' { target = true }
+					'false' { target = false }
+					else {}
+				}
+			}
+			cfg.yolo = target
+			label := if cfg.yolo { 'on' } else { 'off' }
+			state.blocks << Block{
+				kind: .system
+				text: 'yolo mode: ${label} (tool approvals ${if cfg.yolo { "skipped" } else { "back on" }}; sensitive patterns still re-prompt)'
 			}
 		}
 		'exit', 'quit' {

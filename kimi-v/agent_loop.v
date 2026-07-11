@@ -70,14 +70,19 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 			}
 
 			// Risky tools (bash, write_file, edit_file, web_fetch) require
-			// user approval before running — UNLESS the user previously
-			// chose "always allow" for this tool in the current session
-			// AND the args don't trip a sensitive pattern (rm -rf, sudo,
-			// /etc/* writes, etc. still re-prompt). Send the request and
-			// block until the TUI replies. If the decision channel is
-			// closed (e.g. TUI exited mid-turn) treat as denied.
-			if needs_approval(call.name, a.risky_tools)
-				&& !should_skip_approval(call.name, call.arguments, a.approved_tools) {
+			// user approval before running — UNLESS:
+			//   1. yolo mode is on (skip everything; sensitive patterns
+			//      still re-prompt as a backstop), OR
+			//   2. the user previously chose "always allow" for this tool
+			//      in the current session (a / approved_tools), AND the
+			//      args don't trip a sensitive pattern (rm -rf, sudo,
+			//      /etc/* writes, etc. still re-prompt).
+			// Send the request and block until the TUI replies. If the
+			// decision channel is closed (e.g. TUI exited mid-turn)
+			// treat as denied.
+			skip_for_yolo := a.yolo && !is_sensitive(call.name, call.arguments)
+			skip_for_session := should_skip_approval(call.name, call.arguments, a.approved_tools)
+			if needs_approval(call.name, a.risky_tools) && !skip_for_yolo && !skip_for_session {
 				a.next_approval_id++
 				a.approval_ch <- ApprovalRequest{
 					id:        a.next_approval_id

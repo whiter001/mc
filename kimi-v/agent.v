@@ -46,6 +46,10 @@ pub mut:
 	// modal for trusted tools (e.g. "always allow read_file"). Sensitive
 	// patterns (rm -rf, sudo, /etc/*) still re-prompt regardless.
 	approved_tools []string
+	// YOLO mode: skip approval entirely for the rest of the session.
+	// Toggled at runtime via `/yolo` slash. Sensitive patterns still
+	// re-prompt as a backstop against the most obvious foot-guns.
+	yolo bool
 	// Monotonic id for approval requests. Bumped per request so the TUI
 	// can match a response back to a request even if multiple are queued.
 	next_approval_id u64
@@ -63,6 +67,7 @@ pub fn new_agent(provider Provider, system string) Agent {
 		decision_ch:      chan ApprovalDecision{cap: 1}
 		risky_tools:      default_risky_tools.clone()
 		approved_tools:   []string{}
+		yolo:             false
 	}
 }
 

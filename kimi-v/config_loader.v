@@ -39,6 +39,20 @@ pub mut:
 	// if it's in `risky_tools` AND not in `approved_tools` (and not
 	// matching a sensitive pattern). Session-only — never persisted.
 	approved_tools []string
+	// YOLO mode: skip approval entirely. Equivalent to "every tool is
+	// in approved_tools" but stronger — also bypasses the modal UI.
+	// Toggled at runtime via `/yolo` slash. Sensitive patterns are
+	// still honoured (rm -rf, sudo, /etc/* still re-prompt) so the
+	// deny-list provides a backstop against the most obvious foot-guns
+	// even in yolo mode. Initial value from `--yolo` CLI flag or
+	// `KIMI_YOLO=1` env var.
+	yolo bool
+
+	// Output format for `-p` mode. "text" (default) prints plain
+	// stdout; "stream-json" emits one JSON object per line (JSONL) so
+	// scripts / CI can parse the transcript. The CLI flag --output-format
+	// is the only legitimate source for this field.
+	output_format string
 
 	// ---- Misc ----
 	cwd string
@@ -146,6 +160,10 @@ pub fn apply_env(mut cfg Config) {
 			}
 		}
 		cfg.risky_tools = risky
+	}
+	v8 := os.getenv('KIMI_YOLO')
+	if v8.len > 0 && v8 in ['1', 'true', 'yes', 'on'] {
+		cfg.yolo = true
 	}
 }
 
