@@ -240,6 +240,10 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 	if cfg.risky_tools.len > 0 {
 		agent.risky_tools = cfg.risky_tools
 	}
+	// Share the session-wide approved_tools list (so the TUI can
+	// mutate cfg.approved_tools on 'a' and the agent sees it on the
+	// next tool call).
+	agent.approved_tools = cfg.approved_tools
 	// Wire up the TUI-owned approval channels. The agent blocks on
 	// decision_ch when it hits a risky tool; the TUI main loop pumps
 	// the request through to a modal and feeds the answer back here.
@@ -431,6 +435,21 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 				decision_ch <- ApprovalDecision{ id: req.id, approved: true } or {}
 				state.pending_approval = none
 				state.status = 'running...'
+				return
+			}
+			if ev.text == 'a' || ev.text == 'A' {
+				// "always for this session" — approve this call AND
+				// add the tool name to cfg.approved_tools so the agent
+				// short-circuits the modal for future calls. Sensitive
+				// patterns (rm -rf, sudo, etc.) still re-prompt because
+				// the agent checks those before consulting the allowlist.
+				req := state.pending_approval or { return }
+				decision_ch <- ApprovalDecision{ id: req.id, approved: true } or {}
+				if req.tool_name !in cfg.approved_tools {
+					cfg.approved_tools << req.tool_name
+				}
+				state.pending_approval = none
+				state.status = 'always-allow: ${req.tool_name}'
 				return
 			}
 			if ev.text == 'n' || ev.text == 'N' {

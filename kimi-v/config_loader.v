@@ -34,6 +34,11 @@ pub mut:
 	// Populated from config.toml (`risky_tools = [...]`) and the
 	// `KIMI_RISKY_TOOLS` env var (comma-separated).
 	risky_tools []string
+	// Names of tools the user has chosen "always allow" for in the
+	// current session. Combines with `risky_tools`: a tool is gated
+	// if it's in `risky_tools` AND not in `approved_tools` (and not
+	// matching a sensitive pattern). Session-only — never persisted.
+	approved_tools []string
 
 	// ---- Misc ----
 	cwd string

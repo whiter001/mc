@@ -225,6 +225,9 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	if cfg.risky_tools.len > 0 {
 		a.risky_tools = cfg.risky_tools
 	}
+	// approved_tools starts empty for a one-shot run — there's no
+	// "remember" UI in -p mode. The TUI mutates this in place.
+	a.approved_tools = cfg.approved_tools
 
 	a.on_delta = fn [log] (chunk string) {
 		print(chunk)

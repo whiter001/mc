@@ -125,7 +125,7 @@ fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, cols int)
 	buf.write_string(preview.replace('\n', ' '))
 	buf.write_string('  ')
 	buf.write_string(esc + '[97m')
-	buf.write_string('[y]es  [n]o')
+	buf.write_string('[y]es  [a]lways  [n]o')
 	buf.write_string(esc_reset)
 	buf.write_string(cursor_show())
 }

@@ -41,6 +41,11 @@ pub mut:
 	// + edit_file + web_fetch. Configurable; the TUI sets this from its
 	// own config (which may overlay permissions.toml in a follow-up).
 	risky_tools []string = default_risky_tools
+	// Tools the user has chosen "always allow" for in the current
+	// session. Combined with `risky_tools` to short-circuit the approval
+	// modal for trusted tools (e.g. "always allow read_file"). Sensitive
+	// patterns (rm -rf, sudo, /etc/*) still re-prompt regardless.
+	approved_tools []string
 	// Monotonic id for approval requests. Bumped per request so the TUI
 	// can match a response back to a request even if multiple are queued.
 	next_approval_id u64
@@ -57,6 +62,7 @@ pub fn new_agent(provider Provider, system string) Agent {
 		approval_ch:      chan ApprovalRequest{cap: 4}
 		decision_ch:      chan ApprovalDecision{cap: 1}
 		risky_tools:      default_risky_tools.clone()
+		approved_tools:   []string{}
 	}
 }
 
