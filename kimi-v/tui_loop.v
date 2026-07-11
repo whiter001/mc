@@ -116,6 +116,10 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	// before the user answers the first one.
 	approval_ch := chan ApprovalRequest{cap: 4}
 	decision_ch := chan ApprovalDecision{cap: 1}
+	// Shutdown channel: signal handlers (SIGHUP / SIGTERM) push 1 here;
+	// the main loop picks it up on its next iteration and unwinds.
+	shutdown_ch := chan int{cap: 1}
+	install_signal_handlers(shutdown_ch)
 
 	spawn key_reader_loop(key_ch)
 	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch, cancel_request_ch,
@@ -184,6 +188,15 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 			break
 		}
 
+		// Check for shutdown signal (SIGHUP / SIGTERM). Non-blocking
+		// drain so we don't pile up signals.
+		select {
+			_ := <-shutdown_ch {
+				state.should_exit = true
+			}
+			1 * time.millisecond {}
+		}
+
 		if state.status == 'idle' && state.streaming.len == 0 {
 			time.sleep(10 * time.millisecond)
 		}
@@ -200,12 +213,17 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 }
 
 // key_reader_loop pulls keys from stdin and pushes them onto key_ch.
+// On EOF (pipe broken, TTY disconnected) it pushes a `.stdin_eof`
+// sentinel so the main loop can exit cleanly. The channel is NOT closed
+// — closing it would let `<-key_ch` return zero values forever, and
+// KeyEvent's zero value (.none) is indistinguishable from a real
+// "unrecognized byte" event.
 fn key_reader_loop(key_ch chan KeyEvent) {
 	mut reader := new_stdin_reader()
 	for {
 		ev := reader.read_key()
 		key_ch <- ev
-		if ev.kind == .none {
+		if ev.kind == .stdin_eof {
 			break
 		}
 	}
@@ -397,6 +415,12 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 // handle_key applies a KeyEvent to the input buffer or other state.
 // May push a SubmitMsg to submit_ch.
 fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision) {
+	// EOF from stdin: pipe broken, TTY disconnected. Trigger a clean
+	// shutdown so the user doesn't get stuck in raw mode.
+	if ev.kind == .stdin_eof {
+		state.should_exit = true
+		return
+	}
 	// If a risky tool is awaiting approval, route y/n to the decision
 	// channel and ignore everything else (modal is modal — user can't
 	// type in the input box while it's up).

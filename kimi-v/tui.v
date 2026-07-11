@@ -217,10 +217,20 @@ pub fn enter_tui() bool {
 }
 
 // leave_tui restores the terminal. Always call this when leaving TUI mode.
+// Idempotent — safe to call from multiple paths because the underlying
+// `leave_raw_mode()` and the ANSI escape sequences are no-ops on a
+// already-restored terminal.
 pub fn leave_tui() {
 	write_stdout(cursor_show())
 	write_stdout(alt_screen_off())
 	leave_raw_mode()
+}
+
+// request_shutdown pushes a single byte into a channel; the TUI main loop
+// selects on it and exits cleanly. Use this from signal handlers instead
+// of calling os.exit() directly (which would skip leave_tui).
+pub fn request_shutdown(ch chan int) {
+	ch <- 1 or {}
 }
 
 fn clear() string {

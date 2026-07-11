@@ -85,13 +85,17 @@ pub enum KeyKind {
 	insert_newline  // Shift+Enter / Alt+Enter — insert literal \n into the buffer
 	submit_other    // Ctrl-J — alternative submit (same as Enter)
 	esc
+	stdin_eof       // sentinel pushed by the reader when stdin closes
+	                // (pipe broken, TTY disconnected, etc.). The TUI
+	                // main loop sees this and exits cleanly.
 }
 
 // read_key reads one byte at a time from `r` and assembles a KeyEvent.
-// Handles ESC-prefixed sequences (arrow keys, etc.). Returns KeyKind.none
-// on EOF / error.
+// Handles ESC-prefixed sequences (arrow keys, etc.). Returns
+// KeyKind.stdin_eof on EOF / error so the caller can distinguish "stream
+// closed" from "we got an unrecognized byte" (KeyKind.none).
 pub fn (mut r StdinReader) read_key() KeyEvent {
-	b := r.read_byte() or { return KeyEvent{ kind: .none } }
+	b := r.read_byte() or { return KeyEvent{ kind: .stdin_eof } }
 	match b {
 		key_enter {
 			return KeyEvent{ kind: .enter }
