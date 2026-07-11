@@ -501,5 +501,6 @@ pub fn default_registry(cwd string) ToolRegistry {
 	r.register(BashTool{ cwd: cwd })
 	r.register(GlobTool{ cwd: cwd })
 	r.register(GrepTool{ cwd: cwd })
+	r.register(WebFetchTool{})
 	return r
 }

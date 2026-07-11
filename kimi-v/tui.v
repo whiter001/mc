@@ -36,19 +36,9 @@ pub const esc_gray     = '\x1b[90m'
 pub const esc_bg_blue  = '\x1b[44m'
 pub const esc_bg_gray  = '\x1b[100m'
 
-// move_cursor moves the cursor to (row, col), 1-based.
-fn move_cursor(row int, col int) string {
-	return '${esc}[${row};${col}H'
-}
-
 // clear_screen wipes the visible screen.
 fn clear_screen() string {
 	return '${esc}[2J${esc}[H'
-}
-
-// clear_line erases from cursor to end of the current line.
-fn clear_line() string {
-	return '${esc}[K'
 }
 
 // alt_screen_on switches to the alternate screen buffer.
@@ -68,11 +58,6 @@ fn cursor_hide() string {
 
 fn cursor_show() string {
 	return '${esc}[?25h'
-}
-
-// cursor_to puts the cursor at absolute (row, col), 1-based.
-fn cursor_to(row int, col int) string {
-	return '${esc}[${row};${col}H'
 }
 
 // ---------- Terminal size -------------------------------------------------

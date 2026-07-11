@@ -95,7 +95,7 @@ fn render(s TuiState, ib InputBuf) string {
 
 	// 5. Input box. We show "❯ <text>" split on \n; first line gets the
 	// prompt prefix, continuation lines are indented to align under it.
-	render_input(mut buf, ib, s.cols)
+	render_input(mut buf, ib)
 
 	return buf.str()
 }
@@ -133,7 +133,7 @@ fn render_conversation(s TuiState, max_rows int) []string {
 		new_lines << lines.clone()
 		lines = new_lines.clone()
 		if lines.len > max_rows {
-			lines = lines[lines.len - max_rows..]
+			lines = unsafe { lines[lines.len - max_rows..] }
 		}
 	}
 	// Include in-progress streaming as the final blocks: thinking first
@@ -146,7 +146,9 @@ fn render_conversation(s TuiState, max_rows int) []string {
 		})
 		lines << thinking
 		if lines.len > max_rows {
-			lines = lines[lines.len - max_rows..]
+			// Drop the oldest rows; `lines` is local so the unsafe slice
+			// header aliasing is fine.
+			lines = unsafe { lines[lines.len - max_rows..] }
 		}
 	}
 	if s.streaming.len > 0 || s.streaming_done {
@@ -156,7 +158,7 @@ fn render_conversation(s TuiState, max_rows int) []string {
 		})
 		lines << streamed
 		if lines.len > max_rows {
-			lines = lines[lines.len - max_rows..]
+			lines = unsafe { lines[lines.len - max_rows..] }
 		}
 	}
 	return lines
@@ -233,7 +235,7 @@ fn wrap_lines(text string, first_prefix string, rest_prefix string) []string {
 // position the visible cursor mid-line — that needs absolute ANSI
 // cursor addressing and tracking of (row, col) instead of a flat byte
 // offset, which is a follow-up).
-fn render_input(mut buf strings.Builder, ib InputBuf, cols int) {
+fn render_input(mut buf strings.Builder, ib InputBuf) {
 	// Empty input: just show the prompt, no text, cursor at column 2.
 	if ib.text.len == 0 {
 		buf.write_string(esc_green)

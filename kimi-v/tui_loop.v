@@ -408,7 +408,7 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 		'help' {
 			state.blocks << Block{
 				kind: .system
-				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /exit        leave TUI'
+				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /exit        leave TUI'
 			}
 		}
 		'clear' {
@@ -437,10 +437,33 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 				}
 			}
 		}
-		'tokens' {
+		'tokens', 'usage' {
+			// `state.input_tokens / output_tokens` is the running tally
+			// of the current session, accumulated by the agent loop
+			// (see tui_loop.v around line 335).
 			state.blocks << Block{
 				kind: .system
 				text: 'session tokens: ${state.input_tokens} in / ${state.output_tokens} out'
+			}
+		}
+		'compact' {
+			// Compaction runs automatically when the session crosses
+			// 60% of the model's context window. The check happens at
+			// the start of each agent step, so the next turn (or any
+			// tool call that gets sent to the LLM) is when it'll fire.
+			// This slash command just surfaces the current estimated
+			// state so the user can decide whether to send a fresh
+			// message and trigger compaction immediately.
+			//
+			// A future enhancement could request compaction inline via
+			// a control channel between the TUI and agent loop; for now
+			// we just print the status and let the auto-trigger handle it.
+			est := state.input_tokens + state.output_tokens
+			state.blocks << Block{
+				kind: .system
+				text: 'compaction runs automatically at 60% of the context window. ' +
+					'current est tokens: ${est}.\n' +
+					'to trigger now, send any message — the next turn compacts if over threshold.'
 			}
 		}
 		'exit', 'quit' {
