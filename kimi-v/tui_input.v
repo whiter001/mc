@@ -329,10 +329,31 @@ fn codepoint_len(s string, pos int) int {
 	return 1
 }
 
-// apply mutates the buffer according to a KeyEvent. Returns true if the
-// event was a Submit (Enter / Ctrl-J), so the caller knows to send the
-// buffer to the agent.
-pub fn (mut b InputBuf) apply(ev KeyEvent) bool {
+// SubmitKind tells the main loop what to do with a finished input
+// buffer. `.agent` is the normal path (push to the LLM); `.shell`
+// means the user typed a `!`-prefixed command and wants it run as a
+// shell command without going through the agent.
+pub enum SubmitKind {
+	none
+	agent
+	shell
+}
+
+// apply mutates the buffer according to a KeyEvent. Returns a SubmitKind
+// indicating what the caller should do with the (committed) buffer.
+// `.none` means "no submit; keep editing". `.agent` is the normal
+// submission path. `.shell` means the input was `!…` and should be run
+// as a shell command instead of sent to the agent.
+//
+// `!` shell mode rules (matches upstream kimi-code):
+//   - input starts with `!` (whitespace prefix ignored) → run as shell
+//   - input starts with `!` then is empty (e.g. user just hit Enter on
+//     a bare `!`) → also shell (an empty command line just opens the
+//     shell prompt; we still treat it as a no-op and fall back to
+//     agent-mode submit, since there's nothing to run)
+//   - input has a literal `!` in the middle (e.g. `echo !`) → still
+//     shell; the user clearly meant "I want this run as a command"
+pub fn (mut b InputBuf) apply(ev KeyEvent) SubmitKind {
 	match ev.kind {
 		.char {
 			b.insert(ev.text)
@@ -387,17 +408,16 @@ pub fn (mut b InputBuf) apply(ev KeyEvent) bool {
 			}
 			b.hist_idx = -1
 			b.saved = ''
-			final := b.text
+			kind := if b.text.starts_with('!') { SubmitKind.shell } else { SubmitKind.agent }
 			b.text = ''
 			b.cursor = 0
-			_ = final
-			return true
+			return kind
 		}
 		else {
 			// ignore: esc, interrupt, clear_screen, none
 		}
 	}
-	return false
+	return .none
 }
 
 // insert inserts a string at the cursor.

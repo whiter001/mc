@@ -10,6 +10,7 @@
 
 module main
 
+import os
 import time
 
 // TuiLoopResult tells main() how to proceed after the loop exits.
@@ -419,7 +420,8 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 }
 
 // handle_key applies a KeyEvent to the input buffer or other state.
-// May push a SubmitMsg to submit_ch.
+// May push a SubmitMsg to submit_ch, run a shell command, or trigger
+// a slash command.
 fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision) {
 	// EOF from stdin: pipe broken, TTY disconnected. Trigger a clean
 	// shutdown so the user doesn't get stuck in raw mode.
@@ -491,12 +493,77 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 			return
 		}
 	}
-	if ib.apply(ev) {
-		state.blocks << Block{
-			kind: .user
-			text: ib.text
+	// Capture the text before apply() (which clears it on submit).
+	pre_submit_text := ib.text
+	kind := ib.apply(ev)
+	match kind {
+		.agent {
+			state.blocks << Block{
+				kind: .user
+				text: pre_submit_text
+			}
+			submit_ch <- SubmitMsg{ prompt: pre_submit_text }
 		}
-		submit_ch <- SubmitMsg{ prompt: ib.text }
+		.shell {
+			// Strip the leading `!` and run as a shell command. We don't
+			// ask for approval — the user typed it, so they own the
+			// consequences. Output is captured and rendered as a system
+			// block (compact, dim) so it doesn't pollute the chat
+			// transcript.
+			cmd := pre_submit_text[1..].trim_space()
+			if cmd.len == 0 {
+				// Bare `!` (Enter on a `!` line) is a no-op; don't
+				// pretend we ran a command.
+				state.blocks << Block{
+					kind: .system
+					text: '(shell: empty command)'
+				}
+				return
+			}
+			state.blocks << Block{
+				kind: .user
+				text: pre_submit_text
+			}
+			run_shell_block(mut state, cmd, cfg.cwd)
+		}
+		.none {
+			// nothing
+		}
+	}
+}
+
+// run_shell_block executes `cmd` via the host shell and appends the
+// result to state.blocks as a system block. The command runs in the
+// session cwd (cfg.cwd is passed in; TuiState itself doesn't carry
+// cwd, so the caller must thread it through). A non-zero exit code is
+// reported inline so the user can spot failures without scrolling.
+const shell_max_lines = 200
+
+fn run_shell_block(mut state TuiState, cmd string, cwd string) {
+	res := os.execute('cd "${cwd}" && ${cmd}')
+	exit := res.exit_code
+	output := res.output
+	// Truncate very long output to keep the TUI from scrolling forever.
+	// 200 lines is enough for status commands; longer output can be
+	// inspected via the bash tool if the user really wants it.
+	lines := output.split('\n')
+	mut truncated := false
+	mut shown := lines.clone()
+	if lines.len > shell_max_lines {
+		shown = lines[..shell_max_lines].clone()
+		truncated = true
+	}
+	mut body := shown.join('\n')
+	if truncated {
+		body += '\n[... ${lines.len - shell_max_lines} more lines truncated; rerun via the bash tool for the full output ...]'
+	}
+	mut prefix := '\$ ${cmd}\n'
+	if exit != 0 {
+		prefix = '\$ ${cmd}  [exit ${exit}]\n'
+	}
+	state.blocks << Block{
+		kind: .system
+		text: '${prefix}${body}'
 	}
 }
 

@@ -5,6 +5,7 @@
 // framework hangs on goroutine-bearing tests (see test docs).
 module main
 
+import os
 import json
 
 // ---------- emit_jsonl_event (item #2) -----------------------------------
@@ -77,4 +78,56 @@ fn test_jsonl_roundtrip_preserves_unicode() {
 		return
 	}
 	assert decoded['content'] == '你好 🌍 — kimi is ready.'
+}
+
+// ---------- ! shell mode (item #3) ----------------------------------------
+
+// We can't easily test the TUI main loop, but the underlying building
+// block (run_shell_block) is a pure function of (cmd, cwd) → state. We
+// call it directly and assert the resulting state block is correct.
+
+fn test_shell_block_runs_command_in_cwd() {
+	mut state := new_tui_state()
+	run_shell_block(mut state, 'echo hello-from-shell', os.temp_dir())
+	assert state.blocks.len == 1
+	block := state.blocks[0]
+	assert block.kind == .system
+	// The block text starts with the prompt echo, then the output.
+	assert block.text.contains('\$ echo hello-from-shell')
+	assert block.text.contains('hello-from-shell')
+}
+
+fn test_shell_block_reports_nonzero_exit() {
+	mut state := new_tui_state()
+	run_shell_block(mut state, 'false', os.temp_dir())
+	assert state.blocks.len == 1
+	block := state.blocks[0]
+	// `false` exits 1 → the prefix should show [exit 1].
+	assert block.text.contains('[exit 1]')
+}
+
+fn test_shell_block_handles_empty_output() {
+	mut state := new_tui_state()
+	run_shell_block(mut state, 'true', os.temp_dir())
+	assert state.blocks.len == 1
+	// `true` produces no output; the block should still be created
+	// (with just the prompt prefix).
+	block := state.blocks[0]
+	assert block.kind == .system
+	assert block.text.starts_with('\$ true')
+}
+
+fn test_shell_block_truncates_long_output() {
+	mut state := new_tui_state()
+	// Generate ~500 lines of output. Print line numbers 1..500.
+	run_shell_block(mut state, "for i in $(seq 1 500); do echo line-\$i; done", os.temp_dir())
+	assert state.blocks.len == 1
+	block := state.blocks[0]
+	// Truncation marker should be present because output > 200 lines.
+	assert block.text.contains('truncated')
+	// First and last visible lines are present.
+	assert block.text.contains('line-1')
+	// Line 500 is past the cap, so it should NOT appear in the rendered
+	// block (the truncation message replaces the tail).
+	assert !block.text.contains('\nline-500\n')
 }
