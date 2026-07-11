@@ -458,11 +458,138 @@ fn run_sessions() ! {
 	println('  kimi --continue <id> -p "your next task"')
 }
 
-// run_export packages a session into a ZIP file. Implemented in item #4
-// of the current milestone; for now we refuse with a clear error.
+// run_export packages a session into a ZIP file for sharing, archiving,
+// or submitting bug reports.
+//
+// Usage:
+//   kimi export                  # most recent session in cwd, with prompt
+//   kimi export -y               # most recent, skip prompt
+//   kimi export <id>             # specific session
+//   kimi export <id> -o bug.zip  # custom output path
+//   kimi export --no-include-global-log
+//
+// We shell out to the system `zip` command — V has no stdlib zip module
+// and a third-party dep would be overkill for a self-use tool. macOS and
+// Linux both ship `zip`; Windows users can run inside WSL or a Unix
+// shell.
 fn run_export(cli Cli) ! {
-	_ = cli
-	return error('kimi export is not yet implemented (lands in item #4 of the current milestone)')
+	// Resolve the session id. Explicit id > most recent in cwd.
+	mut session_id := cli.export_session
+	if session_id.len == 0 {
+		summaries := list_all()!
+		if summaries.len == 0 {
+			return error('no saved sessions to export')
+		}
+		// Pick the most recent session whose cwd matches os.getwd(),
+		// or fall back to the absolute most recent if none match.
+		cwd := os.getwd()
+		mut pick := summaries[0]
+		for s in summaries {
+			if s.cwd == cwd {
+				pick = s
+				break
+			}
+		}
+		session_id = pick.id
+		if !cli.export_yes {
+			println('Will export session ${pick.id} (cwd: ${pick.cwd}, ${pick.msg_count} messages, updated ${pick.updated_at.format()}).')
+			print('Continue? [y/N] ')
+			stdout_flush()
+			answer := read_line().trim_space().to_lower()
+			if answer != 'y' && answer != 'yes' {
+				println('aborted.')
+				return
+			}
+		}
+	}
+
+	// Verify the session exists.
+	load(session_id)!
+
+	// Output path. Default: kimi-session-<id>-<YYYYMMDD>.zip in cwd.
+	mut out_path := cli.export_output
+	if out_path.len == 0 {
+		date_str := time.now().format()
+		mut date_compact := date_str.replace(' ', '').replace('-', '').replace(':', '')
+		if date_compact.len > 8 {
+			date_compact = date_compact[..8]
+		}
+		out_path = os.join_path(os.getwd(), 'kimi-session-${session_id}-${date_compact}.zip')
+	}
+
+	// Build the source list. We always include the session TOML;
+	// optionally include the global log.
+	cli_cfg := Config{
+		provider:  cli.provider
+		api_base:  cli.api_base
+		api_key:   cli.api_key
+		model:     cli.model
+		system_prompt: cli.system
+		log_level: cli.log_level
+		max_turns: cli.max_turns
+	}
+	_ = cli_cfg // not used here; only present for consistency with run_prompt
+	dirs := config_paths_struct()
+	session_path := os.join_path(dirs.sessions, '${session_id}.toml')
+	log_path := os.join_path(dirs.logs, 'kimi-code.log')
+
+	if !os.exists(session_path) {
+		return error('session file missing: ${session_path}')
+	}
+
+	// Stage files in a temp directory so the zip is self-contained and
+	// the relative paths inside it are clean. Layout:
+	//   <tmp>/sessions/<id>.toml
+	//   <tmp>/logs/kimi-code.log      (if present + not disabled)
+	stage := os.join_path(os.temp_dir(), 'kimi-export-${session_id}')
+	os.rmdir_all(stage) or {} // clean up from a previous run
+	os.mkdir_all(os.join_path(stage, 'sessions'))!
+	os.cp(session_path, os.join_path(stage, 'sessions', '${session_id}.toml'))!
+
+	include_log := !cli.export_no_log && os.exists(log_path)
+	if include_log {
+		os.mkdir_all(os.join_path(stage, 'logs'))!
+		os.cp(log_path, os.join_path(stage, 'logs', 'kimi-code.log')) or {
+			eprintln('warning: could not copy global log: ${err.msg()}')
+		}
+	}
+
+	// Build the zip. `-r` is recursive (we have a directory); `-X` strips
+	// extra file attributes so the zip is reproducible across systems.
+	zip_cmd := 'cd "${stage}" && zip -rX "${out_path}" .'
+	res := os.execute(zip_cmd)
+	if res.exit_code != 0 {
+		return error('zip failed (exit ${res.exit_code}): ${res.output}')
+	}
+	// Clean up the stage directory.
+	os.rmdir_all(stage) or {}
+
+	mut summary := 'exported session ${session_id} to ${out_path}'
+	if include_log {
+		summary += ' (with global log)'
+	} else {
+		summary += ' (no global log)'
+	}
+	println(summary)
+}
+
+// config_paths_struct returns the standard on-disk locations so run_export
+// (and any future command that needs the layout) can find session files
+// and logs without re-deriving paths.
+struct ConfigPaths {
+pub:
+	config  string
+	sessions string
+	logs    string
+}
+
+fn config_paths_struct() ConfigPaths {
+	base := config_dir()
+	return ConfigPaths{
+		config:   base
+		sessions: os.join_path(base, 'sessions')
+		logs:     os.join_path(base, 'logs')
+	}
 }
 
 // ---------- stream-json output (item #2) ----------------------------------
