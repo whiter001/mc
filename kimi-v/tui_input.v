@@ -22,6 +22,7 @@
 //   Ctrl-W                        kill previous word
 //   Ctrl-C                        signal interrupt (handled by main loop)
 //   Ctrl-L                        clear screen (handled by render loop)
+//   Ctrl-O                        toggle collapse of all tool result blocks
 //   Esc, Esc                      exit TUI
 //
 // The input box is multi-line: Shift+Enter or literal newlines (we treat
@@ -53,6 +54,7 @@ pub const ctrl_j        = 10
 pub const ctrl_k        = 11
 pub const ctrl_l        = 12
 pub const ctrl_n        = 14
+pub const ctrl_o        = 15
 pub const ctrl_p        = 16
 pub const ctrl_s        = 19
 pub const ctrl_u        = 21
@@ -89,6 +91,9 @@ pub enum KeyKind {
 	steer           // Ctrl-S — inject the current input into a running turn
 	                // (the agent sees it at the next interruptible point,
 	                // without waiting for the current turn to finish)
+	collapse        // Ctrl-O — toggle collapse of all tool_result blocks
+	                // in the conversation scrollback. First press collapses
+	                // all to a one-line summary; second press expands.
 	stdin_eof       // sentinel pushed by the reader when stdin closes
 	                // (pipe broken, TTY disconnected, etc.). The TUI
 	                // main loop sees this and exits cleanly.
@@ -151,6 +156,9 @@ pub fn (mut r StdinReader) read_key() KeyEvent {
 		}
 		ctrl_s {
 			return KeyEvent{ kind: .steer }
+		}
+		ctrl_o {
+			return KeyEvent{ kind: .collapse }
 		}
 		ctrl_d {
 			// Ctrl-D on empty input = EOF; we treat it as interrupt to be safe.

@@ -294,3 +294,23 @@ fn test_steer_kind_does_not_consume_input() {
 	assert b.cursor == b.text.len
 }
 
+// ---------- Ctrl-O / collapse tool results --------------------------------
+
+fn test_ctrl_o_constant_matches_ascii() {
+	// ctrl_o must be 0x0F (15) so a raw terminal byte decodes to the
+	// right key. If we ever change the wiring (e.g. switch to a CSI
+	// sequence), this guard catches it — same reasoning as ctrl_s.
+	assert ctrl_o == 15
+}
+
+fn test_collapse_kind_does_not_consume_input() {
+	// The .collapse key is a SIGNAL (handled by handle_key, not by the
+	// input buffer). It must not modify the buffer — the input box
+	// should stay exactly as the user left it.
+	mut b := new_input_buf()
+	b.insert('this should not change')
+	b.apply(KeyEvent{ kind: .collapse })
+	assert b.text == 'this should not change'
+	assert b.cursor == b.text.len
+}
+

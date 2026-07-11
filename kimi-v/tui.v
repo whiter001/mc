@@ -189,6 +189,12 @@ pub:
 	tool_result string
 	// For tool_result: was it an error?
 	tool_is_error bool
+pub mut:
+	// When true and kind == .tool_result, the render shows a single
+	// folded summary line ("<tool>: N lines collapsed — Ctrl-O to
+	// expand") instead of the full result body. Toggled by the Ctrl-O
+	// hotkey in handle_key. Ignored for other block kinds.
+	collapsed bool
 }
 
 pub fn new_tui_state() TuiState {

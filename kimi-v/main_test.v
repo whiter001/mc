@@ -131,3 +131,115 @@ fn test_shell_block_truncates_long_output() {
 	// block (the truncation message replaces the tail).
 	assert !block.text.contains('\nline-500\n')
 }
+
+// ---------- Ctrl-O / collapse tool results --------------------------------
+
+// Helper: build a state with a mix of block kinds so we can verify
+// toggle_collapse only touches .tool_result and leaves everything else
+// alone.
+fn make_state_with_tool_results() TuiState {
+	mut s := new_tui_state()
+	s.blocks << Block{ kind: .user, text: 'look up foo' }
+	s.blocks << Block{
+		kind: .tool_call
+		tool_name: 'bash'
+		tool_args: '{"command":"ls"}'
+	}
+	s.blocks << Block{
+		kind: .tool_result
+		tool_name: 'bash'
+		tool_result: 'a.txt\nb.txt\nc.txt'
+	}
+	s.blocks << Block{ kind: .assistant, text: 'found three files' }
+	s.blocks << Block{
+		kind: .tool_call
+		tool_name: 'read_file'
+		tool_args: '{"path":"a.txt"}'
+	}
+	s.blocks << Block{
+		kind: .tool_result
+		tool_name: 'read_file'
+		tool_result: 'line1\nline2\nline3\nline4'
+	}
+	return s
+}
+
+fn test_toggle_collapse_collapses_all_tool_results() {
+	mut s := make_state_with_tool_results()
+	toggle_collapse(mut s)
+	// Both tool_result blocks should now be folded.
+	assert s.blocks[2].kind == .tool_result
+	assert s.blocks[2].collapsed == true
+	assert s.blocks[5].kind == .tool_result
+	assert s.blocks[5].collapsed == true
+	// Other block kinds must be untouched.
+	assert s.blocks[0].kind == .user
+	assert s.blocks[1].kind == .tool_call
+	assert s.blocks[3].kind == .assistant
+	assert s.blocks[4].kind == .tool_call
+	// Status line should announce the fold with a count.
+	assert s.status.contains('collapsed 2 tool results')
+}
+
+fn test_toggle_collapse_expands_when_all_collapsed() {
+	mut s := make_state_with_tool_results()
+	// Pre-collapse both tool_result blocks so the next press expands.
+	s.blocks[2].collapsed = true
+	s.blocks[5].collapsed = true
+	toggle_collapse(mut s)
+	assert s.blocks[2].collapsed == false
+	assert s.blocks[5].collapsed == false
+	assert s.status.contains('expanded 2 tool results')
+}
+
+fn test_toggle_collapse_partial_still_collapses_remaining() {
+	// If some tool_results are already folded and others aren't, one
+	// press should bring them all to the same (collapsed) state — this
+	// is the "press once to clean up" behavior, not "flip the mixed
+	// ones". Pressing again then expands.
+	mut s := make_state_with_tool_results()
+	s.blocks[2].collapsed = true // already folded
+	// blocks[5] is expanded
+	toggle_collapse(mut s)
+	// Now BOTH collapsed (the expanded one got folded; the folded one
+	// stayed folded because the rule is "any expanded → collapse all").
+	assert s.blocks[2].collapsed == true
+	assert s.blocks[5].collapsed == true
+	// A second press should now expand both.
+	toggle_collapse(mut s)
+	assert s.blocks[2].collapsed == false
+	assert s.blocks[5].collapsed == false
+}
+
+fn test_toggle_collapse_noop_when_no_tool_results() {
+	// A pure chat with no tool calls — pressing Ctrl-O should not
+	// change any state.block, but should set a status hint so the user
+	// knows we heard the key.
+	mut s := new_tui_state()
+	s.blocks << Block{ kind: .user, text: 'hi' }
+	s.blocks << Block{ kind: .assistant, text: 'hello' }
+	original_len := s.blocks.len
+	toggle_collapse(mut s)
+	assert s.blocks.len == original_len
+	for b in s.blocks {
+		assert b.collapsed == false
+	}
+	assert s.status.contains('no tool results')
+}
+
+fn test_toggle_collapse_singular_plural_in_status() {
+	// Singular form ("1 tool result") vs plural ("2 tool results") so
+	// the status line reads naturally.
+	mut s := new_tui_state()
+	s.blocks << Block{ kind: .tool_result, tool_name: 'bash', tool_result: 'only one' }
+	toggle_collapse(mut s)
+	assert s.blocks[0].collapsed == true
+	// "1 tool result" (no trailing 's' on the noun). V's `or` is
+	// reserved for error handling inside expressions, so we test the
+	// pluralization in two separate asserts.
+	singular_ok := s.status.contains('collapsed 1 tool result ')
+	plural_ok := s.status.contains('collapsed 1 tool results')
+	assert singular_ok || plural_ok, 'expected status to mention exactly 1 tool result, got: ${s.status}'
+	// Just one, so should NOT say "2".
+	assert !s.status.contains('collapsed 2')
+}

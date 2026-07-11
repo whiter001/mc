@@ -527,6 +527,15 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 	if ev.kind == .clear_screen {
 		return
 	}
+	// Ctrl-O: toggle collapse of all tool_result blocks. If any are
+	// expanded, collapse them all (so a single press cleans up the
+	// scrollback); if all are already collapsed, expand them. No-op
+	// when there are no tool_result blocks — we surface a brief hint
+	// in the status line so the user knows we heard the key.
+	if ev.kind == .collapse {
+		toggle_collapse(mut state)
+		return
+	}
 	if ev.kind == .enter && ib.text.starts_with('/') {
 		cmd := ib.text.all_after('/').trim_space()
 		if handle_slash(cmd, mut state, mut ib, mut cfg) {
@@ -607,6 +616,40 @@ fn run_shell_block(mut state TuiState, cmd string, cwd string) {
 	}
 }
 
+// toggle_collapse flips the `collapsed` flag on every .tool_result
+// block in the scrollback. If any tool_result is currently expanded,
+// all get folded to a one-line summary; if they're all already
+// collapsed, they all expand. This matches the "press once to fold,
+// press again to unfold" muscle memory that IDEs and kimi-code itself
+// use. No-op (with a status hint) when there are zero tool_result
+// blocks — pressing Ctrl-O in a chat with no tool calls shouldn't be
+// silent.
+fn toggle_collapse(mut state TuiState) {
+	n_results := state.blocks.filter(it.kind == .tool_result).len
+	if n_results == 0 {
+		state.status = 'no tool results to collapse'
+		return
+	}
+	any_expanded := state.blocks.any(it.kind == .tool_result && !it.collapsed)
+	if any_expanded {
+		for i in 0 .. state.blocks.len {
+			if state.blocks[i].kind == .tool_result {
+				state.blocks[i].collapsed = true
+			}
+		}
+		plural := if n_results == 1 { '' } else { 's' }
+		state.status = 'collapsed ${n_results} tool result${plural} (Ctrl-O to expand)'
+	} else {
+		for i in 0 .. state.blocks.len {
+			if state.blocks[i].kind == .tool_result {
+				state.blocks[i].collapsed = false
+			}
+		}
+		plural := if n_results == 1 { '' } else { 's' }
+		state.status = 'expanded ${n_results} tool result${plural}'
+	}
+}
+
 // handle_slash processes slash commands. Returns true if handled.
 fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config) bool {
 	parts := cmd.split(' ')
@@ -614,7 +657,7 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 		'help' {
 			state.blocks << Block{
 				kind: .system
-				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /exit        leave TUI'
+				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results'
 			}
 		}
 		'clear' {

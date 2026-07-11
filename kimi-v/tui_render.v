@@ -216,6 +216,18 @@ fn render_block(b Block) []string {
 			return [head]
 		}
 		.tool_result {
+			// Folded: render a single summary line so the conversation
+			// scrollback stays compact when the user hits Ctrl-O. The
+			// collapsed count is the number of source lines we hid
+			// (trimmed, then split on \n), which gives a useful "how
+			// much am I hiding?" hint without doing byte math.
+			if b.collapsed {
+				body := b.tool_result.trim_space()
+				line_count := body.split('\n').len
+				plural := if line_count == 1 { '' } else { 's' }
+				folded := '${esc_dim}  ← ${b.tool_name}: ${line_count} line${plural} collapsed — Ctrl-O to expand${esc_reset}'
+				return [folded]
+			}
 			color := if b.tool_is_error { esc_red } else { esc_dim }
 			body := b.tool_result.trim_space()
 			return wrap_lines(body, '${color}  ← ${esc_reset}', '')
