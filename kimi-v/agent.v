@@ -4,6 +4,8 @@
 // Agent per provider/model and reuse it across sessions.
 module main
 
+import time
+
 pub struct Agent {
 pub:
 	provider Provider
@@ -138,6 +140,23 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 	mut usage_output := 0
 	mut saw_finish := false
 
+	// The select below has receive-only branches on `a.steer_ch` and
+	// `a.cancel_ch` that are typically empty (steer is only written by the
+	// TUI on Ctrl-S; cancel is written by the TUI's cancel watcher on
+	// Ctrl-C). In `-p` mode steer_ch has no writer at all. V 0.5.x's
+	// `select` is buggy: when any branch is a bare receive on a channel
+	// that will never deliver, the runtime fails to pick the other ready
+	// branches and the whole select hangs forever — even ones with
+	// buffered values sitting in them.
+	//
+	// The 1ms timeout case below is the documented workaround. It forces
+	// select to re-evaluate the channel set ~1000×/sec so that ready
+	// branches (the chunk channel `ch`) get a chance to fire. The
+	// overhead is negligible (1ms of idle is invisible to the user) and
+	// it's strictly correct — every other branch still wins when it has
+	// a value, including the steer/cancel ones. Same pattern as
+	// tui_loop.v:run_tui's main loop and tui_loop.v:299's cancel-watcher
+	// (the latter has a comment on this V gotcha).
 	for {
 		select {
 			ev := <-ch {
@@ -204,7 +223,7 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 				result.text = text_acc.join('')
 				return result
 			}
-			<-a.cancel_ch {
+			_ := <-a.cancel_ch {
 				// Cancellation requested. Spawn a drainer so the provider
 				// goroutine can keep writing to `ch` (and close it) without
 				// blocking on a full buffered channel — the agent has
@@ -216,6 +235,13 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 					}
 				}(ch)
 				return error('cancelled')
+			}
+			1 * time.millisecond {
+				// V 0.5.x select workaround — see the comment above the
+				// for loop. With bare receive branches on steer_ch and
+				// cancel_ch, the runtime never picks the chunk branch on
+				// its own. This 1ms tick re-polls the channel set so the
+				// chunk branch fires promptly when SSE events arrive.
 			}
 		}
 	}
