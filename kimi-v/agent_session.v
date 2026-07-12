@@ -37,6 +37,20 @@ pub fn (mut s Session) append_user(text string) {
 	s.updated_at = time.now()
 }
 
+// append_user_with_attachments is the multimodal form of append_user
+// (P0.7). The `attachments` slice is stored on the Message; the
+// wire encoder (llm_openai_compat.v) emits them as image_url content
+// parts alongside the text. An empty `attachments` slice is fine —
+// the message serializes as a single text part.
+pub fn (mut s Session) append_user_with_attachments(text string, attachments []Attachment) {
+	s.messages << Message{
+		role:        .user
+		content:     text
+		attachments: attachments
+	}
+	s.updated_at = time.now()
+}
+
 pub fn (mut s Session) append_assistant(content string, tool_calls []ToolCall) {
 	s.messages << Message{
 		role:       .assistant

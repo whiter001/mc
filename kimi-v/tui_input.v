@@ -23,7 +23,18 @@
 //   Ctrl-C                        signal interrupt (handled by main loop)
 //   Ctrl-L                        clear screen (handled by render loop)
 //   Ctrl-O                        toggle collapse of all tool result blocks
+//   Ctrl-X                        clear pending image attachments
 //   Esc, Esc                      exit TUI
+//
+// Image attachments (P0.7):
+//   When a `.char` event delivers a single-line string that looks like
+//   a file path (absolute, ~/..., ./..., ../...) AND the resolved file
+//   exists with a recognized image extension, the TUI consumes the
+//   text and adds it to InputBuf.attachments instead of inserting it.
+//   Same for data: URL pastes (data:image/...;base64,...). Attached
+//   files are sent as image_url content parts on the next submit and
+//   cleared from the buffer afterwards. See InputBuf.attach_file and
+//   attach_data_url for the rules.
 //
 // The input box is multi-line: Shift+Enter or literal newlines (we treat
 // Ctrl-J as submit, raw \n from paste also submits).
@@ -36,6 +47,7 @@
 module main
 
 import os
+import encoding.base64
 
 // ---------- Special key codes --------------------------------------------
 
@@ -59,6 +71,7 @@ pub const ctrl_p        = 16
 pub const ctrl_s        = 19
 pub const ctrl_u        = 21
 pub const ctrl_w        = 23
+pub const ctrl_x        = 24
 
 // KeyEvent is what the input loop emits. `text` is non-empty only for
 // printable characters and pasted multi-byte sequences.
@@ -94,6 +107,9 @@ pub enum KeyKind {
 	collapse        // Ctrl-O — toggle collapse of all tool_result blocks
 	                // in the conversation scrollback. First press collapses
 	                // all to a one-line summary; second press expands.
+	clear_attachments // Ctrl-X — drop all pending image attachments from
+	                // the input buffer. A no-op (with a status hint) when
+	                // no attachments are pending.
 	stdin_eof       // sentinel pushed by the reader when stdin closes
 	                // (pipe broken, TTY disconnected, etc.). The TUI
 	                // main loop sees this and exits cleanly.
@@ -159,6 +175,9 @@ pub fn (mut r StdinReader) read_key() KeyEvent {
 		}
 		ctrl_o {
 			return KeyEvent{ kind: .collapse }
+		}
+		ctrl_x {
+			return KeyEvent{ kind: .clear_attachments }
 		}
 		ctrl_d {
 			// Ctrl-D on empty input = EOF; we treat it as interrupt to be safe.
@@ -301,6 +320,12 @@ pub mut:
 	// Saved current text when navigating into history (so we can restore
 	// when navigating back).
 	saved     string
+	// Pending image attachments. Filled by the TUI when the user
+	// pastes a path to a recognized image file or a data: URL.
+	// Consumed (and cleared) at submit time. Not in the text buffer
+	// so cursor movement / backspace don't touch them — clear them
+	// explicitly with Ctrl-X.
+	attachments []Attachment
 }
 
 pub fn new_input_buf() InputBuf {
@@ -516,4 +541,200 @@ fn (mut b InputBuf) history_next() {
 		b.saved = ''
 	}
 	b.cursor = b.text.len
+}
+// ---------- Attachments (P0.7) -------------------------------------------
+//
+// Image attachments are stored alongside the text buffer but not
+// inside it. The TUI auto-attaches when the user pastes something
+// that looks like a file path to a recognized image, or a data:
+// URL. The helpers below are the only way attachments enter the
+// buffer; the TUI main loop calls them after a `.char` event before
+// the same event reaches `apply` (see tui_loop.v:handle_key).
+//
+// Recognized image extensions: png, jpg, jpeg, gif, webp, bmp.
+// Max file size: 10 MB. Anything larger is rejected (silently —
+// the TUI falls through to inserting the text, which the user can
+// then backspace if they don't want it). We do this because base64
+// inflates ~33% and a 50MB screenshot would balloon the request
+// to ~67MB and likely time out at the provider.
+
+// max_attachment_bytes is the per-file size cap for pasted images.
+// 10 MB is well under OpenAI's 20 MB vision-image cap (after
+// base64) and well within what local / proxy providers accept.
+pub const max_attachment_bytes = 10 * 1024 * 1024
+
+// attach_file attempts to attach the file at `path` (resolved
+// against `cwd` when relative). Returns true on success — the file
+// was read, base64-encoded, and pushed onto the attachment list.
+// Returns false if the path doesn't exist, has an unrecognized
+// extension, or is too large. Callers should fall through to
+// inserting the text on false so the user doesn't lose what they
+// typed.
+pub fn (mut b InputBuf) attach_file(cwd string, path string) bool {
+	resolved := resolve_attach_path(cwd, path)
+	if !os.exists(resolved) {
+		return false
+	}
+	ext := attachment_ext(path)
+	mime := mime_for_image_ext(ext)
+	if mime.len == 0 {
+		return false
+	}
+	size := os.file_size(resolved)
+	if size < 0 || size > max_attachment_bytes {
+		return false
+	}
+	data := os.read_file(resolved) or { return false }
+	b64 := base64.encode(data.bytes())
+	name := attachment_basename(path)
+	b.attachments << Attachment{
+		mime: mime
+		b64:  b64
+		name: name
+	}
+	return true
+}
+
+// attach_data_url handles a pasted data: URL of the form
+// `data:image/<sub>;base64,<b64>`. Returns true on success. The
+// mime and base64 are extracted from the URL directly — we do not
+// re-encode (the data is already base64). Display name is
+// synthesized from the mime subtype (e.g. `pasted.png`).
+pub fn (mut b InputBuf) attach_data_url(data_url string) bool {
+	if !data_url.starts_with('data:image/') {
+		return false
+	}
+	comma := data_url.index(',') or { return false }
+	if comma < 0 {
+		return false
+	}
+	header := data_url[..comma]  // e.g. "data:image/png;base64"
+	payload := data_url[comma + 1..]
+	if !header.ends_with(';base64') {
+		return false
+	}
+	mime := header[5..header.len - 7]  // strip "data:" prefix and ";base64" suffix
+	if mime.len == 0 {
+		return false
+	}
+	ext := mime.all_after('/')
+	if ext.len == 0 {
+		return false
+	}
+	name := 'pasted.${ext}'
+	b.attachments << Attachment{
+		mime: mime
+		b64:  payload
+		name: name
+	}
+	return true
+}
+
+// clear_attachments removes all pending attachments. Wired to
+// Ctrl-X by the TUI main loop. Returns the count that was cleared
+// so the caller can surface a status hint.
+pub fn (mut b InputBuf) clear_attachments() int {
+	n := b.attachments.len
+	b.attachments = []Attachment{}
+	return n
+}
+
+// has_attachments is true when the buffer has at least one pending
+// attachment. Used by the render layer to decide whether to draw
+// the attachment row above the input prompt.
+pub fn (b InputBuf) has_attachments() bool {
+	return b.attachments.len > 0
+}
+
+// ---------- Attachment helpers (also used by tests) -----------------------
+
+// resolve_attach_path normalizes a user-pasted path string:
+//   absolute (/foo/bar)        → as-is
+//   home-relative (~/foo)      → expanded against $HOME
+//   relative (./ or ../ or bare) → joined against `cwd`
+fn resolve_attach_path(cwd string, path string) string {
+	if path.starts_with('~/') {
+		return os.join_path(os.home_dir(), path[2..])
+	}
+	if path.starts_with('/') {
+		return path
+	}
+	return os.join_path(cwd, path)
+}
+
+// attachment_ext returns the lowercase extension (without the
+// leading dot) of a path. Empty string if there is no extension
+// or the only dot is a leading dot in a dotfile (".bashrc" has no
+// extension; ".config.png" is "png").
+fn attachment_ext(path string) string {
+	// Walk to the last '/' so dotfiles in a directory path are not
+	// confused for an extension. ".config/foo.png" → check the
+	// "foo.png" segment.
+	slash := path.last_index('/') or { -1 }
+	seg := if slash >= 0 { path[slash + 1..] } else { path }
+	// If the basename starts with a dot, it's a dotfile — no ext.
+	if seg.len > 0 && seg[0] == `.` {
+		return ''
+	}
+	idx := seg.last_index('.') or { return '' }
+	if idx < 0 || idx + 1 >= seg.len {
+		return ''
+	}
+	return seg[idx + 1..].to_lower()
+}
+
+// attachment_basename returns the last path segment as a display
+// name. For "/foo/bar/baz.png" returns "baz.png". kimi-v is
+// POSIX-only (see config_paths.v), so we don't need to handle
+// Windows backslashes.
+fn attachment_basename(path string) string {
+	idx := path.last_index('/') or { return path }
+	return path[idx + 1..]
+}
+
+// mime_for_image_ext returns the MIME type for a recognized image
+// extension, or empty string if the extension is not a supported
+// image type. The same map is used by attach_file and by the test
+// suite (so a regression in one breaks the other).
+fn mime_for_image_ext(ext string) string {
+	match ext {
+		'png' { return 'image/png' }
+		'jpg', 'jpeg' { return 'image/jpeg' }
+		'gif' { return 'image/gif' }
+		'webp' { return 'image/webp' }
+		'bmp' { return 'image/bmp' }
+		else { return '' }
+	}
+}
+
+// looks_like_attach_candidate is the cheap pre-filter the TUI runs
+// on every `.char` event before attempting an attach. It rejects
+// anything with whitespace, anything too short, and anything too
+// long — so natural language typing ("hi", "ls -la", "你好") and
+// real paste of large text never trigger the attach path. The
+// actual path resolution / file read happens in attach_file (which
+// can still return false on a candidate that passes this filter).
+pub fn looks_like_attach_candidate(text string) bool {
+	if text.len < 4 {
+		return false
+	}
+	if text.len > 4096 {
+		return false
+	}
+	// No whitespace — paths and data URLs are single tokens.
+	if text.contains_any(' \t\n\r') {
+		return false
+	}
+	// data: URLs are an explicit opt-in.
+	if text.starts_with('data:image/') {
+		return true
+	}
+	// Path-style: must start with one of the recognized prefixes.
+	if text.starts_with('/') || text.starts_with('~/') {
+		return true
+	}
+	if text.starts_with('./') || text.starts_with('../') {
+		return true
+	}
+	return false
 }

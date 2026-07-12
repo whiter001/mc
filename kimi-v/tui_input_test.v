@@ -9,6 +9,8 @@
 // when the user typed CJK / emoji / accented Latin.
 module main
 
+import os
+
 // hex_of renders a string as space-separated 2-digit hex per byte. Used in
 // assertion messages to make broken-UTF-8 bugs obvious.
 fn hex_of(s string) string {
@@ -312,5 +314,151 @@ fn test_collapse_kind_does_not_consume_input() {
 	b.apply(KeyEvent{ kind: .collapse })
 	assert b.text == 'this should not change'
 	assert b.cursor == b.text.len
+}
+
+// ---------- Ctrl-X / clear_attachments (P0.7) ----------------------------
+
+fn test_ctrl_x_constant_matches_ascii() {
+	// ctrl_x must be 0x18 (24) so a raw terminal byte decodes to the
+	// right key. Same guard pattern as ctrl_s / ctrl_o.
+	assert ctrl_x == 24
+}
+
+fn test_clear_attachments_kind_does_not_consume_input() {
+	// .clear_attachments is a SIGNAL: handle_key owns the logic. The
+	// input buffer must not react (no text change, no cursor move) so
+	// the user's draft is preserved across a Ctrl-X press.
+	mut b := new_input_buf()
+	b.insert('keep this')
+	b.apply(KeyEvent{ kind: .clear_attachments })
+	assert b.text == 'keep this'
+	assert b.cursor == b.text.len
+}
+
+fn test_attach_file_success_reads_and_encodes() {
+	// Write a small temp file, attach it, verify the resulting
+	// attachment has the right mime / non-empty b64 / right name.
+	tmp := os.join_path(os.temp_dir(), 'kimi-v-attach-test.png')
+	// PNG magic bytes + 16 bytes of fake payload.
+	payload := [u8(0x89), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
+		0x00, 0x0D, 0x49, 0x48, 0x44, 0x52]
+	os.write_file(tmp, payload.bytestr())!
+	mut b := new_input_buf()
+	ok := b.attach_file('/tmp', tmp)
+	assert ok == true, 'attach_file should succeed for a valid png'
+	assert b.attachments.len == 1
+	att := b.attachments[0]
+	assert att.mime == 'image/png'
+	assert att.b64.len > 0
+	assert att.name == 'kimi-v-attach-test.png'
+	os.rm(tmp) or {}
+}
+
+fn test_attach_file_missing_path_returns_false() {
+	// Path that doesn't exist → false, no attachment added.
+	mut b := new_input_buf()
+	ok := b.attach_file('/tmp', '/this/path/should/not/exist/foo.png')
+	assert ok == false
+	assert b.attachments.len == 0
+}
+
+fn test_attach_file_wrong_extension_returns_false() {
+	// .txt is not in the recognized image set — should be rejected
+	// even if the file exists and is small.
+	tmp := os.join_path(os.temp_dir(), 'kimi-v-attach-test.txt')
+	os.write_file(tmp, 'hello')!
+	mut b := new_input_buf()
+	ok := b.attach_file('/tmp', tmp)
+	assert ok == false
+	assert b.attachments.len == 0
+	os.rm(tmp) or {}
+}
+
+fn test_attach_data_url_valid_png() {
+	// data:image/png;base64,AAAA — well-formed URL, payload is "AAAA"
+	// which decodes to bytes 0x00 0x00 0x00 (3 bytes of zero). We just
+	// check the helper extracts mime + payload correctly.
+	mut b := new_input_buf()
+	ok := b.attach_data_url('data:image/png;base64,AAAA')
+	assert ok == true
+	assert b.attachments.len == 1
+	att := b.attachments[0]
+	assert att.mime == 'image/png'
+	assert att.b64 == 'AAAA'
+	assert att.name == 'pasted.png'
+}
+
+fn test_attach_data_url_invalid_prefix_returns_false() {
+	// data:video/mp4;... — only image/* is supported. The TUI rejects
+	// other mimes so we don't accidentally send non-image blobs to
+	// vision endpoints.
+	mut b := new_input_buf()
+	ok := b.attach_data_url('data:video/mp4;base64,AAAA')
+	assert ok == false
+	assert b.attachments.len == 0
+}
+
+fn test_attach_data_url_non_base64_returns_false() {
+	// data:image/png;charset=utf-8,... — non-base64 payloads aren't
+	// supported in v1. The user can decode and re-paste.
+	mut b := new_input_buf()
+	ok := b.attach_data_url('data:image/png,hello')
+	assert ok == false
+}
+
+fn test_clear_attachments_returns_count_and_empties() {
+	// After attaching two things, clear_attachments() should return
+	// 2 and leave the slice empty. Used by handle_key to surface a
+	// status hint with the right pluralization.
+	mut b := new_input_buf()
+	b.attachments << Attachment{ mime: 'image/png', b64: 'aaa', name: 'a.png' }
+	b.attachments << Attachment{ mime: 'image/jpeg', b64: 'bbb', name: 'b.jpg' }
+	assert b.has_attachments() == true
+	n := b.clear_attachments()
+	assert n == 2
+	assert b.attachments.len == 0
+	assert b.has_attachments() == false
+}
+
+fn test_looks_like_attach_candidate_short_text_rejected() {
+	// Single char or 3-char typing noise should not be treated as an
+	// attach candidate — otherwise "ls " or "1+1" would trigger the
+	// path resolver.
+	assert looks_like_attach_candidate('a') == false
+	assert looks_like_attach_candidate('ab') == false
+	assert looks_like_attach_candidate('abc') == false
+}
+
+fn test_looks_like_attach_candidate_with_whitespace_rejected() {
+	// Real paste of natural language always contains spaces; the
+	// filter rejects anything with whitespace so the attach path
+	// only runs on token-shaped input.
+	assert looks_like_attach_candidate('look at this.png') == false
+	assert looks_like_attach_candidate('hi there') == false
+}
+
+fn test_looks_like_attach_candidate_absolute_path_accepted() {
+	// "/foo/bar.png" is a candidate (will be rejected later by
+	// attach_file if the file doesn't exist, but the filter passes
+	// it through).
+	assert looks_like_attach_candidate('/foo/bar.png') == true
+	assert looks_like_attach_candidate('~/Pictures/shot.png') == true
+	assert looks_like_attach_candidate('./shot.png') == true
+	assert looks_like_attach_candidate('../shot.png') == true
+}
+
+fn test_looks_like_attach_candidate_data_url_accepted() {
+	// data: URLs always pass the filter (the attach_data_url
+	// helper handles the heavy lifting).
+	assert looks_like_attach_candidate('data:image/png;base64,AAAA') == true
+}
+
+fn test_looks_like_attach_candidate_bare_filename_rejected() {
+	// "screenshot.png" (no path prefix) is intentionally NOT a
+	// candidate — we don't want typing a filename to trigger an
+	// attach. The user must include a path prefix to disambiguate
+	// "I just typed the name" from "I pasted a path".
+	assert looks_like_attach_candidate('screenshot.png') == false
+	assert looks_like_attach_candidate('foo.jpg') == false
 }
 

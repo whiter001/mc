@@ -20,9 +20,14 @@ pub enum TuiLoopResult {
 }
 
 // SubmitMsg is sent from the input loop to the agent runner.
+// `attachments` carries any pending image attachments (P0.7). The
+// agent_runner_loop pushes them into the session as part of the
+// user message; the wire form encodes them as image_url content
+// parts in llm_openai_compat.v.
 pub struct SubmitMsg {
 pub:
-	prompt string
+	prompt      string
+	attachments []Attachment
 }
 
 // StatusKind + payload pair used for TuiStatus. We use one struct rather
@@ -307,7 +312,7 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 			}
 		}(&agent, cancel_request_ch, watcher_exit)
 
-		sess.append_user(msg.prompt)
+		sess.append_user_with_attachments(msg.prompt, msg.attachments)
 		status_ch <- status_started()
 
 		res := agent.run(mut sess) or {
@@ -536,10 +541,58 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 		toggle_collapse(mut state)
 		return
 	}
+	// Ctrl-X: drop all pending image attachments. Surface a status
+	// hint with the count (or "no attachments" if the buffer was
+	// empty) so the user knows the key was received even when
+	// there was nothing to clear.
+	if ev.kind == .clear_attachments {
+		n := ib.clear_attachments()
+		if n == 0 {
+			state.status = 'no attachments to clear'
+		} else {
+			plural := if n == 1 { '' } else { 's' }
+			state.status = 'cleared ${n} attachment${plural}'
+		}
+		return
+	}
 	if ev.kind == .enter && ib.text.starts_with('/') {
 		cmd := ib.text.all_after('/').trim_space()
 		if handle_slash(cmd, mut state, mut ib, mut cfg) {
 			return
+		}
+	}
+	// Auto-attach: when a single `.char` event delivers a string that
+	// looks like a file path or a data: URL, try to attach the image
+	// instead of inserting the text. If the attach fails (path
+	// doesn't exist, wrong extension, too large) we fall through to
+	// apply() so the text lands in the buffer as a normal character —
+	// the user can backspace if they didn't mean to paste a path.
+	// This runs BEFORE apply() so the char event is consumed on
+	// success (no spurious text appears in the input box).
+	if ev.kind == .char {
+		text := ev.text
+		if looks_like_attach_candidate(text) {
+			mut ok := false
+			mut att_name := ''
+			if text.starts_with('data:image/') {
+				if ib.attach_data_url(text) {
+					ok = true
+					if ib.attachments.len > 0 {
+						att_name = ib.attachments[ib.attachments.len - 1].name
+					}
+				}
+			} else {
+				if ib.attach_file(cfg.cwd, text) {
+					ok = true
+					if ib.attachments.len > 0 {
+						att_name = ib.attachments[ib.attachments.len - 1].name
+					}
+				}
+			}
+			if ok {
+				state.status = 'attached ${att_name} (Ctrl-X to clear, Enter to send)'
+				return
+			}
 		}
 	}
 	// Capture the text before apply() (which clears it on submit).
@@ -551,7 +604,16 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 				kind: .user
 				text: pre_submit_text
 			}
-			submit_ch <- SubmitMsg{ prompt: pre_submit_text }
+			// Snapshot the pending attachments and clear the buffer's
+			// list — they're now committed to the submit message and
+			// the buffer shouldn't keep showing them. The session's
+			// copy is what gets serialized to the wire.
+			pending := ib.attachments.clone()
+			ib.attachments = []Attachment{}
+			submit_ch <- SubmitMsg{
+				prompt:      pre_submit_text
+				attachments: pending
+			}
 		}
 		.shell {
 			// Strip the leading `!` and run as a shell command. We don't
@@ -657,7 +719,7 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 		'help' {
 			state.blocks << Block{
 				kind: .system
-				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results'
+				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results\n  Ctrl-X       clear pending image attachments\n\nattachments:\n  paste a path to a .png/.jpg/.jpeg/.gif/.webp/.bmp file\n  (absolute, or ~/... / ./... / ../... relative to cwd) to attach\n  paste a data:image/...;base64,... URL to attach\n  multi-line image input: paste a path on a new line, then type'
 			}
 		}
 		'clear' {

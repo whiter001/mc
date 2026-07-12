@@ -28,14 +28,14 @@ struct StreamOptions {
 }
 
 struct OaiRequestT {
-	model           string         @[json: model]
-	messages        []OaiMessageT  @[json: messages]
-	tools           []OaiToolT     @[json: tools]
-	temperature     f32            @[json: temperature]
-	max_tokens      int            @[json: max_tokens]
-	stream          bool           @[json: stream]
-	reasoning_split bool           @[json: reasoning_split]
-	stream_options  ?StreamOptions  @[json: stream_options]
+	model           string            @[json: model]
+	messages        []OaiReqMessageT  @[json: messages]
+	tools           []OaiToolT        @[json: tools]
+	temperature     f32               @[json: temperature]
+	max_tokens      int               @[json: max_tokens]
+	stream          bool              @[json: stream]
+	reasoning_split bool              @[json: reasoning_split]
+	stream_options  ?StreamOptions    @[json: stream_options]
 }
 
 struct OaiMessageT {
@@ -44,6 +44,43 @@ struct OaiMessageT {
 	tool_calls   ?[]OaiToolCallT @[json: tool_calls]
 	tool_call_id string          @[json: tool_call_id]
 	name         string          @[json: name]
+}
+
+// OaiReqMessageT is the wire shape we send TO the provider. Unlike
+// OaiMessageT (the response side, which always sees `content` as a
+// string), the request side always uses the array form for `content`.
+// The OpenAI-compatible protocol accepts both string and array
+// content; arrays are required for multimodal (image_url) and we
+// use the same shape uniformly so a single encoder handles text-only
+// and image-bearing messages. P0.7: image attachments.
+//
+// Wire shape:
+//
+//	{"role":"user","content":[
+//	  {"type":"text","text":"look at this"},
+//	  {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
+//	]}
+struct OaiReqMessageT {
+	role         string            @[json: role]
+	content      []OaiContentPartT @[json: content]
+	tool_calls   ?[]OaiToolCallT   @[json: tool_calls]
+	tool_call_id string            @[json: tool_call_id]
+	name         string            @[json: name]
+}
+
+// OaiContentPartT is one element of the request content array. Either
+// `text` or `image_url` is set, never both. The optional fields are
+// tagged with `?` so the JSON encoder omits the unset one — text
+// parts get `{"type":"text","text":"..."}`, image parts get
+// `{"type":"image_url","image_url":{"url":"..."}}`.
+struct OaiContentPartT {
+	typ       string        @[json: type]
+	text      ?string       @[json: text]
+	image_url ?OaiImageUrlT @[json: image_url]
+}
+
+struct OaiImageUrlT {
+	url string @[json: url]
 }
 
 struct OaiToolT {
@@ -112,7 +149,7 @@ struct OaiErrorT {
 // ---- Translate our canonical types into the wire form --------------------
 
 fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
-	mut msgs := []OaiMessageT{}
+	mut msgs := []OaiReqMessageT{}
 	for m in req.messages {
 		mut tcs := if m.tool_calls.len > 0 { []OaiToolCallT{} } else { []OaiToolCallT{} }
 		for c in m.tool_calls {
@@ -125,9 +162,10 @@ fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
 				}
 			}
 		}
-		msgs << OaiMessageT{
+		parts := build_content_parts(m)
+		msgs << OaiReqMessageT{
 			role:         m.role.str()
-			content:      m.content
+			content:      parts
 			tool_calls:   if tcs.len > 0 { tcs } else { none }
 			tool_call_id: m.tool_call_id
 			name:         m.name
@@ -145,6 +183,45 @@ fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
 		reasoning_split: true
 		stream_options:  none
 	}
+}
+
+// build_content_parts translates a canonical Message into the wire
+// content array used by OaiReqMessageT. The array always has at least
+// one element — the OpenAI API rejects an empty `content` array, so
+// when the message has no text and no attachments we emit a single
+// empty text part (which mirrors how text-only messages are sent).
+//
+// Order matters: text part first, then attachments. The model reads
+// the text as the user's "ask" and the images as supporting context;
+// the order we send is the order the model sees.
+pub fn build_content_parts(m Message) []OaiContentPartT {
+	mut parts := []OaiContentPartT{}
+	if m.content.len > 0 {
+		parts << OaiContentPartT{
+			typ:       'text'
+			text:      m.content
+			image_url: none
+		}
+	}
+	for att in m.attachments {
+		parts << OaiContentPartT{
+			typ:       'image_url'
+			text:      none
+			image_url: OaiImageUrlT{ url: 'data:${att.mime};base64,${att.b64}' }
+		}
+	}
+	if parts.len == 0 {
+		// Edge case: empty user submit. Send a single empty text part
+		// so the wire form is well-formed. The provider will see an
+		// empty user turn and respond appropriately (often an error or
+		// a clarification request).
+		parts << OaiContentPartT{
+			typ:       'text'
+			text:      ''
+			image_url: none
+		}
+	}
+	return parts
 }
 
 fn build_tools_array(tools []ToolDef) []OaiToolT {
@@ -224,7 +301,7 @@ fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, o
 }
 
 fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT {
-	mut msgs := []OaiMessageT{cap: req.messages.len}
+	mut msgs := []OaiReqMessageT{cap: req.messages.len}
 	for m in req.messages {
 		mut tcs := []OaiToolCallT{}
 		for c in m.tool_calls {
@@ -237,9 +314,10 @@ fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT 
 				}
 			}
 		}
-		msgs << OaiMessageT{
+		parts := build_content_parts(m)
+		msgs << OaiReqMessageT{
 			role:         m.role.str()
-			content:      m.content
+			content:      parts
 			tool_calls:   if tcs.len > 0 { tcs } else { none }
 			tool_call_id: m.tool_call_id
 			name:         m.name

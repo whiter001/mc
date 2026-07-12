@@ -28,7 +28,9 @@ import strings
 //   row 2:    status
 //   rows 3..(rows-reserved-2): conversation scrollback
 //   row rows-reserved-1: separator
-//   rows (rows-reserved)..rows: input box (1+ lines, multi-line capable)
+//   row rows-reserved:     attachment row (only when there are pending
+//                         attachments — P0.7)
+//   rows (rows-reserved+1)..rows: input box (1+ lines, multi-line capable)
 fn render(s TuiState, ib InputBuf) string {
 	mut buf := strings.Builder{}
 
@@ -41,17 +43,21 @@ fn render(s TuiState, ib InputBuf) string {
 
 	// Compute the input area height. Multi-line input grows with the
 	// number of \n in the buffer; cap at max_input_rows so a runaway
-	// paste can't eat the whole screen.
+	// paste can't eat the whole screen. The attachment row (when any
+	// attachments are pending) is one extra row above the prompt.
 	mut max_input_rows := if s.rows / 4 < 8 { s.rows / 4 } else { 8 }
 	if max_input_rows < 1 { max_input_rows = 1 }
-	mut input_rows := input_line_count(ib.text)
+	mut input_rows := input_line_count(ib.text, ib.attachments.len)
 	if input_rows > max_input_rows {
 		input_rows = max_input_rows
 	}
 	if input_rows < 1 { input_rows = 1 }
 
-	// Reserved: 1 header + 1 status + 1 separator + input_rows.
-	reserved := 3 + input_rows
+	// Reserved: 1 header + 1 status + 1 separator + attachment_row? + input_rows.
+	mut reserved := 3 + input_rows
+	if ib.attachments.len > 0 {
+		reserved++
+	}
 	mut conv_rows := s.rows - reserved
 	if conv_rows < 3 { conv_rows = 3 }
 
@@ -93,11 +99,18 @@ fn render(s TuiState, ib InputBuf) string {
 	buf.write_string(esc_reset)
 	buf.write_string('\n')
 
-	// 5. Input box. We show "❯ <text>" split on \n; first line gets the
+	// 5. Attachment row (P0.7) — only when there are pending
+	// attachments. Shows one badge per attachment with the display
+	// name and an inline size hint. Cleared with Ctrl-X.
+	if ib.attachments.len > 0 {
+		render_attachment_row(mut buf, ib)
+	}
+
+	// 6. Input box. We show "❯ <text>" split on \n; first line gets the
 	// prompt prefix, continuation lines are indented to align under it.
 	render_input(mut buf, ib)
 
-	// 6. Approval modal (drawn last so it sits on top of the input row).
+	// 7. Approval modal (drawn last so it sits on top of the input row).
 	if req := s.pending_approval {
 		render_approval_modal(mut buf, req, s.cols)
 	}
@@ -130,21 +143,86 @@ fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, cols int)
 	buf.write_string(cursor_show())
 }
 
-// input_line_count returns how many screen rows the input buffer will
-// occupy when rendered. It's 1 + the number of \n in the text. Soft-
-// wrapping long single lines isn't counted (we accept overflow today;
-// fixed-width terminals with sane widths won't see this in practice).
-fn input_line_count(text string) int {
-	if text.len == 0 {
-		return 1
-	}
+// input_line_count returns how many screen rows the input area will
+// occupy when rendered. It's 1 + the number of \n in the text, plus
+// one row for the attachment badges when any attachments are pending
+// (P0.7). Soft-wrapping long single lines isn't counted (we accept
+// overflow today; fixed-width terminals with sane widths won't see
+// this in practice).
+fn input_line_count(text string, attachment_count int) int {
 	mut n := 1
+	if attachment_count > 0 {
+		n++
+	}
 	for i := 0; i < text.len; i++ {
 		if text[i] == `\n` {
 			n++
 		}
 	}
 	return n
+}
+
+// render_attachment_row writes the one-line "📎 name1 (size)  📎 name2
+// (size)" badge strip that appears above the prompt when the input
+// buffer has pending attachments. Sizes are shown in human-readable
+// form (B / KB / MB) using the original byte length — base64-encoded
+// size is roughly +33% but the original is more useful for the user
+// ("that's the 2MB screenshot I took").
+//
+// We truncate long names so a 200-char filename doesn't push the
+// prompt off-screen; the truncation suffix is "…" (single glyph) to
+// make the limit obvious.
+fn render_attachment_row(mut buf strings.Builder, ib InputBuf) {
+	buf.write_string(esc_dim)
+	mut first := true
+	for att in ib.attachments {
+		if !first {
+			buf.write_string('  ')
+		}
+		first = false
+		buf.write_string('📎 ')
+		// Truncate display name to keep the row single-line. 32 chars
+		// fits comfortably next to the prompt even on narrow terminals.
+		name := if att.name.len > 32 { att.name[..31] + '…' } else { att.name }
+		buf.write_string(name)
+		// Inline size hint: decode the base64 length to get the
+		// original byte count. base64 encodes 3 input bytes as 4
+		// output chars, so bytes ≈ b64_len * 3 / 4. (Padded inputs
+		// use `=` for the last group, so subtract any padding.)
+		orig_bytes := b64_decoded_size(att.b64)
+		buf.write_string(' (${human_bytes(orig_bytes)})')
+	}
+	buf.write_string(esc_reset)
+	buf.write_string('\n')
+}
+
+// b64_decoded_size returns the approximate decoded byte count for a
+// base64 string. Used to render a useful "X MB" size hint on
+// attachment badges without re-decoding the whole image.
+fn b64_decoded_size(b64 string) int {
+	// Strip trailing padding if any (b64.decode() is lenient about it,
+	// but the math isn't — we want the true decoded length).
+	mut n := b64.len
+	mut pad := 0
+	if n > 0 && b64[n - 1] == `=` { pad++ }
+	if n > 1 && b64[n - 2] == `=` { pad++ }
+	return (n / 4) * 3 - pad
+}
+
+// human_bytes renders a byte count as "B" / "KB" / "MB" / "GB". We
+// never see anything bigger than 10 MB in practice (capped by
+// max_attachment_bytes in tui_input.v), so GB is mostly future-
+// proofing.
+fn human_bytes(b int) string {
+	if b < 1024 {
+		return '${b} B'
+	}
+	if b < 1024 * 1024 {
+		kb := b / 1024
+		return '${kb} KB'
+	}
+	mb := b / (1024 * 1024)
+	return '${mb} MB'
 }
 
 // render_conversation walks the blocks list (most recent first), renders

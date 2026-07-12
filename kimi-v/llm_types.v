@@ -28,12 +28,29 @@ pub struct Message {
 pub:
 	role    Role
 	content string
+	// Multimodal attachments (e.g. pasted images). When non-empty, the
+	// provider serializes `content` as an array of parts: one text part
+	// for `content` (if non-empty) followed by image_url parts for each
+	// attachment. Empty for text-only messages — the common case.
+	attachments []Attachment
 	// Set only when role == .assistant and the model emitted tool calls.
 	tool_calls []ToolCall
 	// Set only when role == .tool (the result of a tool execution).
 	tool_call_id string
 	// Optional name for tool/system messages (used by some providers).
 	name string
+}
+
+// Attachment is a single image (or other multimodal part) attached to a
+// Message. The `b64` field is the base64-encoded file content; providers
+// wrap it as data:<mime>;base64,<b64> on the image_url side of the wire.
+// Attachments are attached at submit time (see InputBuf.attach_file /
+// attach_data_url) and not persisted with the session in v1.
+pub struct Attachment {
+pub:
+	mime string  // "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"
+	b64  string  // base64-encoded content (no data: prefix, no newlines)
+	name string  // display name (e.g. "screenshot.png" or "pasted.png")
 }
 
 // A tool call emitted by the model. `arguments` is a JSON string so we can
