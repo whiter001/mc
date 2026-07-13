@@ -165,6 +165,18 @@ pub mut:
 	// overlay and the key loop routes y/n to the agent's decision
 	// channel instead of the input buffer.
 	pending_approval ?ApprovalRequest
+	// Pending AskUserQuestion request. When set, the render loop draws a
+	// question modal and the key loop routes digit keys to a choice.
+	pending_ask ?AskRequest
+	// Pending ExitPlanMode request. When set, the render loop draws a
+	// plan-review modal and the key loop routes y/n/r to a decision.
+	pending_exit_plan ?ExitPlanRequest
+	// Names of MCP servers currently connected (populated by run_tui after
+	// the agent is built). Used by /mcp to show live connection state.
+	mcp_connected []string
+	// Whether plan mode is currently active (drives the banner). Set by
+	// the .plan_mode status handler and the exit-plan modal flow.
+	plan_mode_active bool
 }
 
 // Block kinds for the conversation display.

@@ -199,9 +199,9 @@ kimi -p "列出 internal/ 目录所有 .v 文件，并告诉我总行数"
 ### 阶段 P3：MCP + OAuth
 
 **DoD：**
-- [ ] MCP client（stdio + HTTP）
+- [x] MCP client（stdio + HTTP）— 基于 V 标准库 `mcp` 模块；`config.toml` 用 `[[mcp]]` 配置，`mcp__<server>__<tool>` 命名空间注册，结果扁平化回传，`/mcp` 查看状态（mcp.v / tools_mcp.v / config_loader.v）
 - [ ] `/mcp-config` 对话式配置
-- [ ] OAuth + 本地回调
+- [ ] OAuth + 本地回调（HTTP transport 的鉴权目前靠 `headers` 静态配置）
 - [ ] Kimi / OpenAI / Anthropic 多 provider
 
 ### 阶段 P4：ACP
@@ -213,9 +213,10 @@ kimi -p "列出 internal/ 目录所有 .v 文件，并告诉我总行数"
 ### 阶段 P5：子 agent + hooks + skills
 
 **DoD：**
-- [ ] coder / explore / plan 三子 agent
-- [ ] 生命周期 hooks
-- [ ] skill loader + marketplace client
+- [x] coder / explore / plan 三子 agent（subagent.v + subagent_profiles.v + tools_subagent.v + Agent 工具派发）
+- [x] 生命周期 hooks（hooks.v，15 类事件：tool.pre_call/post_call、turn.pre/post、session.pre/post、message.pre/post、agent.spawn/pre_call/post_call、file.write/pre/post、error、approval 等，fail-open，exit 0=allow / 2=block）
+- [x] skill loader + `/skill:NAME` 斜杠命令（skills.v + tools_skill.v + SKILL.md YAML/TOML front matter 解析 + 参数占位符替换）
+- [x] 单元测试覆盖（p5_test.v：profiles / hook 事件 / 匹配 / JSON deny 解析 / skill 文本解析 / 参数展开与碰撞规避）
 
 ### 阶段 P6：Web / Desktop（可选）
 
@@ -481,21 +482,27 @@ dev:          ## 开发模式（解释器执行）
 
 ## 7. 完成度自审
 
-> 当前阶段：**P0 进行中**
+> 当前阶段：**P0–P2 已跑通**（详见 [PARITY_PLAN.md](./PARITY_PLAN.md) 与 README）。
+> 下方列表为最初 P0 的拆分，已整体完成并超出（见 README「本轮补齐」）。
 
 - [x] 项目骨架
 - [x] PLAN.md
 - [x] Provider 接口
-- [x] OpenAI 兼容协议
+- [x] OpenAI 兼容协议（含真·流式 SSE）
 - [x] Agent / Session / Loop
-- [x] 6 个内置工具
-- [x] Config 加载
+- [x] 11 个内置工具（read/write/edit/bash/glob/grep/web_fetch/web_search/TodoWrite/TodoRead/AskUserQuestion + 原 6）
+- [x] Config 加载（多层）
 - [x] Session 持久化
-- [x] CLI 入口
-- [x] 编译验证
-- [ ] 流式输出（P0.5）
-- [ ] TUI（P1）
-- [ ] MCP / ACP（P3/P4）
+- [x] CLI 入口（含 TUI）
+- [x] 编译验证（`v -prod` 单二进制 ~1.8MB）
+- [x] 流式输出（P0.5）
+- [x] TUI（P1 + P1.5）
+- [x] 审批 + sandbox + compaction（P2）
+- [x] Plan-mode（`/plan` + EnterPlanMode/ExitPlanMode + 只读约束 + TUI 审阅模态）
+- [x] MCP 客户端（P3；基于 vlib/mcp，stdio + HTTP，config.toml `[[mcp]]`）
+- [ ] ACP server（P4）
+- [ ] MCP OAuth / 多 provider（P3 剩余）
+- [x] 子 agent / hooks / skills（P5）
 
 ---
 

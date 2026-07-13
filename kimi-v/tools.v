@@ -6,6 +6,7 @@ module main
 
 import os
 import json
+import regex
 
 fn count_occurrences(s string, sub string) int {
 	if sub.len == 0 {
@@ -436,7 +437,7 @@ pub fn (t GrepTool) description() string {
 }
 
 pub fn (t GrepTool) parameters_schema() string {
-	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern to search for"},"path":{"type":"string","description":"Directory to search in (defaults to session cwd)"},"include":{"type":"string","description":"Optional glob filter for file names, e.g. "*.v""}},"required":["pattern"],"additionalProperties":false}'
+	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression pattern to search for (PCRE-ish via ripgrep, or V regex fallback)"},"path":{"type":"string","description":"Directory to search in (defaults to session cwd)"},"include":{"type":"string","description":"Optional glob filter for file names, e.g. "*.v""},"i":{"type":"boolean","description":"Optional case-insensitive match (default false)"}},"required":["pattern"],"additionalProperties":false}'
 }
 
 pub fn (t GrepTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
@@ -454,12 +455,30 @@ pub fn (t GrepTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	}
 	search_path := args_map['path'] or { ctx.cwd }
 	include := args_map['include'] or { '' }
+	case_insensitive := args_map['i'] == 'true'
 
 	mut hits := []string{}
-	search_dir(mut hits, search_path, pattern, include) or {
-		return ToolResult{
-			content:  'grep error: ${err.msg()}'
-			is_error: true
+	// First try ripgrep (rg), matching upstream kimi-code behaviour. If rg
+	// is available on PATH we get fast, properly-regex, skip-VCS, hidden-
+	// aware search for free. Otherwise fall back to a built-in V regex
+	// walker so the tool still works on minimal systems.
+	if rg_available() {
+		run_rg(mut hits, search_path, pattern, include, case_insensitive) or {
+			return ToolResult{
+				content:  'grep (rg) error: ${err.msg()}'
+				is_error: true
+			}
+		}
+	} else if case_insensitive {
+		// No rg and case-insensitive requested → literal CI fallback
+		// (V's stdlib `regex` has no clean CI flag here).
+		search_dir_literal(mut hits, search_path, pattern, include, true)
+	} else {
+		search_dir_regex(mut hits, search_path, pattern, include) or {
+			return ToolResult{
+				content:  'grep error: ${err.msg()}'
+				is_error: true
+			}
 		}
 	}
 
@@ -473,7 +492,78 @@ pub fn (t GrepTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	}
 }
 
-fn search_dir(mut hits []string, dir string, pattern string, include string) ! {
+// rg_available caches whether `rg` exists on PATH so we don't spawn
+// `which` on every grep call.
+fn rg_available() bool {
+	$if windows {
+		res := os.execute('where rg')
+		return res.exit_code == 0
+	} $else {
+		res := os.execute('command -v rg')
+		return res.exit_code == 0
+	}
+}
+
+// run_rg shells out to ripgrep. We pass -n (line numbers), --no-heading
+// (one match per line, path:line:content), -H (always print path) and
+// -I (don't skip binary). Optional --glob and -i flags filter the
+// search. Output cap is enforced by the caller-side truncation in the
+// TUI; here we rely on rg's own sane defaults.
+fn run_rg(mut hits []string, dir string, pattern string, include string, ci bool) ! {
+	mut cmd := 'rg --no-heading -H -n -I --color never'
+	if ci {
+		cmd += ' -i'
+	}
+	if include.len > 0 {
+		cmd += ' --glob "${include}"'
+	}
+	// Quote the pattern to avoid shell interpretation of regex metachars.
+	cmd += ' -- ' + shell_quote(pattern) + ' "${dir}"'
+	res := os.execute(cmd)
+	// rg exits 1 when there are no matches — that's not an error for us.
+	if res.exit_code != 0 && res.exit_code != 1 {
+		return error('rg exited ${res.exit_code}: ${res.output}')
+	}
+	for line in res.output.split_into_lines() {
+		if line.len > 0 {
+			hits << line.trim_space()
+		}
+	}
+}
+
+// shell_quote wraps a string in single quotes, escaping embedded single
+// quotes, so it can be safely passed as a shell argument.
+fn shell_quote(s string) string {
+	mut out := "'"
+	for ch in s {
+		if ch == `'` {
+			out += "'\\''"
+		} else {
+			out += ch.ascii_str()
+		}
+	}
+	out += "'"
+	return out
+}
+
+// search_dir_regex is the fallback when ripgrep isn't installed. It
+// walks the tree and applies V's `regex` module line-by-line. Much
+// slower and lacks rg's VCS/skip smarts, but correct and dependency-free.
+fn search_dir_regex(mut hits []string, dir string, pattern string, include string) ! {
+	if !os.is_dir(dir) {
+		return
+	}
+	// Compile once for the whole tree. If the pattern isn't valid regex,
+	// fall back to literal substring matching so the tool never hard-fails
+	// on a simple query.
+	re := regex.regex_opt(pattern) or {
+		search_dir_literal(mut hits, dir, pattern, include, false)
+		return
+	}
+	walk_regex(mut hits, dir, re, include)
+}
+
+fn walk_regex(mut hits []string, dir string, re regex.RE, include string) {
 	if !os.is_dir(dir) {
 		return
 	}
@@ -484,13 +574,12 @@ fn search_dir(mut hits []string, dir string, pattern string, include string) ! {
 		}
 		path := os.join_path(dir, entry)
 		if os.is_dir(path) {
-			search_dir(mut hits, path, pattern, include) or { continue }
+			walk_regex(mut hits, path, re, include)
 			continue
 		}
 		if include.len > 0 && !match_glob(entry, include) {
 			continue
 		}
-		// Skip binary-ish files (very rough heuristic).
 		if entry.all_after_last('.').to_lower() in ['png', 'jpg', 'jpeg', 'gif', 'zip', 'tar',
 			'gz', 'exe', 'dll', 'so', 'dylib', 'pdf'] {
 			continue
@@ -498,9 +587,41 @@ fn search_dir(mut hits []string, dir string, pattern string, include string) ! {
 		content := os.read_file(path) or { continue }
 		mut line_no := 1
 		for line in content.split_into_lines() {
-			// P0 fallback: treat `pattern` as a literal substring. P1 will
-			// wire in V's `regex` module once we settle on a regex dialect.
-			if line.contains(pattern) {
+			if re.matches_string(line) {
+				hits << '${path}:${line_no}:${line.trim_space()}'
+			}
+			line_no++
+		}
+	}
+}
+
+fn search_dir_literal(mut hits []string, dir string, pattern string, include string, ci bool) {
+	if !os.is_dir(dir) {
+		return
+	}
+	entries := os.ls(dir) or { return }
+	mut needle := if ci { pattern.to_lower() } else { pattern }
+	for entry in entries {
+		if entry.starts_with('.') {
+			continue
+		}
+		path := os.join_path(dir, entry)
+		if os.is_dir(path) {
+			search_dir_literal(mut hits, path, pattern, include, ci)
+			continue
+		}
+		if include.len > 0 && !match_glob(entry, include) {
+			continue
+		}
+		if entry.all_after_last('.').to_lower() in ['png', 'jpg', 'jpeg', 'gif', 'zip', 'tar',
+			'gz', 'exe', 'dll', 'so', 'dylib', 'pdf'] {
+			continue
+		}
+		content := os.read_file(path) or { continue }
+		mut line_no := 1
+		for line in content.split_into_lines() {
+			hay := if ci { line.to_lower() } else { line }
+			if hay.contains(needle) {
 				hits << '${path}:${line_no}:${line.trim_space()}'
 			}
 			line_no++
@@ -512,7 +633,7 @@ fn search_dir(mut hits []string, dir string, pattern string, include string) ! {
 // Registry helper
 // =============================================================================
 
-pub fn default_registry(cwd string) ToolRegistry {
+pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig) ToolRegistry {
 	mut r := new_registry()
 	r.register(ReadFileTool{ cwd: cwd })
 	r.register(WriteFileTool{ cwd: cwd })
@@ -521,5 +642,17 @@ pub fn default_registry(cwd string) ToolRegistry {
 	r.register(GlobTool{ cwd: cwd })
 	r.register(GrepTool{ cwd: cwd })
 	r.register(WebFetchTool{})
+	r.register(WebSearchTool{})
+	r.register(TodoWriteTool{})
+	r.register(TodoReadTool{})
+	r.register(AskUserQuestionTool{})
+	r.register(EnterPlanModeTool{ agent: &a })
+	r.register(ExitPlanModeTool{ agent: &a })
+	r.register(AgentTool{ agent: &a })
+	r.register(SkillTool{ agent: &a })
+	// External MCP servers (config-driven). Failures are logged, not fatal,
+	// unless a server is explicitly marked required. Connections are stored
+	// on the Agent so McpTool.execute can reach the live mcp.Client.
+	register_mcp_tools(mut r, mut a.mcp_clients, mcp_servers)
 	return r
 }

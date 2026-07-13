@@ -64,6 +64,11 @@ fn render(s TuiState, ib InputBuf) string {
 	// 1. Header.
 	buf.write_string(esc_gray)
 	buf.write_string('─ kimi')
+	if s.plan_mode_active {
+		buf.write_string(esc_yellow)
+		buf.write_string('  [PLAN MODE]')
+		buf.write_string(esc_gray)
+	}
 	if s.input_tokens > 0 || s.output_tokens > 0 {
 		buf.write_string('  ─  tokens: ${s.input_tokens}↑ ${s.output_tokens}↓')
 	}
@@ -80,8 +85,12 @@ fn render(s TuiState, ib InputBuf) string {
 	buf.write_string(esc_reset)
 	buf.write_string('\n')
 
-	// 3. Conversation scrollback (most recent at bottom).
-	lines := render_conversation(s, conv_rows)
+	// 3. Conversation scrollback (most recent at bottom). We pass the
+	// real terminal width so hard-wrapping matches the physical columns
+	// (otherwise lines wrap past `cols`, the terminal soft-wraps them
+	// again, and the separator/input rows get drawn over the tail of the
+	// conversation — making the AI reply invisible).
+	lines := render_conversation(s, conv_rows, s.cols)
 	for line in lines {
 		buf.write_string(line)
 		buf.write_string('\n')
@@ -115,7 +124,72 @@ fn render(s TuiState, ib InputBuf) string {
 		render_approval_modal(mut buf, req, s.cols)
 	}
 
+	// 8. AskUserQuestion modal (also drawn last / on top).
+	if areq := s.pending_ask {
+		render_ask_modal(mut buf, areq, s.cols, s.rows)
+	}
+
+	// 9. ExitPlanMode review modal (drawn last / on top).
+	if preq := s.pending_exit_plan {
+		render_exit_plan_modal(mut buf, preq, s.cols, s.rows)
+	}
+
 	return buf.str()
+}
+
+// render_exit_plan_modal draws the plan-review overlay anchored to the bottom
+// of the screen. It shows the plan text (truncated to fit) plus the approval
+// controls: y=approve, n=reject, e=reject+exit, r=revise, Esc=dismiss, and a
+// numbered choice when the model offered multiple approaches.
+fn render_exit_plan_modal(mut buf strings.Builder, req ExitPlanRequest, cols int, rows int) {
+	// Build the modal text lines.
+	mut lines := []string{}
+	lines << '📋 Plan ready for approval' + if req.path.len > 0 { '  (${req.path})' } else { '' }
+	// Show the plan body, truncated to a few lines so the modal stays
+	// compact. The full plan is also written to the plan file.
+	plan_lines := req.plan.split('\n')
+	mut shown := 0
+	for line in plan_lines {
+		if shown >= 8 {
+			lines << '  … (plan truncated — full text in plan file)'
+			break
+		}
+		disp := if line.len > cols - 4 { line[..cols - 5] + '…' } else { line }
+		lines << '  ${disp}'
+		shown++
+	}
+	for i, opt in req.options {
+		desc := if opt.description.len > 0 { ' — ${opt.description}' } else { '' }
+		lines << '  ${i + 1}) ${opt.label}${desc}'
+	}
+	mut hint := '[y] approve'
+	if req.options.len >= 2 {
+		hint += '  [1-3] pick approach'
+	}
+	hint += '  [n] reject  [e] reject+exit  [r] revise  [Esc] dismiss'
+	lines << hint
+
+	modal_height := lines.len
+	start_row := if rows > modal_height { rows - modal_height + 1 } else { 1 }
+
+	for i, line in lines {
+		row := start_row + i
+		buf.write_string(esc + '[${row};1H')
+		buf.write_string(esc + '[2K')
+		if i == 0 {
+			buf.write_string(esc_bg_blue)
+			buf.write_string(esc + '[97m')
+			buf.write_string('  ')
+		} else {
+			buf.write_string(esc + '[100m') // bg gray
+			buf.write_string(esc_gray)
+			buf.write_string('  ')
+		}
+		disp := if line.len > cols - 3 { line[..cols - 4] + '…' } else { line }
+		buf.write_string(disp)
+		buf.write_string(esc_reset)
+	}
+	buf.write_string(cursor_show())
 }
 
 // render_approval_modal draws a single-line "y/n" prompt anchored to the
@@ -140,6 +214,47 @@ fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, cols int)
 	buf.write_string(esc + '[97m')
 	buf.write_string('[y]es  [a]lways  [n]o')
 	buf.write_string(esc_reset)
+	buf.write_string(cursor_show())
+}
+
+// render_ask_modal draws the AskUserQuestion prompt anchored to the bottom
+// of the screen. It shows the question on one row, then one numbered row
+// per option, and a hint line. The user picks with digit keys (handled in
+// tui_loop.handle_key). Multi-select prompts say so; the harness collects a
+// comma-separated list.
+fn render_ask_modal(mut buf strings.Builder, req AskRequest, cols int, rows int) {
+	// Build the text lines first so we know how tall the modal is.
+	mut lines := []string{}
+	header := if req.header.len > 0 { '${req.header}: ' } else { '' }
+	q := '${header}${req.question}'
+	lines << q
+	for i, opt in req.options {
+		desc := if opt.description.len > 0 { ' — ${opt.description}' } else { '' }
+		lines << '  ${i + 1}) ${opt.label}${desc}'
+	}
+	lines << if req.multi { 'pick one or more (e.g. "1,3"); Esc to skip' } else { 'pick a number; Esc to skip' }
+
+	modal_height := lines.len
+	start_row := if rows > modal_height { rows - modal_height + 1 } else { 1 }
+
+	for i, line in lines {
+		row := start_row + i
+		buf.write_string(esc + '[${row};1H')
+		buf.write_string(esc + '[2K')
+		// Highlight the first (question) line subtly.
+		if i == 0 {
+			buf.write_string(esc_bg_blue)
+			buf.write_string(esc + '[97m')
+			buf.write_string('  ? ')
+		} else {
+			buf.write_string(esc + '[96m') // cyan for option lines
+			buf.write_string('  ')
+		}
+		// Truncate to terminal width to avoid wrap.
+		disp := if line.len > cols - 3 { line[..cols - 4] + '…' } else { line }
+		buf.write_string(disp)
+		buf.write_string(esc_reset)
+	}
 	buf.write_string(cursor_show())
 }
 
@@ -228,14 +343,17 @@ fn human_bytes(b int) string {
 // render_conversation walks the blocks list (most recent first), renders
 // each one to a list of wrapped lines, then truncates to fit the available
 // rows. Returns the visible lines in display order.
-fn render_conversation(s TuiState, max_rows int) []string {
+fn render_conversation(s TuiState, max_rows int, cols int) []string {
 	mut lines := []string{}
+	// Guard against a zero/garbage width so we don't divide by zero or
+	// produce a single giant unwrapped line.
+	wrap := if cols > 0 { cols } else { 80 }
 	// Walk blocks in reverse so most recent is at the bottom.
 	for i := s.blocks.len - 1; i >= 0 && lines.len < max_rows; i-- {
 		block := s.blocks[i]
 		// Skip if block's lines are entirely below the visible window
 		// (handled later by truncation).
-		rendered := render_block(block)
+		rendered := render_block(block, wrap)
 		// Prepend: append current then add rendered at front.
 		mut new_lines := rendered.clone()
 		new_lines << lines.clone()
@@ -251,7 +369,7 @@ fn render_conversation(s TuiState, max_rows int) []string {
 		thinking := render_block(Block{
 			kind: .thinking
 			text: s.streaming_thinking
-		})
+		}, wrap)
 		lines << thinking
 		if lines.len > max_rows {
 			// Drop the oldest rows; `lines` is local so the unsafe slice
@@ -263,7 +381,7 @@ fn render_conversation(s TuiState, max_rows int) []string {
 		streamed := render_block(Block{
 			kind: .assistant
 			text: s.streaming
-		})
+		}, wrap)
 		lines << streamed
 		if lines.len > max_rows {
 			lines = unsafe { lines[lines.len - max_rows..] }
@@ -273,21 +391,23 @@ fn render_conversation(s TuiState, max_rows int) []string {
 }
 
 // render_block converts a single block to a list of display lines.
-fn render_block(b Block) []string {
+// `width` is the physical terminal width in columns; we hard-wrap to it so
+// the rendered line count matches what actually occupies the screen.
+fn render_block(b Block, width int) []string {
 	match b.kind {
 		.user {
 			prefix := '${esc_green}❯${esc_reset} '
-			return wrap_lines(b.text, prefix, '')
+			return wrap_lines(b.text, prefix, '', width)
 		}
 		.assistant {
-			return wrap_lines(b.text, '', '')
+			return wrap_lines(b.text, '', '', width)
 		}
 		.thinking {
 			// Reasoning content (k1.5 / R1 style). Dim gray with a brain
 			// emoji on the first line so it's visually distinct from the
 			// final assistant answer that follows.
 			prefix := '${esc_gray}💭 ${esc_reset}${esc_dim}'
-			return wrap_lines(b.text, prefix, '${esc_dim}')
+			return wrap_lines(b.text, prefix, '${esc_dim}', width)
 		}
 		.tool_call {
 			head := '${esc_cyan}⚙ ${b.tool_name}${esc_reset}${esc_dim}(${b.tool_args})${esc_reset}'
@@ -308,10 +428,10 @@ fn render_block(b Block) []string {
 			}
 			color := if b.tool_is_error { esc_red } else { esc_dim }
 			body := b.tool_result.trim_space()
-			return wrap_lines(body, '${color}  ← ${esc_reset}', '')
+			return wrap_lines(body, '${color}  ← ${esc_reset}', '', width)
 		}
 		.system {
-			return wrap_lines(b.text, '${esc_yellow}! ${esc_reset}', '')
+			return wrap_lines(b.text, '${esc_yellow}! ${esc_reset}', '', width)
 		}
 	}
 }
@@ -320,22 +440,36 @@ fn render_block(b Block) []string {
 // line with `first_prefix` and subsequent lines with `rest_prefix`. The
 // returned lines do NOT include trailing newlines.
 //
-// Word-wrap respects whitespace; very long words break at width.
-fn wrap_lines(text string, first_prefix string, rest_prefix string) []string {
+// Word-wrap respects whitespace; very long words break at width. The
+// prefixes may contain ANSI escape codes (zero on-screen width) — we pass
+// their *visible* length separately so wrapping lands at the right column.
+fn wrap_lines(text string, first_prefix string, rest_prefix string, width int) []string {
 	mut out := []string{}
-	width := 100 // soft default; real width applied by caller
+	// The prefixes carry ANSI color codes (invisible on screen) plus a
+	// small visible glyph ("❯ ", "💭 ", "  ← "). We approximate the
+	// visible width by stripping the escape sequences so the wrap count
+	// matches what the terminal actually shows.
+	first_vis := visible_len(first_prefix)
+	rest_vis := visible_len(rest_prefix)
+	mut cur_width := width
+	if cur_width <= 0 {
+		cur_width = 80
+	}
 
 	mut current := first_prefix
-	mut cur_len := first_prefix.len // approximate; ignores ANSI escape width
-	mut first := true
+	mut cur_len := first_vis
+	// We always keep at least one word per line (never break in the
+	// middle of a word); when a single word is wider than the terminal
+	// it stays on its own line and the terminal soft-wraps the overflow.
 	words := text.split(' ')
 	for word in words {
-		wlen := word.len
-		if cur_len + wlen + 1 > width && !first {
+		wlen := visible_len(word)
+		if cur_len > 0 && cur_len + wlen + 1 > cur_width {
+			// Current line already has content and this word won't fit
+			// — flush it and start a new line with the rest prefix.
 			out << current
 			current = rest_prefix
-			cur_len = rest_prefix.len
-			first = false
+			cur_len = rest_vis
 		}
 		current += '${word} '
 		cur_len += wlen + 1
@@ -344,6 +478,35 @@ fn wrap_lines(text string, first_prefix string, rest_prefix string) []string {
 		out << current
 	}
 	return out
+}
+
+// visible_len returns the on-screen width of `s`, ignoring ANSI escape
+// sequences (e.g. "\x1b[31m"). This is an approximation (it doesn't
+// account for wide/full-width Unicode glyphs) but is good enough for
+// line-wrapping decisions in the TUI.
+fn visible_len(s string) int {
+	mut len := 0
+	mut i := 0
+	for i < s.len {
+		if s[i] == `\x1b` {
+			// Skip an ANSI CSI sequence: ESC [ ... letter.
+			i++
+			for i < s.len && s[i] != `[` {
+				i++
+			}
+			i++ // consume '['
+			for i < s.len && !(s[i] >= `A` && s[i] <= `Z`) && !(s[i] >= `a` && s[i] <= `z`) {
+				i++
+			}
+			if i < s.len {
+				i++ // consume the final letter
+			}
+			continue
+		}
+		len++
+		i++
+	}
+	return len
 }
 
 // render_input writes the input box (❯ <text>) into the provided buffer.

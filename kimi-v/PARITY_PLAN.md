@@ -45,9 +45,9 @@
 | P1 TUI | ✅ | alt-screen + raw mode + 30fps 全帧 |
 | **P1.5 TUI 打磨** | ✅ 4/4 | thinking 接线 + streaming delta 实时渲染 + Ctrl-C 取消 + 多行输入 + 历史持久化。Phase 1 闭环。|
 | P2 web_fetch + 审批 | ❌ | |
-| P3 MCP + OAuth | ❌（v0.3 optional） | |
+| P3 MCP + OAuth | ✅（MCP client；OAuth 暂未做） | mcp.v / tools_mcp.v + config_loader `[[mcp]]` + /mcp 命令 |
 | P4 ACP | ❌ | |
-| P5 subagents + hooks + skills | ❌ | |
+| P5 subagents + hooks + skills | ✅ | subagent.v / hooks.v / skills.v + tools_subagent.v / tools_skill.v + p5_test.v |
 | P6 Web/Desktop | ❌（划线） | |
 
 **还有 5 块在 PLAN.md 里没写、但 upstream 有：**

@@ -33,6 +33,10 @@ pub:
 	permission string
 	// When true, the loop is asking the tool to do a dry-run preview.
 	dry_run bool
+	// Back-reference to the owning Agent. Lets stateful tools (e.g. the
+	// Todo list) read/write agent-scoped state without the Tool interface
+	// itself carrying mutable references. Optional; most tools ignore it.
+	agent ?&Agent
 }
 
 // ToolRegistry resolves tools by name and exposes their definitions to the

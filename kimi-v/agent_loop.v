@@ -4,6 +4,8 @@
 // errors.
 module main
 
+import json
+
 pub enum LoopOutcome {
 	finished
 	max_turns
@@ -57,6 +59,7 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 			cwd:        sess.cwd
 			permission: 'default'
 			dry_run:    false
+			agent:      &a
 		}
 
 		results_ch := chan ToolExecResult{}
@@ -66,6 +69,21 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 				// Unknown tool → emit a synthetic error result so the model
 				// sees the failure and can recover.
 				sess.append_tool_result(call.id, call.name, 'unknown tool: ${call.name}')
+				continue
+			}
+
+			// ── PreToolUse hook (lifecycle) ───────────────────────────────
+			// Fires before permission checks. A blockable event whose hook
+			// returns 'block' aborts the tool call (the reason is fed back
+			// to the model). Observation-only events never block. Fail-open
+			// on hook errors/timeouts (a bad hook must never stall the loop).
+			mut pre_input := map[string]string{}
+			pre_input['tool_name'] = call.name
+			pre_input['tool_input'] = call.arguments
+			pre_block := a.hooks_engine().run_hook_for_event(.pre_tool_use, call.name, pre_input)
+			if pre_block != none {
+				sess.append_tool_result(call.id, call.name,
+					'[blocked by PreToolUse hook] ${pre_block}')
 				continue
 			}
 
@@ -83,6 +101,18 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 			skip_for_yolo := a.yolo && !is_sensitive(call.name, call.arguments)
 			skip_for_session := should_skip_approval(call.name, call.arguments, a.approved_tools)
 			if needs_approval(call.name, a.risky_tools) && !skip_for_yolo && !skip_for_session {
+				if a.non_interactive {
+					// One-shot / non-interactive mode (`-p`) has no UI to
+					// pump `approval_ch` / `decision_ch`, so blocking on
+					// them would deadlock the whole agent (it just hangs
+					// forever waiting for a human who isn't there). Without
+					// `--yolo`, refuse risky tools and tell the model it can
+					// answer without them; with `--yolo` the branch above
+					// already skips approval entirely.
+					sess.append_tool_result(call.id, call.name,
+						'[tool "${call.name}" requires approval but this is a non-interactive session; re-run with -y/--yolo to allow it, or ask without shell tools]')
+					continue
+				}
 				a.next_approval_id++
 				a.approval_ch <- ApprovalRequest{
 					id:        a.next_approval_id
@@ -97,6 +127,28 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 				}
 				if !decision.approved {
 					sess.append_tool_result(call.id, call.name, '[user denied this action]')
+					continue
+				}
+			}
+
+			// Plan-mode read-only guard. While plan mode is active,
+			// write_file / edit_file may ONLY target the current plan
+			// file. Any other write path is denied outright — the model
+			// must call ExitPlanMode (which the user approves) before
+			// editing code. This mirrors kimi-code's
+			// plan-mode-guard-deny permission policy. bash is NOT blocked
+			// here (the model may still inspect via Bash), but it follows
+			// the normal approval path above.
+			if a.plan.is_active && (call.name == 'write_file' || call.name == 'edit_file') {
+				target := tool_write_path(call.arguments)
+				plan_path := a.plan.plan_file_path
+				if plan_path.len == 0 || target != plan_path {
+					deny := if plan_path.len > 0 {
+						'Plan mode is active. You may only write to the current plan file: ${plan_path}. Call ExitPlanMode to exit plan mode before editing other files.'
+					} else {
+						'Plan mode is active. No plan file is available in this mode. Call ExitPlanMode to exit plan mode before editing files.'
+					}
+					sess.append_tool_result(call.id, call.name, deny)
 					continue
 				}
 			}
@@ -116,6 +168,18 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 		for _ in 0 .. spawned {
 			r := <-results_ch
 			sess.append_tool_result(r.call_id, r.name, r.result.content)
+			// ── PostToolUse / PostToolUseFailure hooks (observation-only)
+			if r.result.is_error {
+				mut fail_input := map[string]string{}
+				fail_input['tool_name'] = r.name
+				fail_input['tool_response'] = r.result.content
+				a.hooks_engine().run_hook_for_event(.post_tool_use_failure, r.name, fail_input)
+			} else {
+				mut post_input := map[string]string{}
+				post_input['tool_name'] = r.name
+				post_input['tool_response'] = r.result.content
+				a.hooks_engine().run_hook_for_event(.post_tool_use, r.name, post_input)
+			}
 		}
 		results_ch.close()
 	}
@@ -132,4 +196,15 @@ struct ToolExecResult {
 	call_id string
 	name    string
 	result  ToolResult
+}
+
+// tool_write_path extracts the `path` argument from a write_file / edit_file
+// tool call's raw JSON arguments. Returns '' if not found or the JSON is
+// malformed. Used by the plan-mode read-only guard to decide whether a write
+// is allowed (only the plan file may be written while plan mode is active).
+fn tool_write_path(raw_args string) string {
+	args_map := json.decode(map[string]string, raw_args) or {
+		return ''
+	}
+	return args_map['path'] or { '' }
 }

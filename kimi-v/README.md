@@ -16,7 +16,7 @@
 - ✅ **工具调用增量累积**（tool_call arguments 跨 chunk 拼接）
 - ✅ **Usage 透出** — finish event 现在带 `input_tokens` / `output_tokens`
 - ✅ **完整 TOML 解析** — `vlib/toml` 模块；user/project/env/CLI 四层合并
-- ✅ **内置工具**：`read_file` / `write_file` / `edit_file` / `bash` / `glob` / `grep` / `web_fetch`
+- ✅ **内置工具**：`read_file` / `write_file` / `edit_file` / `bash` / `glob` / `grep`（正则，优先 rg）/ `web_fetch` / `web_search`（DuckDuckGo）/ `TodoWrite` / `TodoRead` / `AskUserQuestion`
 - ✅ **OpenAI 兼容 provider**（Kimi、OpenAI、DeepSeek、OpenRouter 通用）
 - ✅ **多层 config**（CLI > env > project > user > default）
 - ✅ **跨平台路径**（XDG / macOS / Windows）
@@ -26,15 +26,69 @@
 - ✅ **P2 审批**：`bash` / `write_file` / `edit_file` / `web_fetch` 走 TUI 模态 y/n
 - ✅ **P2 配置化审批**：`risky_tools` via `config.toml` 或 `KIMI_RISKY_TOOLS`
 - ✅ **P2 sandbox**：`write_file` / `edit_file` 拒绝 `..` 逃逸到 cwd 外
-- ✅ **Slash 命令**：`/help` `/clear` `/login` `/model` `/tokens` `/usage` `/compact` `/exit`
+- ✅ **Plan-mode**：`/plan` 进入只读规划态；`EnterPlanMode` / `ExitPlanMode` 工具；规划态下除 plan 文件外禁止写文件；`ExitPlanMode` 弹出 plan 审阅模态（y 批准 / n 拒绝 / e 拒绝并退出 / r 修订 / Esc 忽略；多方案可数字键选）
+- ✅ **Slash 命令**：`/help` `/clear` `/login` `/model` `/plan` `/tokens` `/usage` `/compact` `/exit`
 - ✅ **键盘**：字符输入 / Enter / Backspace / Ctrl-A / Ctrl-E / Ctrl-U / Ctrl-W / Esc Esc 退出
 
-### 还没做（按 PLAN.md 阶段）
+### 还差（按 PLAN.md 阶段）
 
-- [ ] P3 MCP client + OAuth
+- [ ] P3 多 provider（Anthropic/Google）+ OAuth（MCP 客户端已完成，见下）
 - [ ] P4 ACP server
-- [ ] P5 子 agent + hooks + skills
+- [x] P3 MCP 客户端 ✅
+  - 基于 V 标准库 `mcp` 模块（JSON-RPC 2.0，支持 stdio 与 Streamable HTTP 两种传输）
+  - 在 `config.toml` 用 `[[mcp]]` 表配置服务器（`command`/`args` 走 stdio，或 `url` 走 HTTP；`required` 控制是否致命；`headers` 传鉴权头）
+  - 启动时连接并 `initialize`，把每个远程工具注册为 `mcp__<server>__<tool>`，模型可直接调用；结果从 `content` 数组扁平化为文本回传
+  - 失败 fail-soft：非 `required` 服务器连不上仅告警跳过；退出时关闭所有连接
+  - TUI 内 `/mcp` 斜杠命令列出已配置服务器及连接状态
+
+  `config.toml` 示例：
+  ```toml
+  # stdio 传输：通过 npx 拉起一个 MCP server 子进程
+  [[mcp]]
+  name = "fs"
+  command = "npx"
+  args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  required = true   # 连不上则启动失败；省略则仅告警跳过
+
+  # HTTP 传输：Streamable HTTP 端点（鉴权头静态配置）
+  [[mcp]]
+  name = "remote"
+  url = "http://localhost:8000/mcp"
+  headers = { Authorization = "Bearer ${YOUR_TOKEN}" }
+  ```
+  连接后远程工具以 `mcp__<server>__<tool>` 暴露给模型（如 `mcp__fs__read_file`），直接调用即可；结果从 MCP `content` 数组扁平化为文本回传。
+- [x] P5 子 agent（coder/explore/plan）+ hooks + skills ✅
+  - **子 agent**：`/agent` 或 `Agent` 工具派发 `coder` / `explore` / `plan` 三种预设 profile，独立 Session 递归运行，结果回流父 agent
+  - **Hooks**：15 类生命周期事件（tool / turn / session / message / agent / file / error / approval），fail-open，exit 0=allow / 2=block，支持 `permissionDecision:deny` 结构化拦截
+  - **Skills**：`SKILL.md`（front matter + markdown body）loader，从 `~/.kimi/skills/` 与 `./.kimi/skills/` 装载，`/skill:NAME` 斜杠命令注入 system prompt，支持 `$ARGUMENTS` / `$N` / `$name` / `${KIMI_SKILL_DIR}` 占位符
+- [x] Plan-mode（`/plan` + EnterPlanMode/ExitPlanMode）✅
 - [ ] P6 Web / Desktop
+
+### 本轮补齐的工具能力（parity 小步快跑）
+
+对齐 `kimi-code` 的 `builtin/*` 工具集，补了 4 块日常高频能力：
+
+- **`grep` 升级为正则**：优先调用 `rg`（ripgrep，与上游一致，跳过 VCS/隐藏文件、支持 glob、`-i` 大小写不敏感）；`rg` 不可用时回退到 V 自带 `regex` 模块逐行匹配，仍无效则退到字串匹配。schema 新增 `include` 与 `i` 参数。
+- **`web_search`**：通过 DuckDuckGo HTML 端点做免 key 联网搜索，复用 `web_fetch` 的 HTML→text 管线解析结果，返回带标题/URL/摘要的编号列表。
+- **`TodoWrite` / `TodoRead`**：会话级任务清单，状态存在 `Agent.todos` 上（Agent 已是 per-session 单例），`TodoWrite` 整体覆盖、`TodoRead` 读取并以 Markdown 渲染。
+- **`AskUserQuestion`**：模型向用户提问（单选/多选）。TUI 里渲染底部模态、数字键选择、逗号多选、Esc 跳过；`-p` 非交互模式超时返回提示，不阻塞。
+
+#### 新文件
+
+```
+tools_web_search.v   # DuckDuckGo 搜索
+tools_todo.v          # TodoWrite / TodoRead
+tools_ask_user.v      # AskUserQuestion
+```
+
+#### 主要改动
+
+- `agent.v`：`Agent` 加 `@[heap]` 注解 + `todos` 字段 + `ask_ch`/`ask_result_ch` 通道
+- `agent_tool_registry.v`：`ToolContext` 加 `agent ?&Agent` 回溯引用
+- `agent_loop.v`：工具执行上下文带 `agent: &a`
+- `tui_loop.v` / `tui_render.v` / `tui.v`：AskUserQuestion 模态渲染与数字键路由、`parse_selection` 辅助
+- `tools.v`：`grep` 正则化；`default_registry` 注册 4 个新工具
+
 
 ---
 
@@ -125,7 +179,25 @@ KIMI_MODEL=moonshot-v1-8k \
 | `/model NAME` | 切换模型 |
 | `/tokens` / `/usage` | 显示当前 session 累计 token 用量 |
 | `/compact` | 提示下次 turn 触发 context 压缩（自动 60% 触发） |
+| `/plan` | 进入 plan-mode（只读规划态，等价于模型调用 EnterPlanMode） |
 | `/exit` / `/quit` | 离开 TUI |
+
+### Plan-mode（规划态）
+
+对齐 kimi-code 的 `EnterPlanMode` / `ExitPlanMode` 工具：
+
+1. **进入**：模型在 nontrivial 任务前主动调用 `EnterPlanMode`，或用户在 TUI 里输入 `/plan`。进入后：
+   - 顶部状态栏显示 `[PLAN MODE]` 横幅；
+   - 系统提示被注入只读工作流（探索 → 设计 → 写 plan 文件 → `ExitPlanMode`）；
+   - **只读约束**：`write_file` / `edit_file` 只允许写当前 plan 文件，写其它文件会被循环直接拒绝（对齐 `plan-mode-guard-deny` 策略）；`bash` 仍走正常审批。
+2. **写 plan**：模型用 `write_file` / `edit_file` 把方案写到 plan 文件（路径在提醒里给出，默认 `<config-dir>/plans/<id>.md`）。
+3. **退出审阅**：模型调用 `ExitPlanMode`（可带 `options` 列举多套方案），TUI 弹出 plan 审阅模态：
+   - `y` 批准；若给了多套方案，`1`/`2`/`3` 直接批准对应方案；
+   - `n` 拒绝（留在 plan-mode，可改后重提）；
+   - `e` 拒绝并退出 plan-mode；
+   - `r` 请求修订（留 plan-mode，附反馈）；
+   - `Esc` 忽略（留 plan-mode）。
+   - 非交互模式（`kimi -p`）自动批准，不会卡住等待 UI。
 
 Flags：
 
@@ -193,10 +265,16 @@ kimi-v/
 ├── agent_loop.v         # think-act-observe 主循环
 ├── agent_tool_registry.v
 │
-├── tools.v              # 7 个内置工具 + 手写 match_glob
+├── tools.v              # 内置工具 + 手写 match_glob（grep 已接 rg/regex）
 ├── tools_web_fetch.v    # web_fetch 实现（HTTP + HTML→text）
+├── tools_web_search.v   # web_search 实现（DuckDuckGo HTML 解析）
+├── tools_todo.v          # TodoWrite / TodoRead（会话任务清单）
+├── tools_ask_user.v      # AskUserQuestion（交互式提问）
+├── tools_plan.v           # EnterPlanMode / ExitPlanMode（规划态）
+├── tools_mcp.v            # McpTool：把远程 MCP 工具适配为本地 Tool 接口
+├── mcp.v                 # MCP 客户端管理：connect / list_tools / call_tool（基于 vlib/mcp）
 │
-├── config_loader.v      # 多层 config
+├── config_loader.v      # 多层 config（含 [[mcp]] 服务器配置）
 ├── config_paths.v
 │
 ├── session_store.v

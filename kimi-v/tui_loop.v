@@ -42,6 +42,15 @@ pub enum StatusKind {
 	finished
 	cancelled        // user interrupted the current turn
 	errored
+	plan_mode        // plan-mode state change (enter/exit) — carries text
+}
+
+// PlanControl is a control message from the TUI (e.g. the `/plan` slash
+// command) to the agent runner. The runner applies it to the agent's
+// plan-mode state and emits a status so the TUI can render the banner.
+pub struct PlanControl {
+pub:
+	kind string // 'enter' (enter plan mode) | 'exit' (exit plan mode)
 }
 
 pub struct TuiStatus {
@@ -96,6 +105,10 @@ pub fn status_cancelled() TuiStatus {
 	return TuiStatus{ kind: .cancelled }
 }
 
+pub fn status_plan_mode(text string) TuiStatus {
+	return TuiStatus{ kind: .plan_mode, err: text }
+}
+
 // run_tui is the main interactive loop. Returns:
 //   - .clean_exit on user request (Esc Esc or /exit)
 //   - .fallback_to_stdout if TUI can't initialize (non-TTY)
@@ -128,14 +141,39 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	// returns when a steer arrives so the loop can call step() again.
 	// cap 4 so multiple typed-and-entered steers can queue.
 	steer_ch := chan string{cap: 4}
+	// AskUserQuestion flow: the agent forwards a question; the TUI renders
+	// a modal and sends the answer back. cap 4 so several can queue.
+	ask_ch := chan AskRequest{cap: 4}
+	ask_result_ch := chan AskResult{cap: 1}
+	// ExitPlanMode flow: the agent forwards the finalised plan; the TUI
+	// renders a plan-review modal and sends the decision back. cap 4 so
+	// several can queue (in practice one at a time).
+	exit_plan_ch := chan ExitPlanRequest{cap: 4}
+	exit_plan_result_ch := chan ExitPlanResult{cap: 1}
+	// Plan-control channel: the TUI (e.g. `/plan` slash) sends control
+	// messages to the agent runner to flip plan-mode state. cap 1.
+	plan_control_ch := chan PlanControl{cap: 1}
 	// Shutdown channel: signal handlers (SIGHUP / SIGTERM) push 1 here;
 	// the main loop picks it up on its next iteration and unwinds.
 	shutdown_ch := chan int{cap: 1}
 	install_signal_handlers(shutdown_ch)
 
+	// Build the agent (and any MCP connections) up-front so /mcp and the
+	// deferred teardown in run_tui can reach it.
+	mut agent := new_agent(provider, cfg.system_prompt)
+	agent.max_turns = cfg.max_turns
+	agent.registry = default_registry(mut agent, cfg.cwd, cfg.mcp_servers)
+	agent.set_skills(discover_skills(cfg.cwd))
+	state.mcp_connected = agent.mcp_clients.keys()
+	// Tear down MCP connections on any exit path (best-effort).
+	defer {
+		close_all_mcp_servers(mut agent.mcp_clients)
+	}
+
 	spawn key_reader_loop(key_ch)
-	spawn agent_runner_loop(provider, cfg, submit_ch, status_ch, cancel_request_ch,
-		approval_ch, decision_ch, steer_ch)
+	spawn agent_runner_loop(mut &agent, cfg, submit_ch, status_ch, cancel_request_ch,
+		approval_ch, decision_ch, steer_ch, ask_ch, ask_result_ch, exit_plan_ch,
+		exit_plan_result_ch, plan_control_ch)
 
 	state.should_exit = false
 	state.should_interrupt = false
@@ -157,6 +195,18 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 					state.pending_approval = req
 					state.status = 'awaiting approval: ${req.tool_name}'
 				}
+				areq := <-ask_ch {
+					// The model asked the user a question — render the
+					// question modal and wait for a choice.
+					state.pending_ask = areq
+					state.status = 'awaiting answer'
+				}
+				preq := <-exit_plan_ch {
+					// The model finished planning — render the plan
+					// review modal and wait for Approve / Reject / etc.
+					state.pending_exit_plan = preq
+					state.status = 'plan awaiting approval'
+				}
 				1 * time.millisecond {
 					drain_status = false
 				}
@@ -167,8 +217,8 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 		for drain_keys {
 			select {
 				ev := <-key_ch {
-					handle_key(ev, mut state, mut ib, submit_ch, mut cfg, decision_ch,
-						steer_ch)
+			handle_key(ev, mut state, mut ib, submit_ch, mut cfg, decision_ch,
+				steer_ch, ask_result_ch, exit_plan_result_ch, plan_control_ch)
 				}
 				1 * time.millisecond {
 					drain_keys = false
@@ -192,6 +242,12 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 
 		now_ms := time.now().unix_milli()
 		if now_ms - last_render_ms >= render_interval_ms {
+			// Re-query terminal size so the layout adapts to resizes
+			// (the TUI doesn't otherwise handle SIGWINCH; refreshing
+			// each frame is cheap and keeps `s.cols` accurate for
+			// line-wrapping — a stale width makes the AI reply wrap
+			// past the real edge and get covered by the input row).
+			state.refresh_size()
 			frame := render(state, ib)
 			write_stdout(frame)
 			last_render_ms = now_ms
@@ -244,10 +300,14 @@ fn key_reader_loop(key_ch chan KeyEvent) {
 
 // agent_runner_loop consumes SubmitMsg and runs the agent, pushing status
 // updates as it goes.
-fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision, steer_ch chan string) {
-	mut agent := new_agent(provider, cfg.system_prompt)
-	agent.max_turns = cfg.max_turns
-	agent.registry = default_registry(cfg.cwd)
+fn agent_runner_loop(mut agent &Agent, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision, steer_ch chan string, ask_ch chan AskRequest, ask_result_ch chan AskResult, exit_plan_ch chan ExitPlanRequest, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl) {
+	// The registry, skills, and MCP connections are already initialised
+	// by run_tui (which owns the Agent). Wire up hooks here.
+	mut hook_engine := new_hook_engine(cfg.cwd, agent.session_id)
+	for h in cfg.hooks {
+		hook_engine.add(h)
+	}
+	agent.set_hooks(hook_engine)
 	// Apply user-configured risky-tools list (config.toml /
 	// KIMI_RISKY_TOOLS). Empty means "use the built-in default".
 	if cfg.risky_tools.len > 0 {
@@ -269,9 +329,47 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 	// the request through to a modal and feeds the answer back here.
 	agent.approval_ch = approval_ch
 	agent.decision_ch = decision_ch
+	// AskUserQuestion flow: the runner shares the TUI-owned channels so
+	// the AskUserQuestion tool can forward questions and read answers.
+	agent.ask_ch = ask_ch
+	agent.ask_result_ch = ask_result_ch
+	// ExitPlanMode flow: the runner shares the TUI-owned channels so the
+	// ExitPlanMode tool can forward the plan and read the user's decision.
+	agent.exit_plan_ch = exit_plan_ch
+	agent.exit_plan_result_ch = exit_plan_result_ch
 	mut sess := new_session(cfg.cwd)
+	agent.session_id = sess.id
+
+	// ── SessionStart hook (observation-only) ──
+	mut ss_input := map[string]string{}
+	ss_input['source'] = 'startup'
+	hook_engine.run_hook_for_event(.session_start, 'startup', ss_input)
 
 	for {
+		// Drain any pending plan-control messages (e.g. `/plan`) without
+		// blocking the submit loop. We peek non-blockingly so a typed
+		// `/plan` flips plan mode immediately even when idle.
+		for {
+			ctrl := <-plan_control_ch or { break }
+			match ctrl.kind {
+				'enter' {
+					if !agent.plan.is_active {
+						np := agent.enter_plan_mode()
+						status_ch <- status_plan_mode('entered plan mode.\nplan file: ${np}\nwrite your plan, then call ExitPlanMode when ready.')
+					} else {
+						status_ch <- status_plan_mode('plan mode is already active (plan file: ${agent.plan.plan_file_path})')
+					}
+				}
+				'exit' {
+					if agent.plan.is_active {
+						prev := agent.exit_plan_mode()
+						status_ch <- status_plan_mode('exited plan mode (plan file: ${prev}). All tools are now available.')
+					}
+				}
+				else {}
+			}
+		}
+
 		msg := <-submit_ch or { break }
 		// Per-chunk forward to the TUI: every delta / thinking chunk the
 		// agent emits becomes a status, so the render loop paints tokens
@@ -290,7 +388,7 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 		// the main loop to the agent's cancel channel. The watcher exits
 		// when the run finishes (we signal via watcher_exit).
 		watcher_exit := chan int{cap: 1}
-		spawn fn (agent &Agent, cancel_request_ch chan int, watcher_exit chan int) {
+		spawn fn (mut agent &Agent, cancel_request_ch chan int, watcher_exit chan int) {
 			for {
 				// Drain one of the two channels each iteration. Whichever
 				// has a value first wins. We avoid select-with-two-chan-
@@ -310,9 +408,20 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 				_ = <-watcher_exit or { continue }
 				return
 			}
-		}(&agent, cancel_request_ch, watcher_exit)
+		}(mut &agent, cancel_request_ch, watcher_exit)
 
 		sess.append_user_with_attachments(msg.prompt, msg.attachments)
+		// ── UserPromptSubmit hook (blockable): a block decision aborts
+		// the turn before the model is called; the reason is surfaced as a
+		// system block instead of running. Fail-open on hook errors.
+		mut ups_input := map[string]string{}
+		ups_input['prompt'] = msg.prompt
+		block := hook_engine.run_hook_for_event(.user_prompt_submit, msg.prompt, ups_input)
+		if block != none {
+			status_ch <- status_started()
+			status_ch <- status_errored('blocked by UserPromptSubmit hook: ${block}')
+			continue
+		}
 		status_ch <- status_started()
 
 		res := agent.run(mut sess) or {
@@ -320,7 +429,15 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 			// user-friendly status. Cancel is a user-initiated interrupt,
 			// not a real error.
 			watcher_exit <- 1
+			// ── StopFailure hook (observation-only) ──
+			mut sf_input := map[string]string{}
+			sf_input['error'] = err.msg()
+			hook_engine.run_hook_for_event(.stop_failure, err.msg(), sf_input)
 			if err.msg() == 'cancelled' {
+				// ── Interrupt hook (observation-only) ──
+				mut intr_input := map[string]string{}
+				intr_input['reason'] = 'user interrupted'
+				hook_engine.run_hook_for_event(.interrupt, '', intr_input)
 				status_ch <- status_cancelled()
 			} else {
 				status_ch <- status_errored(err.msg())
@@ -329,11 +446,22 @@ fn agent_runner_loop(provider OpenAICompatProvider, cfg Config, submit_ch chan S
 		}
 
 		watcher_exit <- 1
+		// ── Stop hook (blockable): upstream lets a block append a message
+		// so the model continues. Our single-run loop can't easily re-loop,
+		// so we surface a block reason as a system block (fail-open: an
+		// error in the hook never blocks). Observation-only in practice
+		// here, but we keep the trigger for parity + logging.
+		hook_engine.run_hook_for_event(.stop, '', map[string]string{})
 		// Signal "stream done" — the consumer promotes whatever has
 		// accumulated in state.streaming / state.streaming_thinking into
 		// permanent blocks.
 		status_ch <- status_finished(res.usage.input_tokens, res.usage.output_tokens)
 	}
+
+	// ── SessionEnd hook (observation-only) ──
+	mut se_input := map[string]string{}
+	se_input['reason'] = 'exit'
+	hook_engine.run_hook_for_event(.session_end, 'exit', se_input)
 }
 
 // handle_status updates TuiState based on a TuiStatus message.
@@ -433,17 +561,161 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 			}
 			state.status = 'idle'
 		}
+		.plan_mode {
+			// Plan-mode state changed (entered / exited). Surface the
+			// notice as a system block and reflect the active state in
+			// the TUI so the render loop can draw the banner.
+			state.blocks << Block{
+				kind: .system
+				text: s.err
+			}
+			if s.err.to_lower().contains('entered plan mode') {
+				state.plan_mode_active = true
+			} else if s.err.to_lower().contains('exited plan mode') {
+				state.plan_mode_active = false
+			}
+			state.status = 'idle'
+		}
 	}
 }
 
 // handle_key applies a KeyEvent to the input buffer or other state.
 // May push a SubmitMsg to submit_ch, run a shell command, or trigger
 // a slash command.
-fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision, steer_ch chan string) {
+fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision, steer_ch chan string, ask_result_ch chan AskResult, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl) {
 	// EOF from stdin: pipe broken, TTY disconnected. Trigger a clean
 	// shutdown so the user doesn't get stuck in raw mode.
 	if ev.kind == .stdin_eof {
 		state.should_exit = true
+		return
+	}
+	// If the model asked a question (AskUserQuestion), route digit keys
+	// to option selection, comma-separated digits for multi-select, and
+	// Esc to skip. Everything else is ignored while the modal is up.
+	if state.pending_ask != none {
+		req := state.pending_ask or { return }
+		if ev.kind == .esc {
+			ask_result_ch <- AskResult{ id: req.id, ok: false } or {}
+			state.pending_ask = none
+			state.status = 'question skipped'
+			return
+		}
+		if ev.kind == .char {
+			if ev.text == '\n' || ev.text == '\r' {
+				// Enter with no accumulated buffer in single-char mode:
+				// treat as "no selection yet" — ignore. Multi-select uses
+				// comma which we gather below.
+				return
+			}
+			// Accumulate the user's typed selection in the input buffer
+			// text so a comma-separated list like "1,3" builds up. We
+			// re-use ib.text as a scratch area for the selection.
+			if ev.text.len == 1 {
+				c := ev.text[0]
+				if (c >= `0` && c <= `9`) || c == `,` || c == ` ` {
+					ib.text += ev.text
+					state.status = 'answer: ${ib.text} (Enter to confirm, Esc to skip)'
+					return
+				}
+			}
+			// Confirm selection on Enter (the .enter kind is handled by
+			// the apply() path only when not in a modal, so we trap it
+			// here via the .char newline above; also handle .enter kind).
+			is_enter := ev.kind == .enter
+			if is_enter || (ev.text.len == 1 && (ev.text[0] == `\n` || ev.text[0] == `\r`)) {
+				sel := parse_selection(ib.text, req.options.len, req.multi)
+				ib.text = ''
+				if sel.len == 0 {
+					state.status = 'invalid selection; try again or Esc'
+					return
+				}
+				mut choices := []string{}
+				for idx in sel {
+					choices << req.options[idx - 1].label
+				}
+				ask_result_ch <- AskResult{ id: req.id, ok: true, choices: choices } or {}
+				state.pending_ask = none
+				state.status = 'answered'
+				return
+			}
+		}
+		// Eat all other keys while the ask modal is up.
+		return
+	}
+	// If the model finished planning (ExitPlanMode), route plan-review
+	// keys: y=approve, n=reject (stay), e=reject+exit, r=revise,
+	// Esc=dismiss; digit keys pick a specific approach when offered.
+	if state.pending_exit_plan != none {
+		req := state.pending_exit_plan or { return }
+		// Digit keys select a specific approach (when options are offered).
+		if ev.kind == .char && req.options.len >= 2 {
+			c := ev.text[0]
+			if c >= `1` && c <= `9` {
+				idx := int(c - `0`)
+				if idx <= req.options.len {
+					sel := req.options[idx - 1]
+					exit_plan_result_ch <- ExitPlanResult{
+						id:             req.id
+						decision:       'approved'
+						selected_label: sel.label
+					} or {}
+					state.pending_exit_plan = none
+					state.status = 'plan approved: ${sel.label}'
+					return
+				}
+			}
+		}
+		if ev.kind == .char {
+			t := ev.text.to_lower()
+			if t == 'y' {
+				exit_plan_result_ch <- ExitPlanResult{
+					id:       req.id
+					decision: 'approved'
+				} or {}
+				state.pending_exit_plan = none
+				state.plan_mode_active = false
+				state.status = 'plan approved'
+				return
+			}
+			if t == 'n' {
+				exit_plan_result_ch <- ExitPlanResult{
+					id:       req.id
+					decision: 'rejected'
+				} or {}
+				state.pending_exit_plan = none
+				state.status = 'plan rejected (still in plan mode)'
+				return
+			}
+			if t == 'e' {
+				exit_plan_result_ch <- ExitPlanResult{
+					id:       req.id
+					decision: 'rejected_and_exit'
+				} or {}
+				state.pending_exit_plan = none
+				state.plan_mode_active = false
+				state.status = 'plan rejected; exiting plan mode'
+				return
+			}
+			if t == 'r' {
+				exit_plan_result_ch <- ExitPlanResult{
+					id:       req.id
+					decision: 'revise'
+				} or {}
+				state.pending_exit_plan = none
+				state.status = 'plan revision requested'
+				return
+			}
+		}
+		if ev.kind == .esc {
+			exit_plan_result_ch <- ExitPlanResult{
+				id:       req.id
+				decision: 'dismissed'
+			} or {}
+			state.pending_exit_plan = none
+			state.status = 'plan approval dismissed'
+			return
+		}
+		// Eat all other keys while the plan-review modal is up.
 		return
 	}
 	// If a risky tool is awaiting approval, route y/n to the decision
@@ -557,7 +829,7 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 	}
 	if ev.kind == .enter && ib.text.starts_with('/') {
 		cmd := ib.text.all_after('/').trim_space()
-		if handle_slash(cmd, mut state, mut ib, mut cfg) {
+		if handle_slash(cmd, mut state, mut ib, mut cfg, plan_control_ch, submit_ch) {
 			return
 		}
 	}
@@ -713,13 +985,56 @@ fn toggle_collapse(mut state TuiState) {
 }
 
 // handle_slash processes slash commands. Returns true if handled.
-fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config) bool {
+fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config, plan_control_ch chan PlanControl, submit_ch chan SubmitMsg) bool {
 	parts := cmd.split(' ')
+	// `/skill:NAME [args]` — load a skill's instructions into context by
+	// submitting its expanded body as a user turn. Mirrors upstream
+	// `/skill:NAME` (the colon form, distinct from the `Skill` tool the
+	// model calls on its own).
+	if parts[0].starts_with('skill:') {
+		name := parts[0]['skill:'.len..].trim_space()
+		args := if parts.len > 1 { parts[1..].join(' ').trim_space() } else { '' }
+		if name.len == 0 {
+			state.blocks << Block{
+				kind: .system
+				text: 'usage: /skill:NAME [args]'
+			}
+			ib.text = ''
+			ib.cursor = 0
+			return true
+		}
+		catalog := discover_skills(cfg.cwd)
+		def := catalog.get(name) or {
+			mut names := []string{}
+			for s in catalog.skills {
+				names << s.name
+			}
+			avail := if names.len > 0 { names.join(', ') } else { '(none installed)' }
+			state.blocks << Block{
+				kind: .system
+				text: 'skill "${name}" not found. Installed: ${avail}'
+			}
+			ib.text = ''
+			ib.cursor = 0
+			return true
+		}
+		expanded := expand_skill_parameters(def.content, args, def.dir, '', def.arguments)
+		state.blocks << Block{
+			kind: .user
+			text: '/skill:${name}${if args.len > 0 { ' ' + args } else { '' }}'
+		}
+		submit_ch <- SubmitMsg{
+			prompt: '# Skill: ${def.name}\n\n${expanded}'
+		}
+		ib.text = ''
+		ib.cursor = 0
+		return true
+	}
 	match parts[0] {
 		'help' {
 			state.blocks << Block{
 				kind: .system
-				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results\n  Ctrl-X       clear pending image attachments\n\nattachments:\n  paste a path to a .png/.jpg/.jpeg/.gif/.webp/.bmp file\n  (absolute, or ~/... / ./... / ../... relative to cwd) to attach\n  paste a data:image/...;base64,... URL to attach\n  multi-line image input: paste a path on a new line, then type'
+				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /login       store credentials\n  /model NAME  switch model\n  /plan        enter plan mode (read-only planning)\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact     force context compaction on next turn\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /mcp         list connected MCP servers and their tools\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results\n  Ctrl-X       clear pending image attachments\n\nplan review (when a plan is ready):\n  y            approve plan\n  1/2/3        approve a specific approach (when offered)\n  n            reject (stay in plan mode)\n  e            reject and exit plan mode\n  r            request revisions\n  Esc          dismiss\n\nattachments:\n  paste a path to a .png/.jpg/.jpeg/.gif/.webp/.bmp file\n  (absolute, or ~/... / ./... / ../... relative to cwd) to attach\n  paste a data:image/...;base64,... URL to attach\n  multi-line image input: paste a path on a new line, then type'
 			}
 		}
 		'clear' {
@@ -799,8 +1114,35 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 				text: 'yolo mode: ${label} (tool approvals ${if cfg.yolo { "skipped" } else { "back on" }}; sensitive patterns still re-prompt)'
 			}
 		}
+		'mcp' {
+			// List configured MCP servers and their live connection state.
+			// Tools from each server are exposed to the model as
+			// `mcp__<server>__<tool>` and can be invoked directly; this
+			// command only shows configuration + connectivity.
+			mut lines := ['MCP servers:']
+			if cfg.mcp_servers.len == 0 {
+				lines << '  (none configured — add a [[mcp]] table to config.toml)'
+			}
+			for srv in cfg.mcp_servers {
+				transport := if srv.url.len > 0 { srv.url } else { '${srv.command} ${srv.args.join(' ')}' }
+				connected := srv.name in state.mcp_connected
+				status := if connected { 'connected' } else { 'not connected' }
+				lines << '  - ${srv.name}: ${status} (${transport})'
+			}
+			state.blocks << Block{
+				kind: .system
+				text: lines.join('\n')
+			}
+		}
 		'exit', 'quit' {
 			state.should_exit = true
+		}
+		'plan' {
+			// `/plan` enters plan mode directly (equivalent to the model
+			// calling EnterPlanMode). We forward the request to the agent
+			// runner via plan_control_ch; it flips the agent's plan-mode
+			// state and emits a system block confirming the plan file path.
+			plan_control_ch <- PlanControl{ kind: 'enter' } or {}
 		}
 		else {
 			state.blocks << Block{
@@ -812,4 +1154,42 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config)
 	ib.text = ''
 	ib.cursor = 0
 	return true
+}
+
+// parse_selection parses a user-typed answer ("1", "1,3", " 2 ") into a
+// de-duplicated, sorted list of 1-based option indices. Out-of-range or
+// non-numeric tokens are dropped. When `multi` is false and the user gave
+// more than one valid index, we keep only the first (the harness still
+// answers with that single choice — matches single-select semantics).
+fn parse_selection(raw string, option_count int, multi bool) []int {
+	mut out := []int{}
+	for tok in raw.split(',') {
+		t := tok.trim_space()
+		if t.len == 0 {
+			continue
+		}
+		// Single digit (we only support 1-9 options; upstream caps at 4).
+		if t.len == 1 && t[0] >= `1` && t[0] <= `9` {
+			n := int(t[0] - `0`)
+			if n <= option_count {
+				out << n
+			}
+		}
+	}
+	if out.len == 0 {
+		return []
+	}
+	// De-duplicate.
+	mut seen := map[int]bool{}
+	mut dedup := []int{}
+	for n in out {
+		if n !in seen {
+			seen[n] = true
+			dedup << n
+		}
+	}
+	if !multi && dedup.len > 1 {
+		return [dedup[0]]
+	}
+	return dedup
 }

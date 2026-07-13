@@ -54,6 +54,17 @@ pub mut:
 	// is the only legitimate source for this field.
 	output_format string
 
+	// ---- Hooks ----
+	// Lifecycle hooks (parity with kimi-code's [[hooks]]). Each entry is a
+	// HookDef; populated from config.toml. Empty means "no hooks".
+	hooks []HookDef
+
+	// ---- MCP servers ----
+	// External Model Context Protocol servers to connect at startup
+	// (parity with kimi-code's [[mcp]]). Each entry is an McpServerConfig;
+	// populated from config.toml. Empty means "no MCP servers".
+	mcp_servers []McpServerConfig
+
 	// ---- Misc ----
 	cwd string
 }
@@ -133,6 +144,97 @@ pub fn apply_toml(mut cfg Config, raw string) {
 			}
 		}
 		cfg.risky_tools = risky
+	}
+
+	// Hooks: parse [[hooks]] array-of-tables. Each entry has event
+	// (string), matcher? (regex), command (string), timeout? (int),
+	// cwd? (string). Unknown events are skipped with a warning.
+	vh := doc.value('hooks')
+	if vh !is toml.Null {
+		hooks_arr := vh.array()
+		mut hooks := []HookDef{cap: hooks_arr.len}
+		for item in hooks_arr {
+			ev := item.value('event').string()
+			cmd := item.value('command').string()
+			if ev.len == 0 || cmd.len == 0 {
+				eprintln('warning: skipping [[hooks]] entry without event+command')
+				continue
+			}
+			et := hook_event_from_name(ev)
+			if et == none {
+				eprintln('warning: skipping [[hooks]] entry with unknown event "${ev}"')
+				continue
+			}
+			matcher := item.value('matcher').string()
+			timeout := item.value('timeout').int()
+			hcwd := item.value('cwd').string()
+			event_val := et or { HookEventType.notification }
+			hooks << HookDef{
+				event:   event_val
+				matcher: matcher
+				command: cmd
+				timeout: timeout
+				cwd:     hcwd
+			}
+		}
+		cfg.hooks = hooks
+	}
+
+	// MCP servers: parse [[mcp]] array-of-tables. Each entry has name
+	// (string, required), command? (string), args? (array of string),
+	// url? (string), required? (bool), and headers? (table of string→string).
+	// Exactly one of command/url must be set; validation happens at connect
+	// time. Unknown or malformed entries are skipped with a warning.
+	vm := doc.value('mcp')
+	if vm !is toml.Null {
+		mcp_arr := vm.array()
+		mut servers := []McpServerConfig{cap: mcp_arr.len}
+		for item in mcp_arr {
+			name_val := item.value('name')
+			if name_val is toml.Null {
+				eprintln('warning: skipping [[mcp]] entry without name')
+				continue
+			}
+			raw_name := name_val.string()
+			cmd_val := item.value('command')
+			cmd := if cmd_val is toml.Null { '' } else { cmd_val.string() }
+			mut args := []string{}
+			if cmd.len > 0 {
+				args_val := item.value('args')
+				if args_val !is toml.Null {
+					for a in args_val.array() {
+						s := a.string()
+						if s.len > 0 {
+							args << s
+						}
+					}
+				}
+			}
+			url_val := item.value('url')
+			url_str := if url_val is toml.Null { '' } else { url_val.string() }
+			req := item.value('required')
+			required := req !is toml.Null && req.bool()
+			mut headers := map[string]string{}
+			hdr := item.value('headers')
+			if hdr !is toml.Null {
+				for hk, hv in hdr.as_map() {
+					headers[hk] = hv.string()
+				}
+			}
+			if cmd.len == 0 && url_str.len == 0 {
+				eprintln('warning: skipping [[mcp]] "${raw_name}" with neither command nor url')
+				continue
+			}
+			servers << McpServerConfig{
+				name:     raw_name
+				command:  cmd
+				args:     args
+				url:      url_str
+				required: required
+				headers:  headers
+			}
+		}
+		cfg.mcp_servers = servers
 	}
 }
 

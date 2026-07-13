@@ -278,7 +278,21 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 
 	mut a := new_agent(provider, system)
 	a.max_turns = cfg.max_turns
-	a.registry = default_registry(cfg.cwd)
+	a.registry = default_registry(mut a, cfg.cwd, cfg.mcp_servers)
+	// Tear down MCP connections on any exit path (best-effort).
+	defer {
+		close_all_mcp_servers(mut a.mcp_clients)
+	}
+	// Wire up skills + hooks (parity with kimi-code lifecycle).
+	a.set_skills(discover_skills(cfg.cwd))
+	mut hook_engine := new_hook_engine(cfg.cwd, a.session_id)
+	for h in cfg.hooks {
+		hook_engine.add(h)
+	}
+	a.set_hooks(hook_engine)
+	// Non-interactive (`-p`) mode: plan-mode approvals must auto-pass so
+	// the agent never blocks on a UI that isn't present.
+	a.non_interactive = true
 	// Apply user-configured risky-tools list (config.toml /
 	// KIMI_RISKY_TOOLS). Empty means "use the built-in default".
 	if cfg.risky_tools.len > 0 {
@@ -339,11 +353,42 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 		log.info('new session')
 		new_session(cfg.cwd)
 	}
+	a.session_id = sess.id
+	// Re-wire the hook engine with the now-known session id.
+	mut he2 := new_hook_engine(cfg.cwd, sess.id)
+	for h in cfg.hooks {
+		he2.add(h)
+	}
+	a.set_hooks(he2)
+	// ── SessionStart hook (observation-only) ──
+	mut ss_input := map[string]string{}
+	ss_input['source'] = 'startup'
+	he2.run_hook_for_event(.session_start, 'startup', ss_input)
+	// ── UserPromptSubmit hook (blockable) ──
+	mut ups_input := map[string]string{}
+	ups_input['prompt'] = cli.prompt
+	upb := he2.run_hook_for_event(.user_prompt_submit, cli.prompt, ups_input)
+	if upb != none {
+		log.warn('prompt blocked by UserPromptSubmit hook: ${upb}')
+		eprintln('[blocked] ${upb}')
+		save(sess) or {}
+		return
+	}
 	sess.append_user(cli.prompt)
 
 	log.info('running agent loop...')
 	t0 := time.now()
-	result := a.run(mut sess)!
+	result := a.run(mut sess) or {
+		// ── StopFailure hook (observation-only) ──
+		mut sf_input := map[string]string{}
+		sf_input['error'] = err.msg()
+		he2.run_hook_for_event(.stop_failure, err.msg(), sf_input)
+		log.error('agent loop failed: ${err.msg()}')
+		save(sess) or { log.warn('session save failed: ${err.msg()}') }
+		return error(err.msg())
+	}
+	// ── Stop hook (blockable; surfaced for parity, fail-open) ──
+	he2.run_hook_for_event(.stop, '', map[string]string{})
 	elapsed := time.since(t0)
 
 	if result.outcome != .finished {

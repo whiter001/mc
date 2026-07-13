@@ -126,6 +126,12 @@ pub fn (mut a Agent) compact(mut sess Session) !bool {
 	to_summarize := sess.messages[..cutoff].clone()
 	recent := sess.messages[cutoff..].clone()
 
+	// ── PreCompact hook (observation-only; return value ignored) ──
+	mut pre_c := map[string]string{}
+	pre_c['trigger'] = 'auto'
+	pre_c['estimated_tokens'] = estimated.str()
+	a.hooks_engine().run_hook_for_event(.pre_compact, 'auto', pre_c)
+
 	summary := a.summarize_messages(to_summarize) or {
 		eprintln('compaction: summary call failed: ${err.msg()}')
 		return false
@@ -156,6 +162,12 @@ pub fn (mut a Agent) compact(mut sess Session) !bool {
 	if cb := a.on_compact {
 		cb(estimated, after_tokens)
 	}
+	// ── PostCompact hook (observation-only) ──
+	mut post_c := map[string]string{}
+	post_c['trigger'] = 'auto'
+	post_c['before_tokens'] = estimated.str()
+	post_c['after_tokens'] = after_tokens.str()
+	a.hooks_engine().run_hook_for_event(.post_compact, 'auto', post_c)
 	eprintln('compaction: ${before} messages (${estimated} est tokens) → ${after} messages (${after_tokens} est tokens)')
 	return true
 }
