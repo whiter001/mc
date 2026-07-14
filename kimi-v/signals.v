@@ -39,3 +39,22 @@ pub fn install_signal_handlers(shutdown_ch chan int) {
 		os.signal_ignore(.pipe)
 	}
 }
+
+// install_winch_handler wires terminal-resize notifications (SIGWINCH)
+// into a channel so the render loop can re-query the size on resize
+// instead of polling `stty size` every frame. Polling spawns a shell
+// process ~30×/second; SIGWINCH lets us refresh only when the window
+// actually changes. See run_tui's resize_ch handling.
+pub fn install_winch_handler(resize_ch chan int) {
+	$if !windows {
+		os.signal_opt(.winch, fn [resize_ch] (_ os.Signal) {
+			request_resize(resize_ch)
+		}) or {}
+	}
+}
+
+// request_resize pushes a resize notice onto the channel; the TUI main
+// loop selects on it and re-queries the terminal size.
+fn request_resize(ch chan int) {
+	ch <- 1 or {}
+}

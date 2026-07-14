@@ -177,6 +177,12 @@ pub mut:
 	// Whether plan mode is currently active (drives the banner). Set by
 	// the .plan_mode status handler and the exit-plan modal flow.
 	plan_mode_active bool
+	// dirty is set whenever the visible state changes (new block,
+	// streaming chunk, input edit, resize, modal). The render loop only
+	// repaints when dirty is true (or streaming is in progress), which
+	// avoids re-clearing + re-drawing the whole screen ~30×/sec when
+	// nothing changed. Reset to false after each successful render.
+	dirty bool
 }
 
 // Block kinds for the conversation display.
@@ -215,6 +221,7 @@ pub fn new_tui_state() TuiState {
 		blocks: []Block{}
 		rows: rows
 		cols: cols
+		dirty: true
 	}
 }
 
@@ -227,7 +234,7 @@ pub fn enter_tui() bool {
 	}
 	write_stdout(alt_screen_on())
 	write_stdout(cursor_hide())
-	clear()
+	write_stdout(clear_screen())
 	// Initial size sync.
 	rows, _ := term_size()
 	_ = rows
@@ -249,10 +256,6 @@ pub fn leave_tui() {
 // of calling os.exit() directly (which would skip leave_tui).
 pub fn request_shutdown(ch chan int) {
 	ch <- 1 or {}
-}
-
-fn clear() string {
-	return clear_screen()
 }
 
 // refresh_size re-queries the terminal size (call this from the render

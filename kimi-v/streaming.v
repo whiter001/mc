@@ -419,7 +419,9 @@ fn new_sse_parser() SseParser {
 }
 
 fn (mut p SseParser) feed(event_data string, out chan ChatEvent, cancel_ch chan int) {
-	chunk := json.decode(OaiStreamChunk, event_data) or { return }
+	chunk := json.decode(OaiStreamChunk, event_data) or {
+		return
+	}
 
 	for choice in chunk.choices {
 		// Non-blocking cancel check before each choice's processing.

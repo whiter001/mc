@@ -117,7 +117,11 @@ fn render(s TuiState, ib InputBuf) string {
 
 	// 6. Input box. We show "❯ <text>" split on \n; first line gets the
 	// prompt prefix, continuation lines are indented to align under it.
-	render_input(mut buf, ib)
+	// Compute the input box's first row (1-based) so the render can place
+	// the cursor at the real editing position (see render_input).
+	att := if ib.attachments.len > 0 { 1 } else { 0 }
+	input_start_row := conv_rows + 4 + att
+	render_input(mut buf, ib, input_start_row, s.cols)
 
 	// 7. Approval modal (drawn last so it sits on top of the input row).
 	if req := s.pending_approval {
@@ -340,52 +344,42 @@ fn human_bytes(b int) string {
 	return '${mb} MB'
 }
 
-// render_conversation walks the blocks list (most recent first), renders
-// each one to a list of wrapped lines, then truncates to fit the available
-// rows. Returns the visible lines in display order.
+// render_conversation renders all blocks (oldest first) plus any live
+// streaming text into a single list of wrapped lines in display order
+// (most recent at the bottom), then truncates to `max_rows` by dropping
+// the oldest lines at the top.
+//
+// We accumulate into one growing list and tail-truncate once at the end,
+// which is O(total lines). The previous implementation prepended each
+// block's lines with a clone (O(n²) for long scrollback); this avoids
+// that quadratic blow-up.
 fn render_conversation(s TuiState, max_rows int, cols int) []string {
-	mut lines := []string{}
 	// Guard against a zero/garbage width so we don't divide by zero or
 	// produce a single giant unwrapped line.
 	wrap := if cols > 0 { cols } else { 80 }
-	// Walk blocks in reverse so most recent is at the bottom.
-	for i := s.blocks.len - 1; i >= 0 && lines.len < max_rows; i-- {
-		block := s.blocks[i]
-		// Skip if block's lines are entirely below the visible window
-		// (handled later by truncation).
-		rendered := render_block(block, wrap)
-		// Prepend: append current then add rendered at front.
-		mut new_lines := rendered.clone()
-		new_lines << lines.clone()
-		lines = new_lines.clone()
-		if lines.len > max_rows {
-			lines = unsafe { lines[lines.len - max_rows..] }
-		}
+	mut lines := []string{}
+	// Walk blocks in forward order (oldest first); most recent ends up last.
+	for block in s.blocks {
+		lines << render_block(block, wrap)
 	}
 	// Include in-progress streaming as the final blocks: thinking first
 	// (above the answer), then the assistant text. Renders live as chunks
 	// arrive via state.streaming_thinking / state.streaming.
 	if s.streaming_thinking.len > 0 {
-		thinking := render_block(Block{
+		lines << render_block(Block{
 			kind: .thinking
 			text: s.streaming_thinking
 		}, wrap)
-		lines << thinking
-		if lines.len > max_rows {
-			// Drop the oldest rows; `lines` is local so the unsafe slice
-			// header aliasing is fine.
-			lines = unsafe { lines[lines.len - max_rows..] }
-		}
 	}
 	if s.streaming.len > 0 || s.streaming_done {
-		streamed := render_block(Block{
+		lines << render_block(Block{
 			kind: .assistant
 			text: s.streaming
 		}, wrap)
-		lines << streamed
-		if lines.len > max_rows {
-			lines = unsafe { lines[lines.len - max_rows..] }
-		}
+	}
+	// Tail-truncate to the visible window (drop oldest lines at the top).
+	if lines.len > max_rows {
+		lines = unsafe { lines[lines.len - max_rows..] }
 	}
 	return lines
 }
@@ -514,17 +508,17 @@ fn visible_len(s string) int {
 // gets the "❯ " prefix, each continuation line gets a 2-space indent
 // to keep text aligned under the prompt.
 //
-// Cursor positioning is left at the end of the buffer (we don't try to
-// position the visible cursor mid-line — that needs absolute ANSI
-// cursor addressing and tracking of (row, col) instead of a flat byte
-// offset, which is a follow-up).
-fn render_input(mut buf strings.Builder, ib InputBuf) {
-	// Empty input: just show the prompt, no text, cursor at column 2.
+// The cursor is positioned at the real editing location (ib.cursor byte
+// offset) using absolute ANSI addressing, not just left at line end — so
+// arrow keys / editing land the beam exactly where the user expects.
+fn render_input(mut buf strings.Builder, ib InputBuf, input_start_row int, cols int) {
+	// Empty input: just show the prompt, no text, cursor on column 3
+	// (after "❯ ").
 	if ib.text.len == 0 {
 		buf.write_string(esc_green)
 		buf.write_string('❯ ')
 		buf.write_string(esc_reset)
-		buf.write_string(cursor_show())
+		position_cursor(mut buf, input_start_row, 3)
 		return
 	}
 	// Split on \n and render each segment on its own visual line.
@@ -552,8 +546,49 @@ fn render_input(mut buf strings.Builder, ib InputBuf) {
 			start = i + 1
 		}
 	}
-	// Trailing space for the blinking cursor. Drop the cursor on the
-	// last visual line; the user can type to extend.
+	// Trailing space for the blinking cursor, then position it at the
+	// actual editing offset (so mid-line edits show the beam correctly).
 	buf.write_string(' ')
+	line_off, col := input_cursor_pos(ib, cols)
+	position_cursor(mut buf, input_start_row + line_off, col)
+}
+
+// position_cursor emits an absolute cursor-move escape (1-based row/col)
+// and makes the cursor visible. Used to place the input beam at the real
+// editing location rather than always at line end.
+fn position_cursor(mut buf strings.Builder, row int, col int) {
+	buf.write_string('${esc}[${row};${col}H')
 	buf.write_string(cursor_show())
+}
+
+// input_cursor_pos maps the input buffer's cursor byte offset to a
+// (line_offset, col) within the input box, where line_offset is 0-based
+// from the first input row and col is 1-based (ANSI). Each visual line has
+// a 2-column prefix ("❯ " on the first line, "  " on continuation lines)
+// so the cursor starts at column 3. Soft-wrap of lines longer than the
+// terminal width is approximated by wrapping when the column reaches
+// `cols`; wide (CJK/emoji) glyphs are counted as 1 cell, which can be off
+// for very long single lines but matches the rest of the TUI's wrapping
+// assumptions.
+fn input_cursor_pos(ib InputBuf, cols int) (int, int) {
+	mut line := 0
+	mut col := 2 // prefix width ("❯ " / "  ")
+	mut i := 0
+	for i < ib.cursor && i < ib.text.len {
+		c := ib.text[i]
+		if c == `\n` {
+			line++
+			col = 2
+			i++
+			continue
+		}
+		col++
+		if col >= cols {
+			line++
+			col = 0
+		}
+		step := codepoint_len(ib.text, i)
+		i += if step > 0 { step } else { 1 }
+	}
+	return line, col + 1 // convert 0-based col to 1-based ANSI column
 }

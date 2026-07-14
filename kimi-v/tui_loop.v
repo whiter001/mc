@@ -157,6 +157,11 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	// the main loop picks it up on its next iteration and unwinds.
 	shutdown_ch := chan int{cap: 1}
 	install_signal_handlers(shutdown_ch)
+	// Resize channel: SIGWINCH handler pushes 1 here; the main loop
+	// re-queries the terminal size only when it arrives (instead of
+	// polling `stty size` every frame, which fork/execs a shell ~30×/s).
+	resize_ch := chan int{cap: 1}
+	install_winch_handler(resize_ch)
 
 	// Build the agent (and any MCP connections) up-front so /mcp and the
 	// deferred teardown in run_tui can reach it.
@@ -178,7 +183,13 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	state.should_exit = false
 	state.should_interrupt = false
 	mut last_render_ms := i64(0)
+	mut last_size_ms := i64(0)
 	render_interval_ms := i64(33)
+	// Fallback size-refresh cadence. SIGWINCH refreshes immediately on a
+	// real resize; this 2s throttle covers environments that don't emit
+	// SIGWINCH (so a stale width never lingers for long). Far cheaper than
+	// the old per-frame `stty size` poll.
+	size_refresh_ms := i64(2000)
 
 	for {
 		// Non-blocking drain of all available events. V's select takes
@@ -194,18 +205,21 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 					// for the user's y/n.
 					state.pending_approval = req
 					state.status = 'awaiting approval: ${req.tool_name}'
+					state.dirty = true
 				}
 				areq := <-ask_ch {
 					// The model asked the user a question — render the
 					// question modal and wait for a choice.
 					state.pending_ask = areq
 					state.status = 'awaiting answer'
+					state.dirty = true
 				}
 				preq := <-exit_plan_ch {
 					// The model finished planning — render the plan
 					// review modal and wait for Approve / Reject / etc.
 					state.pending_exit_plan = preq
 					state.status = 'plan awaiting approval'
+					state.dirty = true
 				}
 				1 * time.millisecond {
 					drain_status = false
@@ -242,15 +256,23 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 
 		now_ms := time.now().unix_milli()
 		if now_ms - last_render_ms >= render_interval_ms {
-			// Re-query terminal size so the layout adapts to resizes
-			// (the TUI doesn't otherwise handle SIGWINCH; refreshing
-			// each frame is cheap and keeps `s.cols` accurate for
-			// line-wrapping — a stale width makes the AI reply wrap
-			// past the real edge and get covered by the input row).
-			state.refresh_size()
-			frame := render(state, ib)
-			write_stdout(frame)
-			last_render_ms = now_ms
+			// Only repaint when something actually changed. This keeps a
+			// static screen from being cleared + redrawn ~30×/s (which
+			// causes flicker and wasted CPU). Streaming counts as
+			// "changed" so live tokens still paint every frame.
+			streaming := state.streaming.len > 0 || state.streaming_thinking.len > 0
+			if state.dirty || streaming {
+				// Re-query terminal size on a throttled cadence so the
+				// layout adapts even without a SIGWINCH (see size_refresh_ms).
+				if now_ms - last_size_ms > size_refresh_ms {
+					state.refresh_size()
+					last_size_ms = now_ms
+				}
+				frame := render(state, ib)
+				write_stdout(frame)
+				state.dirty = false
+				last_render_ms = now_ms
+			}
 		}
 
 		if state.should_exit {
@@ -262,6 +284,17 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 		select {
 			_ := <-shutdown_ch {
 				state.should_exit = true
+			}
+			1 * time.millisecond {}
+		}
+
+		// Check for a terminal-resize signal (SIGWINCH). Re-query the
+		// size immediately and mark the frame dirty so the very next
+		// paint uses the new dimensions.
+		select {
+			_ := <-resize_ch {
+				state.refresh_size()
+				state.dirty = true
 			}
 			1 * time.millisecond {}
 		}
@@ -349,24 +382,38 @@ fn agent_runner_loop(mut agent &Agent, cfg Config, submit_ch chan SubmitMsg, sta
 		// Drain any pending plan-control messages (e.g. `/plan`) without
 		// blocking the submit loop. We peek non-blockingly so a typed
 		// `/plan` flips plan mode immediately even when idle.
+		// NOTE: `<-plan_control_ch or { break }` BLOCKS on an empty,
+		// open channel in this V version (the `or` branch only fires on
+		// close), which would deadlock the runner before it ever reaches
+		// `<-submit_ch` — so user messages would never be picked up and
+		// the assistant would never reply. Use a non-blocking select with
+		// a 1ms timeout (the same pattern as the status/key drains) so an
+		// idle plan_control_ch is skipped immediately.
 		for {
-			ctrl := <-plan_control_ch or { break }
-			match ctrl.kind {
-				'enter' {
-					if !agent.plan.is_active {
-						np := agent.enter_plan_mode()
-						status_ch <- status_plan_mode('entered plan mode.\nplan file: ${np}\nwrite your plan, then call ExitPlanMode when ready.')
-					} else {
-						status_ch <- status_plan_mode('plan mode is already active (plan file: ${agent.plan.plan_file_path})')
+			mut ctrl := PlanControl{}
+			select {
+				ctrl = <-plan_control_ch {
+					match ctrl.kind {
+						'enter' {
+							if !agent.plan.is_active {
+								np := agent.enter_plan_mode()
+								status_ch <- status_plan_mode('entered plan mode.\nplan file: ${np}\nwrite your plan, then call ExitPlanMode when ready.')
+							} else {
+								status_ch <- status_plan_mode('plan mode is already active (plan file: ${agent.plan.plan_file_path})')
+							}
+						}
+						'exit' {
+							if agent.plan.is_active {
+								prev := agent.exit_plan_mode()
+								status_ch <- status_plan_mode('exited plan mode (plan file: ${prev}). All tools are now available.')
+							}
+						}
+						else {}
 					}
 				}
-				'exit' {
-					if agent.plan.is_active {
-						prev := agent.exit_plan_mode()
-						status_ch <- status_plan_mode('exited plan mode (plan file: ${prev}). All tools are now available.')
-					}
+				1 * time.millisecond {
+					break
 				}
-				else {}
 			}
 		}
 
@@ -466,6 +513,9 @@ fn agent_runner_loop(mut agent &Agent, cfg Config, submit_ch chan SubmitMsg, sta
 
 // handle_status updates TuiState based on a TuiStatus message.
 fn handle_status(s TuiStatus, mut state TuiState) {
+	// Every status change mutates the visible state — mark the frame
+	// dirty so the render loop repaints (it otherwise skips idle frames).
+	state.dirty = true
 	match s.kind {
 		.started {
 			state.status = 'thinking...'
@@ -583,6 +633,10 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 // May push a SubmitMsg to submit_ch, run a shell command, or trigger
 // a slash command.
 fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision, steer_ch chan string, ask_result_ch chan AskResult, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl) {
+	// Most keys mutate the visible state. Mark dirty so the loop repaints;
+	// paths that are no-ops (e.g. a key eaten while a modal is up) cause
+	// at most one redundant paint, which is harmless.
+	state.dirty = true
 	// EOF from stdin: pipe broken, TTY disconnected. Trigger a clean
 	// shutdown so the user doesn't get stuck in raw mode.
 	if ev.kind == .stdin_eof {
@@ -965,21 +1019,17 @@ fn toggle_collapse(mut state TuiState) {
 		return
 	}
 	any_expanded := state.blocks.any(it.kind == .tool_result && !it.collapsed)
-	if any_expanded {
-		for i in 0 .. state.blocks.len {
-			if state.blocks[i].kind == .tool_result {
-				state.blocks[i].collapsed = true
-			}
+	// If any block is expanded, fold them all; otherwise expand them all.
+	target := any_expanded
+	for i in 0 .. state.blocks.len {
+		if state.blocks[i].kind == .tool_result {
+			state.blocks[i].collapsed = target
 		}
-		plural := if n_results == 1 { '' } else { 's' }
+	}
+	plural := if n_results == 1 { '' } else { 's' }
+	if target {
 		state.status = 'collapsed ${n_results} tool result${plural} (Ctrl-O to expand)'
 	} else {
-		for i in 0 .. state.blocks.len {
-			if state.blocks[i].kind == .tool_result {
-				state.blocks[i].collapsed = false
-			}
-		}
-		plural := if n_results == 1 { '' } else { 's' }
 		state.status = 'expanded ${n_results} tool result${plural}'
 	}
 }
