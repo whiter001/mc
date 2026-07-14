@@ -474,10 +474,56 @@ fn wrap_lines(text string, first_prefix string, rest_prefix string, width int) [
 	return out
 }
 
+// rune_width returns the on-screen (terminal cell) width of a single
+// Unicode codepoint. Most code points occupy 1 cell; the East-Asian
+// Wide / Fullwidth ranges (CJK ideographs, fullwidth Latin, many emoji)
+// occupy 2 cells. This matches how terminals lay out text so the TUI's
+// cursor placement and wrapping line up with what's actually drawn.
+fn rune_width(r rune) int {
+	if (r >= 0x1100 && r <= 0x115F) || // Hangul Jamo
+		(r >= 0x2E80 && r <= 0x303E) || // CJK radicals, Kangxi radials
+		(r >= 0x3041 && r <= 0x33FF) || // Hiragana, Katakana, CJK symbols
+		(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
+		(r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
+		(r >= 0xA000 && r <= 0xA4CF) || // Yi syllables
+		(r >= 0xAC00 && r <= 0xD7A3) || // Hangul Syllables
+		(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility Ideographs
+		(r >= 0xFE30 && r <= 0xFE4F) || // CJK Compatibility Forms
+		(r >= 0xFF00 && r <= 0xFF60) || // Fullwidth Forms
+		(r >= 0xFFE0 && r <= 0xFFE6) || // Fullwidth signs
+		(r >= 0x1F300 && r <= 0x1FAFF) || // emoji & pictographs
+		(r >= 0x20000 && r <= 0x3FFFD) { // CJK Extension B and beyond
+		return 2
+	}
+	return 1
+}
+
+// char_width returns the on-screen width of the UTF-8 codepoint beginning
+// at byte position `pos` in `s`. It decodes the codepoint (using the same
+// byte-length logic as codepoint_len) and classifies it via rune_width.
+fn char_width(s string, pos int) int {
+	n := codepoint_len(s, pos)
+	mut r := rune(s[pos])
+	if n == 2 {
+		b1 := if pos + 1 < s.len { s[pos + 1] } else { 0 }
+		r = (rune(s[pos] & 0x1F) << 6) | rune(b1 & 0x3F)
+	} else if n == 3 {
+		b1 := if pos + 1 < s.len { s[pos + 1] } else { 0 }
+		b2 := if pos + 2 < s.len { s[pos + 2] } else { 0 }
+		r = (rune(s[pos] & 0x0F) << 12) | (rune(b1 & 0x3F) << 6) | rune(b2 & 0x3F)
+	} else if n == 4 {
+		b1 := if pos + 1 < s.len { s[pos + 1] } else { 0 }
+		b2 := if pos + 2 < s.len { s[pos + 2] } else { 0 }
+		b3 := if pos + 3 < s.len { s[pos + 3] } else { 0 }
+		r = (rune(s[pos] & 0x07) << 18) | (rune(b1 & 0x3F) << 12) | (rune(b2 & 0x3F) << 6) | rune(b3 & 0x3F)
+	}
+	return rune_width(r)
+}
+
 // visible_len returns the on-screen width of `s`, ignoring ANSI escape
-// sequences (e.g. "\x1b[31m"). This is an approximation (it doesn't
-// account for wide/full-width Unicode glyphs) but is good enough for
-// line-wrapping decisions in the TUI.
+// sequences (e.g. "\x1b[31m") and counting wide/full-width Unicode
+// glyphs (CJK, emoji) as 2 cells. This is what the terminal actually
+// shows, so line-wrapping and cursor positioning stay aligned.
 fn visible_len(s string) int {
 	mut len := 0
 	mut i := 0
@@ -497,8 +543,8 @@ fn visible_len(s string) int {
 			}
 			continue
 		}
-		len++
-		i++
+		len += char_width(s, i)
+		i += codepoint_len(s, i)
 	}
 	return len
 }
@@ -565,30 +611,28 @@ fn position_cursor(mut buf strings.Builder, row int, col int) {
 // (line_offset, col) within the input box, where line_offset is 0-based
 // from the first input row and col is 1-based (ANSI). Each visual line has
 // a 2-column prefix ("❯ " on the first line, "  " on continuation lines)
-// so the cursor starts at column 3. Soft-wrap of lines longer than the
-// terminal width is approximated by wrapping when the column reaches
-// `cols`; wide (CJK/emoji) glyphs are counted as 1 cell, which can be off
-// for very long single lines but matches the rest of the TUI's wrapping
-// assumptions.
+// so the cursor starts at column 3. Glyphs are counted at their real
+// on-screen width via char_width, so CJK/emoji (2 cells) push the cursor
+// the correct number of columns. Long lines are soft-wrapped when the
+// column would exceed `cols`, matching how the terminal itself wraps.
 fn input_cursor_pos(ib InputBuf, cols int) (int, int) {
 	mut line := 0
 	mut col := 2 // prefix width ("❯ " / "  ")
 	mut i := 0
 	for i < ib.cursor && i < ib.text.len {
-		c := ib.text[i]
-		if c == `\n` {
+		if ib.text[i] == `\n` {
 			line++
 			col = 2
 			i++
 			continue
 		}
-		col++
-		if col >= cols {
+		w := char_width(ib.text, i)
+		col += w
+		if col > cols {
 			line++
-			col = 0
+			col -= cols
 		}
-		step := codepoint_len(ib.text, i)
-		i += if step > 0 { step } else { 1 }
+		i += codepoint_len(ib.text, i)
 	}
 	return line, col + 1 // convert 0-based col to 1-based ANSI column
 }
