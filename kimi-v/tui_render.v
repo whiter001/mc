@@ -577,6 +577,7 @@ fn render_input(mut buf strings.Builder, ib InputBuf, input_start_row int, cols 
 	// Empty input: just show the prompt, no text, cursor on column 3
 	// (after "❯ ").
 	if ib.text.len == 0 {
+		buf.write_string('${esc}[${input_start_row};1H')
 		buf.write_string(esc_green)
 		buf.write_string('❯ ')
 		buf.write_string(esc_reset)
@@ -584,12 +585,16 @@ fn render_input(mut buf strings.Builder, ib InputBuf, input_start_row int, cols 
 		return
 	}
 	// Split on \n and render each segment on its own visual line.
+	// We absolute-address every line so a long first line or a stray
+	// cursor column cannot push continuation lines to the right.
+	mut row := input_start_row
 	mut first := true
 	mut start := 0
 	for i := 0; i <= ib.text.len; i++ {
 		at_end := i == ib.text.len
 		at_newline := !at_end && ib.text[i] == `\n`
 		if at_end || at_newline {
+			buf.write_string('${esc}[${row};1H')
 			if first {
 				buf.write_string(esc_green)
 				buf.write_string('❯ ')
@@ -599,11 +604,12 @@ fn render_input(mut buf strings.Builder, ib InputBuf, input_start_row int, cols 
 				buf.write_string('  ')
 			}
 			buf.write_string(ib.text[start..i])
-			// Pad to end of row so the previous content is fully
-			// overwritten (we cleared the whole screen at frame start,
-			// but each line needs its own newline terminator).
+			// Each line needs its own newline terminator; the next
+			// iteration starts with an absolute address, so the stray
+			// cursor column left by LF cannot misalign us.
 			if !at_end {
 				buf.write_string('\n')
+				row++
 			}
 			start = i + 1
 		}

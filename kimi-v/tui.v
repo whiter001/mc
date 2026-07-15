@@ -61,6 +61,19 @@ fn cursor_show() string {
 	return '${esc}[?25h'
 }
 
+// enable_bracketed_paste / disable_bracketed_paste wrap the terminal in
+// bracketed-paste mode. While enabled, the terminal encloses pasted text
+// (including multi-line text and binary data sent by the terminal emulator)
+// with ESC[200~ ... ESC[201~, so the input layer can treat the whole chunk
+// atomically instead of line-by-line.
+fn enable_bracketed_paste() string {
+	return '${esc}[?2004h'
+}
+
+fn disable_bracketed_paste() string {
+	return '${esc}[?2004l'
+}
+
 // ---------- Terminal size -------------------------------------------------
 
 // term_size queries the terminal size via V's standard library
@@ -232,6 +245,9 @@ pub fn enter_tui() bool {
 	write_stdout(alt_screen_on())
 	write_stdout(cursor_hide())
 	write_stdout(clear_screen())
+	// Enable bracketed paste so multi-line / image-path pastes arrive as a
+	// single atomic chunk wrapped in ESC[200~ ... ESC[201~.
+	write_stdout(enable_bracketed_paste())
 	// Initial size sync.
 	rows, _ := term_size()
 	_ = rows
@@ -240,9 +256,10 @@ pub fn enter_tui() bool {
 
 // leave_tui restores the terminal. Always call this when leaving TUI mode.
 // Idempotent — safe to call from multiple paths because the underlying
-// `leave_raw_mode()` and the ANSI escape sequences are no-ops on a
+// `leave_raw_mode()` and the ANSI escape sequences are no-ops on an
 // already-restored terminal.
 pub fn leave_tui() {
+	write_stdout(disable_bracketed_paste())
 	write_stdout(cursor_show())
 	write_stdout(alt_screen_off())
 	leave_raw_mode()

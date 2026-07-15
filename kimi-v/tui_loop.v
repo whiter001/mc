@@ -897,6 +897,40 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 			return
 		}
 	}
+	// Bracketed-paste event: a chunk of text pasted by the terminal
+	// (wrapped in ESC[200~...ESC[201~). Try to attach it if it looks
+	// like a single image path or data URL; otherwise insert it as text
+	// so multi-line paste doesn't auto-submit.
+	if ev.kind == .paste {
+		text := ev.text
+		candidate := text.trim_space()
+		if looks_like_attach_candidate(candidate) {
+			mut ok := false
+			mut att_name := ''
+			if candidate.starts_with('data:image/') {
+				if ib.attach_data_url(candidate) {
+					ok = true
+					if ib.attachments.len > 0 {
+						att_name = ib.attachments[ib.attachments.len - 1].name
+					}
+				}
+			} else {
+				if ib.attach_file(cfg.cwd, candidate) {
+					ok = true
+					if ib.attachments.len > 0 {
+						att_name = ib.attachments[ib.attachments.len - 1].name
+					}
+				}
+			}
+			if ok {
+				state.status = 'attached ${att_name} (Ctrl-X to clear, Enter to send)'
+				return
+			}
+		}
+		// Not an attach candidate or attach failed: insert as plain text.
+		ib.insert(text)
+		return
+	}
 	// Auto-attach: when a single `.char` event delivers a string that
 	// looks like a file path or a data: URL, try to attach the image
 	// instead of inserting the text. If the attach fails (path

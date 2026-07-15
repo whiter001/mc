@@ -47,6 +47,7 @@
 module main
 
 import os
+import time
 import encoding.base64
 
 // ---------- Special key codes --------------------------------------------
@@ -110,6 +111,9 @@ pub enum KeyKind {
 	clear_attachments // Ctrl-X — drop all pending image attachments from
 	                // the input buffer. A no-op (with a status hint) when
 	                // no attachments are pending.
+	paste           // Bracketed-paste content: a chunk of text pasted by
+	                // the terminal (wrapped in ESC[200~...ESC[201~). The
+	                // TUI handles it atomically instead of char-by-char.
 	stdin_eof       // sentinel pushed by the reader when stdin closes
 	                // (pipe broken, TTY disconnected, etc.). The TUI
 	                // main loop sees this and exits cleanly.
@@ -262,6 +266,22 @@ fn (mut r StdinReader) read_esc_sequence() KeyEvent {
 				`D` { return KeyEvent{ kind: .left } }
 				`H` { return KeyEvent{ kind: .home } }
 				`F` { return KeyEvent{ kind: .end } }
+				`2` {
+					// Bracketed paste: ESC [ 2 0 0 ~ starts a paste,
+					// ESC [ 2 0 1 ~ ends it. We only handle the start
+					// here; the end is consumed by read_bracketed_paste.
+					d := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					if d == `0` {
+						e := r.read_byte() or { return KeyEvent{ kind: .esc } }
+						if e == `0` {
+							tilde := r.read_byte() or { return KeyEvent{ kind: .esc } }
+							if tilde == `~` {
+								return r.read_bracketed_paste()
+							}
+						}
+					}
+					return KeyEvent{ kind: .esc }
+				}
 				`3` {
 					// Delete key: ESC [ 3 ~
 					tilde := r.read_byte() or { return KeyEvent{ kind: .esc } }
@@ -304,6 +324,26 @@ fn (mut r StdinReader) read_esc_sequence() KeyEvent {
 			return KeyEvent{ kind: .esc }
 		}
 	}
+}
+
+// read_bracketed_paste consumes bytes until the terminal sends the
+// end-of-paste sequence ESC [ 2 0 1 ~. Returns the pasted content as a
+// single .paste KeyEvent. If stdin closes mid-paste, returns whatever
+// was accumulated up to that point.
+fn (mut r StdinReader) read_bracketed_paste() KeyEvent {
+	end_seq := '\x1b[201~'
+	mut buf := []u8{}
+	for {
+		b := r.read_byte() or { break }
+		buf << b
+		if buf.len >= end_seq.len {
+			if buf[buf.len - end_seq.len..].bytestr() == end_seq {
+				content := buf[..buf.len - end_seq.len].bytestr()
+				return KeyEvent{ kind: .paste, text: content }
+			}
+		}
+	}
+	return KeyEvent{ kind: .paste, text: buf.bytestr() }
 }
 
 // ---------- Input buffer -------------------------------------------------
@@ -565,6 +605,61 @@ fn (mut b InputBuf) history_next() {
 // base64) and well within what local / proxy providers accept.
 pub const max_attachment_bytes = 10 * 1024 * 1024
 
+// max_image_long_side is the longest edge we allow for attached images
+// before downscaling. 2000px keeps request sizes reasonable while
+// preserving enough detail for screenshots and photos.
+pub const max_image_long_side = 2000
+
+// max_attachment_bytes_after_compress is the size cap applied after
+// compression. 5 MB leaves headroom under the OpenAI 20 MB vision
+// limit (base64 inflates ~33%, so 5 MB raw ≈ 6.7 MB on the wire).
+pub const max_attachment_bytes_after_compress = 5 * 1024 * 1024
+
+// compress_image returns a path to a downscaled copy of the image.
+// If the image is already within the size limit, the original path is
+// returned and the caller does not need to clean up. If a temporary
+// file is returned, the caller must delete it after reading.
+fn compress_image(path string) string {
+	$if macos {
+		// macOS ships `sips`. Use it to query dimensions and rescale.
+		info := os.execute('sips -g pixelWidth -g pixelHeight "${path}"')
+		if info.exit_code != 0 {
+			return path
+		}
+		mut w := 0
+		mut h := 0
+		for line in info.output.split('\n') {
+			if line.contains('pixelWidth:') {
+				w = line.all_after('pixelWidth:').trim_space().int()
+			} else if line.contains('pixelHeight:') {
+				h = line.all_after('pixelHeight:').trim_space().int()
+			}
+		}
+		if w <= 0 || h <= 0 {
+			return path
+		}
+		long_side := if w > h { w } else { h }
+		if long_side <= max_image_long_side {
+			return path
+		}
+		ext := attachment_ext(path)
+		suffix := if ext.len > 0 { ext } else { 'jpg' }
+		tmp := os.join_path(os.temp_dir(), 'kimi-v-compress-${time.now().unix_nano()}.${suffix}')
+		res := os.execute('sips -Z ${max_image_long_side} "${path}" --out "${tmp}" 2>/dev/null')
+		if res.exit_code == 0 && os.exists(tmp) {
+			// sips can produce files that are still large (uncompressed
+			// BMP-style output). If the result exceeds the cap, fall back
+			// to the original rather than sending an oversized payload.
+			size := os.file_size(tmp)
+			if size >= 0 && size <= max_attachment_bytes_after_compress {
+				return tmp
+			}
+			os.rm(tmp) or {}
+		}
+	}
+	return path
+}
+
 // attach_file attempts to attach the file at `path` (resolved
 // against `cwd` when relative). Returns true on success — the file
 // was read, base64-encoded, and pushed onto the attachment list.
@@ -582,11 +677,18 @@ pub fn (mut b InputBuf) attach_file(cwd string, path string) bool {
 	if mime.len == 0 {
 		return false
 	}
-	size := os.file_size(resolved)
+	// Downscale oversized images before reading them into memory.
+	compressed_path := compress_image(resolved)
+	defer {
+		if compressed_path != resolved {
+			os.rm(compressed_path) or {}
+		}
+	}
+	size := os.file_size(compressed_path)
 	if size < 0 || size > max_attachment_bytes {
 		return false
 	}
-	data := os.read_file(resolved) or { return false }
+	data := os.read_file(compressed_path) or { return false }
 	b64 := base64.encode(data.bytes())
 	name := attachment_basename(path)
 	b.attachments << Attachment{
