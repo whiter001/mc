@@ -42,7 +42,8 @@ fn render(s TuiState, ib InputBuf) string {
 	// Compute the input area height. Multi-line input grows with the
 	// number of \n in the buffer; cap at max_input_rows so a runaway
 	// paste can't eat the whole screen. The attachment row (when any
-	// attachments are pending) is one extra row above the prompt.
+	// attachments are pending) and the clipboard hint footer each add
+	// one extra row above the prompt.
 	mut max_input_rows := if s.rows / 4 < 8 { s.rows / 4 } else { 8 }
 	if max_input_rows < 1 { max_input_rows = 1 }
 	mut input_rows := input_line_count(ib.text, ib.attachments.len)
@@ -50,9 +51,11 @@ fn render(s TuiState, ib InputBuf) string {
 		input_rows = max_input_rows
 	}
 	if input_rows < 1 { input_rows = 1 }
+	foot := if s.clipboard_hint.len > 0 { 1 } else { 0 }
 
-	// Reserved: 1 header + 1 status + 1 separator + attachment_row? + input_rows.
-	mut reserved := 3 + input_rows
+	// Reserved: 1 header + 1 status + 1 separator + attachment_row? +
+	// clipboard_hint footer? + input_rows.
+	mut reserved := 3 + input_rows + foot
 	if ib.attachments.len > 0 {
 		reserved++
 	}
@@ -131,25 +134,36 @@ fn render(s TuiState, ib InputBuf) string {
 		row++
 	}
 
-	// 6. Input box. We show "❯ <text>" split on \n; first line gets the
+	// 6. Clipboard image hint footer — shown when the system clipboard
+	// holds an image and the terminal window has focus.
+	if s.clipboard_hint.len > 0 {
+		buf.write_string(esc + '[${row};1H')
+		buf.write_string(esc_cyan)
+		buf.write_string(s.clipboard_hint)
+		buf.write_string(esc_reset)
+		buf.write_string('\n')
+		row++
+	}
+
+	// 7. Input box. We show "❯ <text>" split on \n; first line gets the
 	// prompt prefix, continuation lines are indented to align under it.
 	// Compute the input box's first row (1-based) so the render can place
 	// the cursor at the real editing position (see render_input).
 	att := if ib.attachments.len > 0 { 1 } else { 0 }
-	input_start_row := conv_rows + 4 + att
+	input_start_row := conv_rows + 4 + att + foot
 	render_input(mut buf, ib, input_start_row, s.cols)
 
-	// 7. Approval modal (drawn last so it sits on top of the input row).
+	// 8. Approval modal (drawn last so it sits on top of the input row).
 	if req := s.pending_approval {
 		render_approval_modal(mut buf, req, s.cols)
 	}
 
-	// 8. AskUserQuestion modal (also drawn last / on top).
+	// 9. AskUserQuestion modal (also drawn last / on top).
 	if areq := s.pending_ask {
 		render_ask_modal(mut buf, areq, s.cols, s.rows)
 	}
 
-	// 9. ExitPlanMode review modal (drawn last / on top).
+	// 10. ExitPlanMode review modal (drawn last / on top).
 	if preq := s.pending_exit_plan {
 		render_exit_plan_modal(mut buf, preq, s.cols, s.rows)
 	}

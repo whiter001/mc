@@ -132,6 +132,12 @@ pub fn run_tui(mut cfg Config, provider OpenAICompatProvider) TuiLoopResult {
 	if !enter_tui() {
 		return .fallback_to_stdout
 	}
+	// Some terminals don't send an initial focus-in event when the TUI
+	// takes over the screen. Check the clipboard once at startup so a
+	// pre-copied image still gets the paste hint.
+	if clipboard_has_image() {
+		state.clipboard_hint = 'Ctrl+V to paste image'
+	}
 
 	key_ch := chan KeyEvent{cap: 16}
 	submit_ch := chan SubmitMsg{cap: 4}
@@ -654,17 +660,23 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 		return
 	}
 	// Focus-in/out reports from the terminal. On focus-in, check whether
-	// the system clipboard holds an image and surface a paste hint.
+	// the system clipboard holds an image and surface a paste hint in the
+	// footer above the input box.
 	if ev.kind == .focus_in {
 		if clipboard_has_image() {
-			state.status = 'Ctrl+V to paste image'
-		} else if state.status == 'Ctrl+V to paste image' {
-			state.status = 'idle'
+			state.clipboard_hint = 'Ctrl+V to paste image'
+		} else {
+			state.clipboard_hint = ''
 		}
 		return
 	}
 	if ev.kind == .focus_out {
 		return
+	}
+	// Any real user input dismisses the transient clipboard hint so it
+	// doesn't linger over the conversation.
+	if state.clipboard_hint.len > 0 {
+		state.clipboard_hint = ''
 	}
 	// If the model asked a question (AskUserQuestion), route digit keys
 	// to option selection, comma-separated digits for multi-select, and

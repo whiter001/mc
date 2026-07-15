@@ -194,6 +194,10 @@ pub mut:
 	// Whether plan mode is currently active (drives the banner). Set by
 	// the .plan_mode status handler and the exit-plan modal flow.
 	plan_mode_active bool
+	// Transient clipboard hint shown when the system clipboard contains
+	// an image and the TUI window has focus (e.g. "Ctrl+V to paste image").
+	// Rendered as a footer row above the input box; cleared on user input.
+	clipboard_hint string
 	// dirty is set whenever the visible state changes (new block,
 	// streaming chunk, input edit, resize, modal). The render loop only
 	// repaints when dirty is true (or streaming is in progress), which
