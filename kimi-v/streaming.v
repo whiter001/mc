@@ -528,6 +528,7 @@ fn read_sse_stream(mut reader StreamReader, out chan ChatEvent, cancel_ch chan i
 		reader.close()
 	}
 
+	mut parser := new_sse_parser()
 	mut current_data := strings.Builder{}
 	for {
 		// Check for cancellation before each read. Non-blocking: if
@@ -551,7 +552,6 @@ fn read_sse_stream(mut reader StreamReader, out chan ChatEvent, cancel_ch chan i
 				if data.trim_space() == '[DONE]' {
 					return
 				}
-				mut parser := new_sse_parser()
 				parser.feed(data, out, cancel_ch)
 			}
 			continue
