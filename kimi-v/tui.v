@@ -74,6 +74,17 @@ fn disable_bracketed_paste() string {
 	return '${esc}[?2004l'
 }
 
+// enable_focus_events / disable_focus_events toggle terminal focus-in/focus-out
+// reports (ESC I / ESC O). Used by the TUI to detect when the window regains
+// focus so we can check the clipboard for an image and show a paste hint.
+fn enable_focus_events() string {
+	return '${esc}[?1004h'
+}
+
+fn disable_focus_events() string {
+	return '${esc}[?1004l'
+}
+
 // ---------- Terminal size -------------------------------------------------
 
 // term_size queries the terminal size via V's standard library
@@ -248,6 +259,9 @@ pub fn enter_tui() bool {
 	// Enable bracketed paste so multi-line / image-path pastes arrive as a
 	// single atomic chunk wrapped in ESC[200~ ... ESC[201~.
 	write_stdout(enable_bracketed_paste())
+	// Enable focus-in/focus-out events so we can refresh the clipboard-image
+	// hint when the user returns to the terminal window.
+	write_stdout(enable_focus_events())
 	// Initial size sync.
 	rows, _ := term_size()
 	_ = rows
@@ -260,6 +274,7 @@ pub fn enter_tui() bool {
 // already-restored terminal.
 pub fn leave_tui() {
 	write_stdout(disable_bracketed_paste())
+	write_stdout(disable_focus_events())
 	write_stdout(cursor_show())
 	write_stdout(alt_screen_off())
 	leave_raw_mode()

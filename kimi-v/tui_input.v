@@ -117,6 +117,10 @@ pub enum KeyKind {
 	paste           // Bracketed-paste content: a chunk of text pasted by
 	                // the terminal (wrapped in ESC[200~...ESC[201~). The
 	                // TUI handles it atomically instead of char-by-char.
+	focus_in        // Terminal focus-in report (ESC I): the TUI window
+	                // regained focus. Used to refresh clipboard hints.
+	focus_out       // Terminal focus-out report (ESC O): the TUI window
+	                // lost focus. Mostly ignored; hint state is reset.
 	stdin_eof       // sentinel pushed by the reader when stdin closes
 	                // (pipe broken, TTY disconnected, etc.). The TUI
 	                // main loop sees this and exits cleanly.
@@ -332,6 +336,14 @@ fn (mut r StdinReader) read_esc_sequence() KeyEvent {
 			// a way to break the line.
 			return KeyEvent{ kind: .insert_newline }
 		}
+		`I` {
+			// Focus-in report: terminal window regained focus.
+			return KeyEvent{ kind: .focus_in }
+		}
+		`O` {
+			// Focus-out report: terminal window lost focus.
+			return KeyEvent{ kind: .focus_out }
+		}
 		else {
 			// Single ESC, or ESC + letter (Alt-key chord). We treat any
 			// unknown ESC sequence as just ESC for simplicity.
@@ -385,6 +397,23 @@ fn read_clipboard() string {
 		}
 	}
 	return ''
+}
+
+// clipboard_has_image returns true when the system clipboard currently
+// holds an image. Used to show the "Ctrl+V to paste image" hint when the
+// TUI window regains focus.
+fn clipboard_has_image() bool {
+	$if macos {
+		// `clipboard info` returns a list of available types; look for
+		// common image format class names (PNG, JPEG, TIFF, PICT, GIF).
+		res := os.execute("osascript -e 'clipboard info'")
+		if res.exit_code == 0 {
+			info := res.output.to_lower()
+			return info.contains('pngf') || info.contains('jpeg') || info.contains('tiff')
+				|| info.contains('pict') || info.contains('gif') || info.contains('image')
+		}
+	}
+	return false
 }
 
 // ---------- Input buffer -------------------------------------------------

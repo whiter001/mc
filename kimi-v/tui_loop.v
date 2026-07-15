@@ -653,6 +653,19 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 		state.should_exit = true
 		return
 	}
+	// Focus-in/out reports from the terminal. On focus-in, check whether
+	// the system clipboard holds an image and surface a paste hint.
+	if ev.kind == .focus_in {
+		if clipboard_has_image() {
+			state.status = 'Ctrl+V to paste image'
+		} else if state.status == 'Ctrl+V to paste image' {
+			state.status = 'idle'
+		}
+		return
+	}
+	if ev.kind == .focus_out {
+		return
+	}
 	// If the model asked a question (AskUserQuestion), route digit keys
 	// to option selection, comma-separated digits for multi-select, and
 	// Esc to skip. Everything else is ignored while the modal is up.
