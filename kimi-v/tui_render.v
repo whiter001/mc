@@ -36,10 +36,8 @@ fn render(s TuiState, ib InputBuf) string {
 
 	// Hide cursor at start of frame; we'll position it on the input row.
 	buf.write_string(cursor_hide())
-	// Move to top-left.
-	buf.write_string(esc + '[H')
-	// Clear the whole screen.
-	buf.write_string(esc + '[2J')
+	// Clear the whole screen and move the cursor to the top-left.
+	buf.write_string(clear_screen())
 
 	// Compute the input area height. Multi-line input grows with the
 	// number of \n in the buffer; cap at max_input_rows so a runaway
@@ -61,7 +59,13 @@ fn render(s TuiState, ib InputBuf) string {
 	mut conv_rows := s.rows - reserved
 	if conv_rows < 3 { conv_rows = 3 }
 
+	// Use absolute cursor addressing for every row so a single misplaced
+	// cursor (or a terminal that doesn't reset the column after \n) can't
+	// push the whole frame to the right.
+	mut row := 1
+
 	// 1. Header.
+	buf.write_string(esc + '[${row};1H')
 	buf.write_string(esc_gray)
 	buf.write_string('─ kimi')
 	if s.plan_mode_active {
@@ -76,6 +80,8 @@ fn render(s TuiState, ib InputBuf) string {
 	buf.write_string('\n')
 
 	// 2. Status line.
+	row = 2
+	buf.write_string(esc + '[${row};1H')
 	buf.write_string(esc_dim)
 	if s.status.len > 0 {
 		buf.write_string('  ${s.status}')
@@ -91,28 +97,38 @@ fn render(s TuiState, ib InputBuf) string {
 	// again, and the separator/input rows get drawn over the tail of the
 	// conversation — making the AI reply invisible).
 	lines := render_conversation(s, conv_rows, s.cols)
+	row = 3
 	for line in lines {
+		buf.write_string(esc + '[${row};1H')
 		buf.write_string(line)
 		buf.write_string('\n')
+		row++
 	}
 
 	// Pad to fill the conversation area.
 	pad := conv_rows - lines.len
 	for _ in 0 .. pad {
+		buf.write_string(esc + '[${row};1H')
 		buf.write_string('\n')
+		row++
 	}
 
 	// 4. Separator.
+	buf.write_string(esc + '[${row};1H')
 	buf.write_string(esc_gray)
 	buf.write_string('─'.repeat(s.cols))
 	buf.write_string(esc_reset)
 	buf.write_string('\n')
+	row++
 
 	// 5. Attachment row (P0.7) — only when there are pending
 	// attachments. Shows one badge per attachment with the display
 	// name and an inline size hint. Cleared with Ctrl-X.
 	if ib.attachments.len > 0 {
+		buf.write_string(esc + '[${row};1H')
 		render_attachment_row(mut buf, ib)
+		buf.write_string('\n')
+		row++
 	}
 
 	// 6. Input box. We show "❯ <text>" split on \n; first line gets the

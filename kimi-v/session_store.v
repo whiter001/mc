@@ -18,6 +18,7 @@ pub:
 	msg_count  int
 }
 
+// save persists sess to a TOML file under the sessions directory.
 pub fn save(sess Session) ! {
 	ensure_dir(sessions_dir())!
 	path := os.join_path(sessions_dir(), '${sess.id}.toml')
@@ -42,6 +43,7 @@ pub fn save(sess Session) ! {
 	os.write_file(path, buf.str())!
 }
 
+// write_message serializes a single message into the TOML buffer.
 fn write_message(mut buf strings.Builder, m Message) {
 	buf.write_string('[messages]\n')
 	buf.write_string('role = "${m.role.str()}"\n')
@@ -59,6 +61,7 @@ fn write_message(mut buf strings.Builder, m Message) {
 	}
 }
 
+// load reads a session from its TOML file.
 pub fn load(id string) !Session {
 	path := os.join_path(sessions_dir(), '${id}.toml')
 	if !os.exists(path) {
@@ -68,6 +71,7 @@ pub fn load(id string) !Session {
 	return parse_session(id, content)!
 }
 
+// list_all returns metadata summaries for all persisted sessions, newest first.
 pub fn list_all() ![]SessionSummary {
 	ensure_dir(sessions_dir())!
 	mut summaries := []SessionSummary{}
@@ -86,6 +90,7 @@ pub fn list_all() ![]SessionSummary {
 	return summaries
 }
 
+// parse_summary extracts metadata from a session TOML file without loading messages.
 fn parse_summary(id string, content string) !SessionSummary {
 	mut sess := Session{
 		id: id
@@ -131,6 +136,7 @@ fn parse_summary(id string, content string) !SessionSummary {
 	}
 }
 
+// parse_session reconstructs a full Session from a TOML file.
 fn parse_session(id string, content string) !Session {
 	mut sess := Session{
 		id: id
@@ -229,6 +235,7 @@ fn parse_session(id string, content string) !Session {
 	return sess
 }
 
+// role_from_str maps a TOML role string to the Role enum.
 fn role_from_str(s string) Role {
 	return match s {
 		'system' { .system }
@@ -239,6 +246,7 @@ fn role_from_str(s string) Role {
 	}
 }
 
+// list_recent returns the most recent session ids, newest first.
 pub fn list_recent(limit int) ![]string {
 	ensure_dir(sessions_dir())!
 	mut ids := []string{}

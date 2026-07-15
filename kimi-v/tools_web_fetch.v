@@ -15,15 +15,18 @@ import strings
 // web_fetch
 // =============================================================================
 
+// WebFetchTool fetches a URL over HTTP(S) and returns its content as plain text.
 pub struct WebFetchTool {
 pub:
 	// Reserved for future: proxy URL, custom UA, etc.
 }
 
+// name returns the tool identifier used in LLM tool calls.
 pub fn (t WebFetchTool) name() string {
 	return 'web_fetch'
 }
 
+// description returns the human-readable description shown to the LLM.
 pub fn (t WebFetchTool) description() string {
 	return 'Fetch a URL over HTTP(S) and return its content as plain text. ' +
 		'HTML is converted to readable text (tags stripped, script/style removed, ' +
@@ -31,12 +34,15 @@ pub fn (t WebFetchTool) description() string {
 		'blog posts, release notes. Response is capped at 1 MB by default.'
 }
 
+// parameters_schema returns the JSON Schema describing the tool's arguments.
 pub fn (t WebFetchTool) parameters_schema() string {
 	return '{"type":"object","properties":{"url":{"type":"string","description":"HTTP or HTTPS URL to fetch"},' +
 		'"max_bytes":{"type":"integer","description":"Optional cap on response size in bytes (default 1048576 = 1 MB)"}},' +
 		'"required":["url"],"additionalProperties":false}'
 }
 
+// execute performs the HTTP fetch, converts HTML to text when needed, and
+// returns the page content capped at max_bytes.
 pub fn (t WebFetchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -269,6 +275,7 @@ fn index_of_ci(haystack string, needle string) int {
 	return -1
 }
 
+// eq_ci compares two strings case-insensitively.
 fn eq_ci(a string, b string) bool {
 	if a.len != b.len {
 		return false
@@ -290,6 +297,7 @@ const block_start_tags = ['<p ', '<p>', '<br', '<br/', '<br />', '<div', '<h1', 
 const block_end_tags = ['</p>', '</div>', '</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>',
 	'</li>', '</ul>', '</ol>', '</pre>', '</blockquote>', '</tr>', '</td>', '</th>', '</table>']
 
+// is_block_start_tag reports whether s begins a block-level HTML tag.
 fn is_block_start_tag(s string) bool {
 	for t in block_start_tags {
 		if s.starts_with(t) {
@@ -299,6 +307,7 @@ fn is_block_start_tag(s string) bool {
 	return false
 }
 
+// is_block_end_tag reports whether s begins a block-level HTML end tag.
 fn is_block_end_tag(s string) bool {
 	for t in block_end_tags {
 		if s.starts_with(t) {

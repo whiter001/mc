@@ -17,23 +17,28 @@ import json
 // EnterPlanMode
 // =============================================================================
 
+// EnterPlanModeTool activates read-only plan mode before starting non-trivial work.
 pub struct EnterPlanModeTool {
 pub:
 	agent &Agent
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t EnterPlanModeTool) name() string {
 	return 'EnterPlanMode'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t EnterPlanModeTool) description() string {
 	return 'Use this tool proactively when you are about to start a non-trivial implementation task and want to get user sign-off on your approach before writing code. Entering plan mode does NOT require approval. Once in plan mode you MUST NOT edit files except the plan file, and your turn must end with either AskUserQuestion (to clarify) or ExitPlanMode (for approval).'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t EnterPlanModeTool) parameters_schema() string {
 	return '{"type":"object","properties":{},"required":[],"additionalProperties":false}'
 }
 
+// execute enables plan mode and returns the plan file path and workflow.
 pub fn (t EnterPlanModeTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	mut a := t.agent
 	if a.plan.is_active {
@@ -67,19 +72,23 @@ pub fn (t EnterPlanModeTool) execute(args ToolArgs, ctx ToolContext) !ToolResult
 // ExitPlanMode
 // =============================================================================
 
+// ExitPlanModeTool finalizes plan mode by presenting the plan for user approval.
 pub struct ExitPlanModeTool {
 pub:
 	agent &Agent
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t ExitPlanModeTool) name() string {
 	return 'ExitPlanMode'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t ExitPlanModeTool) description() string {
 	return 'Use this tool when you are in plan mode and have finished writing your plan to the plan file and are ready for user approval. This tool reads the plan from the file you wrote and presents it to the user. Do NOT pass the plan content as a parameter. When the plan offers multiple approaches, pass them via the `options` parameter (up to 3) so the user can choose which to execute. End your turn with this tool — do not ask about plan approval via text or AskUserQuestion.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t ExitPlanModeTool) parameters_schema() string {
 	return '{"type":"object","properties":{"options":{"type":"array","description":"When the plan contains multiple alternative approaches, list 2-3 of them so the user can choose which to execute. Each: {label: short name (1-8 words, append (Recommended) if recommended), description: trade-offs}. Do not use the reserved labels Approve/Reject/Revise/Reject and Exit.","items":{"type":"object","properties":{"label":{"type":"string","description":"Short name for this approach"},"description":{"type":"string","description":"Brief summary of this approach and its trade-offs"}},"required":["label","description"],"additionalProperties":false},"minItems":1,"maxItems":3}}},"required":[],"additionalProperties":false}'
 }
@@ -89,11 +98,13 @@ struct ExitPlanArgs {
 	options []ExitPlanOptionRaw
 }
 
+// ExitPlanOptionRaw is one alternative approach passed to ExitPlanMode.
 struct ExitPlanOptionRaw {
 	label       string
 	description string
 }
 
+// execute reads the plan file, prompts the user (or auto-approves), and exits plan mode.
 pub fn (t ExitPlanModeTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	mut a := t.agent
 	if !a.plan.is_active {

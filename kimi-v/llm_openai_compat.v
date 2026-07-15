@@ -11,6 +11,7 @@ module main
 import json
 import net.http
 
+// OpenAICompatProvider implements an OpenAI-compatible chat completions client.
 pub struct OpenAICompatProvider {
 pub:
 	name     string = 'openai-compat'
@@ -148,6 +149,7 @@ struct OaiErrorT {
 
 // ---- Translate our canonical types into the wire form --------------------
 
+// build_request translates a ChatRequest into the non-streaming wire payload.
 fn (p OpenAICompatProvider) build_request(req ChatRequest) OaiRequestT {
 	mut msgs := []OaiReqMessageT{}
 	for m in req.messages {
@@ -224,6 +226,7 @@ pub fn build_content_parts(m Message) []OaiContentPartT {
 	return parts
 }
 
+// build_tools_array converts ToolDef values into the OpenAI tool schema.
 fn build_tools_array(tools []ToolDef) []OaiToolT {
 	mut out := []OaiToolT{cap: tools.len}
 	for t in tools {
@@ -252,6 +255,7 @@ fn parse_finish_reason(s string) FinishReason {
 
 // ---- chat() implementation ----------------------------------------------
 
+// chat sends a chat request and streams the response as ChatEvents.
 pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	// P0.6: real streaming for both http:// and https://. streaming.v's
 	// http_post_streaming() dispatches by URL scheme; HTTPS uses the
@@ -289,6 +293,7 @@ pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent, cancel
 	out.close()
 }
 
+// chat_streaming_http issues a streaming HTTP request and feeds SSE events to out.
 fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	wire := build_streaming_request(p, req)
 	body := json.encode(wire)
@@ -300,6 +305,7 @@ fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, o
 	read_sse_stream(mut reader, out, cancel_ch)!
 }
 
+// build_streaming_request builds the wire payload for a streaming chat request.
 fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT {
 	mut msgs := []OaiReqMessageT{cap: req.messages.len}
 	for m in req.messages {
@@ -337,6 +343,7 @@ fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT 
 	}
 }
 
+// chat_buffered_https is the non-streaming fallback using V's net.http client.
 fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEvent, cancel_ch chan int) {
 	// Non-streaming fallback: a single blocking HTTP call. The cancel
 	// channel isn't checked here because the fetch runs to completion

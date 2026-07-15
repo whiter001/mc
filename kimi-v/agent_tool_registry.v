@@ -20,6 +20,8 @@ pub:
 	raw string
 }
 
+// ToolResult is the output of a tool execution: the content to show the
+// model and a flag indicating whether the result represents an error.
 pub struct ToolResult {
 pub:
 	content  string
@@ -46,16 +48,19 @@ pub mut:
 	tools map[string]Tool
 }
 
+// new_registry creates an empty tool registry.
 pub fn new_registry() ToolRegistry {
 	return ToolRegistry{
 		tools: map[string]Tool{}
 	}
 }
 
+// register adds a tool to the registry, keyed by its name.
 pub fn (mut r ToolRegistry) register(t Tool) {
 	r.tools[t.name()] = t
 }
 
+// get looks up a tool by name. Returns none if the tool is not registered.
 pub fn (r ToolRegistry) get(name string) ?Tool {
 	if t := r.tools[name] {
 		return t
@@ -63,6 +68,7 @@ pub fn (r ToolRegistry) get(name string) ?Tool {
 	return none
 }
 
+// names returns the names of all registered tools.
 pub fn (r ToolRegistry) names() []string {
 	mut out := []string{}
 	for name, _ in r.tools {
@@ -71,6 +77,8 @@ pub fn (r ToolRegistry) names() []string {
 	return out
 }
 
+// definitions returns the provider-facing definitions for all registered
+// tools, suitable for inclusion in a ChatRequest.
 pub fn (r ToolRegistry) definitions() []ToolDef {
 	mut defs := []ToolDef{}
 	for _, t in r.tools {

@@ -10,6 +10,7 @@ module main
 import os
 import toml
 
+// Config holds all user-configurable settings for the agent.
 pub struct Config {
 pub mut:
 	// ---- Provider ----
@@ -69,6 +70,7 @@ pub mut:
 	cwd string
 }
 
+// default_config returns the built-in default configuration.
 pub fn default_config() Config {
 	return Config{
 		api_base: 'https://api.openai.com'
@@ -238,6 +240,7 @@ pub fn apply_toml(mut cfg Config, raw string) {
 	}
 }
 
+// apply_env overrides cfg with values from KIMI_* environment variables.
 pub fn apply_env(mut cfg Config) {
 	v := os.getenv('KIMI_PROVIDER')
 	if v.len > 0 { cfg.provider = v }
@@ -269,6 +272,7 @@ pub fn apply_env(mut cfg Config) {
 	}
 }
 
+// apply_cli copies non-empty fields from cli into cfg.
 fn apply_cli(mut cfg Config, cli Config) {
 	if cli.provider.len > 0 { cfg.provider = cli.provider }
 	if cli.api_base.len > 0 { cfg.api_base = cli.api_base }
@@ -298,6 +302,7 @@ fn find_project_config(start string) string {
 	return ''
 }
 
+// validate checks that the configuration has the minimum required fields.
 pub fn (c Config) validate() ! {
 	if c.api_key.len == 0 {
 		return error('api_key is not set; pass --api-key, set KIMI_API_KEY, or run `kimi login`')

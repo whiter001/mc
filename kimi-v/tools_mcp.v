@@ -24,10 +24,12 @@ fn mcp_tool_name(server string, tool string) string {
 	return 'mcp__${server}__${tool}'
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t McpTool) name() string {
 	return t.display_name
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t McpTool) description() string {
 	remote := 'MCP tool "${t.remote_name}" from server "${t.server_name}".'
 	if t.description.len > 0 {
@@ -36,6 +38,7 @@ pub fn (t McpTool) description() string {
 	return remote
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t McpTool) parameters_schema() string {
 	if t.input_schema.len > 0 {
 		return t.input_schema
@@ -43,6 +46,7 @@ pub fn (t McpTool) parameters_schema() string {
 	return '{"type":"object","properties":{},"additionalProperties":true}'
 }
 
+// execute forwards the call to the live MCP client held by the Agent.
 pub fn (t McpTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	// MCP tools are not subject to local cwd/permission gating beyond the
 	// normal approval path in the agent loop, but they do need the live

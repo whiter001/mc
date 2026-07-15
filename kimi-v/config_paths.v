@@ -20,6 +20,7 @@ fn detect_os() string {
 	}
 }
 
+// config_dir returns the platform-specific directory for Kimi configuration files.
 pub fn config_dir() string {
 	override := os.getenv('KIMI_CONFIG_DIR')
 	if override.len > 0 {
@@ -48,10 +49,12 @@ pub fn config_dir() string {
 	}
 }
 
+// sessions_dir returns the directory where session TOML files are stored.
 pub fn sessions_dir() string {
 	return os.join_path(config_dir(), 'sessions')
 }
 
+// cache_dir returns the platform-specific directory for Kimi cache files.
 pub fn cache_dir() string {
 	override := os.getenv('KIMI_CACHE_DIR')
 	if override.len > 0 {
@@ -78,6 +81,7 @@ pub fn cache_dir() string {
 	}
 }
 
+// ensure_dir creates path and its parents if they do not already exist.
 pub fn ensure_dir(path string) ! {
 	if !os.exists(path) {
 		os.mkdir_all(path)!

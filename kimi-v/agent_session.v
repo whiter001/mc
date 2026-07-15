@@ -17,6 +17,8 @@ pub mut:
 	metadata map[string]string
 }
 
+// new_session creates a fresh session for the given working directory with
+// a generated id and empty message history.
 pub fn new_session(cwd string) Session {
 	now := time.now()
 	return Session{
@@ -29,6 +31,8 @@ pub fn new_session(cwd string) Session {
 	}
 }
 
+// append_user adds a plain text user message to the session and updates
+// the timestamp.
 pub fn (mut s Session) append_user(text string) {
 	s.messages << Message{
 		role:    .user
@@ -51,6 +55,8 @@ pub fn (mut s Session) append_user_with_attachments(text string, attachments []A
 	s.updated_at = time.now()
 }
 
+// append_assistant adds an assistant turn (text plus any tool calls) to
+// the session and updates the timestamp.
 pub fn (mut s Session) append_assistant(content string, tool_calls []ToolCall) {
 	s.messages << Message{
 		role:       .assistant
@@ -60,6 +66,8 @@ pub fn (mut s Session) append_assistant(content string, tool_calls []ToolCall) {
 	s.updated_at = time.now()
 }
 
+// append_tool_result adds a tool response message to the session and
+// updates the timestamp.
 pub fn (mut s Session) append_tool_result(call_id string, name string, result string) {
 	s.messages << Message{
 		role:         .tool
@@ -70,6 +78,8 @@ pub fn (mut s Session) append_tool_result(call_id string, name string, result st
 	s.updated_at = time.now()
 }
 
+// last_user returns the most recent user message in the session, or none
+// if there isn't one.
 pub fn (mut s Session) last_user() ?Message {
 	for i := s.messages.len - 1; i >= 0; i-- {
 		if s.messages[i].role == .user {

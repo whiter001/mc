@@ -47,6 +47,7 @@ pub mut:
 	skills []SkillDefinition
 }
 
+// get looks up a skill by name. Returns none if not found.
 pub fn (c SkillCatalog) get(name string) ?SkillDefinition {
 	for s in c.skills {
 		if s.name == name {
@@ -56,6 +57,7 @@ pub fn (c SkillCatalog) get(name string) ?SkillDefinition {
 	return none
 }
 
+// list returns all discovered skills in catalog order.
 pub fn (c SkillCatalog) list() []SkillDefinition {
 	return c.skills
 }

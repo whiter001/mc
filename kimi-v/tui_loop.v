@@ -71,24 +71,31 @@ pub:
 	err          string
 }
 
+// status_started returns a status marking the start of an agent turn.
 pub fn status_started() TuiStatus { return TuiStatus{ kind: .started } }
 
+// status_delta returns a status carrying a regular assistant content chunk.
 pub fn status_delta(chunk string) TuiStatus {
 	return TuiStatus{ kind: .delta, chunk: chunk }
 }
 
+// status_thinking_delta returns a status carrying a reasoning/thinking chunk.
 pub fn status_thinking_delta(chunk string) TuiStatus {
 	return TuiStatus{ kind: .thinking_delta, chunk: chunk }
 }
 
+// status_tool_call returns a status announcing a tool call.
 pub fn status_tool_call(name string, args string) TuiStatus {
 	return TuiStatus{ kind: .tool_call, tool_name: name, tool_args: args }
 }
 
+// status_tool_result returns a status carrying a tool result.
 pub fn status_tool_result(name string, result string, is_err bool) TuiStatus {
 	return TuiStatus{ kind: .tool_result, tool_name: name, tool_result: result, tool_is_err: is_err }
 }
 
+// status_finished returns a status marking the end of a turn, carrying token
+// usage for the session tally.
 pub fn status_finished(input_tokens int, output_tokens int) TuiStatus {
 	return TuiStatus{
 		kind: .finished
@@ -97,14 +104,17 @@ pub fn status_finished(input_tokens int, output_tokens int) TuiStatus {
 	}
 }
 
+// status_errored returns a status carrying an error message.
 pub fn status_errored(err string) TuiStatus {
 	return TuiStatus{ kind: .errored, err: err }
 }
 
+// status_cancelled returns a status marking a user-interrupted turn.
 pub fn status_cancelled() TuiStatus {
 	return TuiStatus{ kind: .cancelled }
 }
 
+// status_plan_mode returns a status announcing a plan-mode state change.
 pub fn status_plan_mode(text string) TuiStatus {
 	return TuiStatus{ kind: .plan_mode, err: text }
 }

@@ -43,6 +43,7 @@ pub:
 	path   string
 }
 
+// parse_url splits a URL string into scheme, host, port, and path.
 fn parse_url(raw string) !ParsedUrl {
 	// Strip scheme://
 	mut rest := raw
@@ -93,6 +94,7 @@ mut:
 	eof bool
 }
 
+// read_line returns the next CRLF-delimited line from the plain HTTP connection.
 fn (mut r HttpStreamReader) read_line() !string {
 	if r.eof && r.carry.len == 0 {
 		return error('eof')
@@ -168,6 +170,7 @@ mut:
 	eof   bool
 }
 
+// read_line returns the next CRLF-delimited line from the TLS connection.
 fn (mut r HttpsStreamReader) read_line() !string {
 	if r.eof && r.carry.len == 0 {
 		return error('eof')
@@ -222,6 +225,7 @@ fn (mut r HttpsStreamReader) close() {
 
 // ---------- HTTP request helpers -----------------------------------------
 
+// http_post_streaming dials the URL and returns a StreamReader for the response body.
 fn http_post_streaming(url ParsedUrl, body string, headers map[string]string) !StreamReader {
 	if url.scheme == 'https' {
 		return https_post_streaming(url, body, headers)!
@@ -229,6 +233,7 @@ fn http_post_streaming(url ParsedUrl, body string, headers map[string]string) !S
 	return http_post_streaming_plain(url, body, headers)!
 }
 
+// http_post_streaming_plain sends a plain HTTP POST and skips response headers.
 fn http_post_streaming_plain(url ParsedUrl, body string, headers map[string]string) !StreamReader {
 	mut req := 'POST ${url.path} HTTP/1.1\r\n'
 	req += 'Host: ${url.host}:${url.port}\r\n'
@@ -418,6 +423,7 @@ fn new_sse_parser() SseParser {
 	}
 }
 
+// feed decodes one SSE data payload and emits the corresponding ChatEvents.
 fn (mut p SseParser) feed(event_data string, out chan ChatEvent, cancel_ch chan int) {
 	chunk := json.decode(OaiStreamChunk, event_data) or {
 		return

@@ -8,6 +8,7 @@ import os
 import json
 import regex
 
+// count_occurrences returns the number of non-overlapping occurrences of `sub` in `s`.
 fn count_occurrences(s string, sub string) int {
 	if sub.len == 0 {
 		return 0
@@ -30,23 +31,28 @@ fn count_occurrences(s string, sub string) int {
 // read_file
 // =============================================================================
 
+// ReadFileTool reads a file from disk and returns its UTF-8 contents.
 pub struct ReadFileTool {
 pub:
 	cwd string
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t ReadFileTool) name() string {
 	return 'read_file'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t ReadFileTool) description() string {
 	return 'Read the contents of a file at the given absolute path. Returns the full file as a UTF-8 string. Use this before editing a file to confirm its current state.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t ReadFileTool) parameters_schema() string {
 	return '{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the file to read"}},"required":["path"],"additionalProperties":false}'
 }
 
+// execute reads the requested file and returns its contents.
 pub fn (t ReadFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -81,23 +87,28 @@ pub fn (t ReadFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 // write_file
 // =============================================================================
 
+// WriteFileTool creates or overwrites a file, creating parent directories as needed.
 pub struct WriteFileTool {
 pub:
 	cwd string
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t WriteFileTool) name() string {
 	return 'write_file'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t WriteFileTool) description() string {
 	return 'Create or overwrite a file at the given absolute path with the provided content. Parent directories are created if they do not exist.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t WriteFileTool) parameters_schema() string {
 	return '{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the file to write"},"content":{"type":"string","description":"Full file content to write"}},"required":["path","content"],"additionalProperties":false}'
 }
 
+// execute resolves the path, creates parents, and writes the provided content.
 pub fn (t WriteFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -155,23 +166,28 @@ pub fn (t WriteFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 // edit_file  (string replace with required-uniqueness check)
 // =============================================================================
 
+// EditFileTool replaces a unique occurrence of old_text with new_text in a file.
 pub struct EditFileTool {
 pub:
 	cwd string
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t EditFileTool) name() string {
 	return 'edit_file'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t EditFileTool) description() string {
 	return 'Replace `old_text` with `new_text` in the file at `path`. The match must be unique within the file (use surrounding context to disambiguate). Returns the number of replacements made (0 or 1).'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t EditFileTool) parameters_schema() string {
 	return '{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the file to edit"},"old_text":{"type":"string","description":"Exact text to find (must appear exactly once)"},"new_text":{"type":"string","description":"Replacement text"}},"required":["path","old_text","new_text"],"additionalProperties":false}'
 }
 
+// execute verifies the replacement text is unique and applies it.
 pub fn (t EditFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -243,23 +259,28 @@ pub fn (t EditFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 // bash
 // =============================================================================
 
+// BashTool runs a shell command in the session working directory.
 pub struct BashTool {
 pub:
 	cwd string
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t BashTool) name() string {
 	return 'bash'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t BashTool) description() string {
 	return 'Run a shell command (bash on Unix, cmd on Windows) and return its combined stdout + stderr. The command runs in the session working directory.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t BashTool) parameters_schema() string {
 	return '{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_ms":{"type":"integer","description":"Optional timeout in milliseconds (default 30000)"}},"required":["command"],"additionalProperties":false}'
 }
 
+// execute runs the command and returns its combined stdout and stderr.
 pub fn (t BashTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -291,23 +312,28 @@ pub fn (t BashTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 // glob
 // =============================================================================
 
+// GlobTool finds files matching a glob pattern under the session cwd.
 pub struct GlobTool {
 pub:
 	cwd string
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t GlobTool) name() string {
 	return 'glob'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t GlobTool) description() string {
 	return 'Find files matching a glob pattern (relative to the session cwd or absolute). Returns a newline-separated list of paths.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t GlobTool) parameters_schema() string {
 	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern, e.g. "**/*.v" or "/abs/path/**/*.md""}},"required":["pattern"],"additionalProperties":false}'
 }
 
+// execute resolves the pattern and returns matching file paths.
 pub fn (t GlobTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -423,23 +449,28 @@ fn match_glob(name string, pat string) bool {
 // grep
 // =============================================================================
 
+// GrepTool searches file contents for a regex pattern under the session cwd.
 pub struct GrepTool {
 pub:
 	cwd string
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t GrepTool) name() string {
 	return 'grep'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t GrepTool) description() string {
 	return 'Search for a regex pattern in files under the session cwd. Returns matching lines as `path:lineno:text`.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t GrepTool) parameters_schema() string {
 	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression pattern to search for (PCRE-ish via ripgrep, or V regex fallback)"},"path":{"type":"string","description":"Directory to search in (defaults to session cwd)"},"include":{"type":"string","description":"Optional glob filter for file names, e.g. "*.v""},"i":{"type":"boolean","description":"Optional case-insensitive match (default false)"}},"required":["pattern"],"additionalProperties":false}'
 }
 
+// execute runs ripgrep if available, otherwise falls back to a built-in walker.
 pub fn (t GrepTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{
@@ -563,6 +594,7 @@ fn search_dir_regex(mut hits []string, dir string, pattern string, include strin
 	walk_regex(mut hits, dir, re, include)
 }
 
+// walk_regex recursively searches files under `dir` using the compiled regex.
 fn walk_regex(mut hits []string, dir string, re regex.RE, include string) {
 	if !os.is_dir(dir) {
 		return
@@ -595,6 +627,7 @@ fn walk_regex(mut hits []string, dir string, re regex.RE, include string) {
 	}
 }
 
+// search_dir_literal recursively searches files under `dir` for a literal substring.
 fn search_dir_literal(mut hits []string, dir string, pattern string, include string, ci bool) {
 	if !os.is_dir(dir) {
 		return
@@ -633,6 +666,7 @@ fn search_dir_literal(mut hits []string, dir string, pattern string, include str
 // Registry helper
 // =============================================================================
 
+// default_registry creates a registry with all built-in tools and registers any configured MCP servers.
 pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig) ToolRegistry {
 	mut r := new_registry()
 	r.register(ReadFileTool{ cwd: cwd })

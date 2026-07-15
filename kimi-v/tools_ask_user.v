@@ -11,12 +11,15 @@ module main
 import json
 import time
 
+// AskUserQuestionTool lets the model ask the user a question mid-turn.
 pub struct AskUserQuestionTool {}
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t AskUserQuestionTool) name() string {
 	return 'AskUserQuestion'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t AskUserQuestionTool) description() string {
 	return 'Ask the user a question to gather preferences or clarify ambiguity. ' +
 		'Provide a clear `question`, an optional `header` (short category tag), ' +
@@ -25,6 +28,7 @@ pub fn (t AskUserQuestionTool) description() string {
 		'would materially change the work.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t AskUserQuestionTool) parameters_schema() string {
 	return '{"type":"object","properties":{"question":{"type":"string","description":"The question to ask"},' +
 		'"header":{"type":"string","description":"Optional short category tag (max 12 chars)"},' +
@@ -33,6 +37,7 @@ pub fn (t AskUserQuestionTool) parameters_schema() string {
 		'"required":["question","options"],"additionalProperties":false}'
 }
 
+// AskArgs is the parsed JSON input for AskUserQuestion.
 struct AskArgs {
 	question string
 	header   string
@@ -40,6 +45,7 @@ struct AskArgs {
 	multi    bool
 }
 
+// execute parses the question/options, forwards them to the TUI, and returns the user's selection or a timeout message in non-interactive mode.
 pub fn (t AskUserQuestionTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	parsed := json.decode(AskArgs, args.raw) or {
 		return ToolResult{

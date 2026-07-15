@@ -18,6 +18,7 @@ import json
 // Agent (subagent dispatch)
 // =============================================================================
 
+// AgentTool launches a subagent to handle a delegated task.
 pub struct AgentTool {
 pub:
 	// The parent agent, used to inherit provider/model/cwd/approval
@@ -25,6 +26,7 @@ pub:
 	agent &Agent
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t AgentTool) name() string {
 	return 'Agent'
 }
@@ -42,6 +44,7 @@ fn build_subagent_type_lines() string {
 	return lines.join('\n')
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t AgentTool) description() string {
 	base := 'Launch a subagent to handle a task. The subagent runs as a same-process loop instance with its own context. Delegating also keeps the bulk of intermediate file contents out of your own context — you get a conclusion back instead of a pile of dumps.
 
@@ -59,10 +62,12 @@ When NOT to use Agent: skip delegation for trivial work you can do directly — 
 	return '${base}\n\nAvailable agent types (pass via subagent_type):\n${types}'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t AgentTool) parameters_schema() string {
 	return '{"type":"object","properties":{"prompt":{"type":"string","description":"Full task prompt for the subagent"},"description":{"type":"string","description":"Short task description (3-5 words) for display"},"subagent_type":{"type":"string","description":"One of: coder, explore, plan. Defaults to coder when omitted."},"resume":{"type":"string","description":"Optional agent ID to resume instead of creating a new instance. When set, do not also pass subagent_type."},"run_in_background":{"type":"boolean","description":"If true, return immediately. (Background execution is not supported in this build; treated as foreground.)"}},"required":["prompt","description"],"additionalProperties":false}'
 }
 
+// AgentToolArgs is the parsed JSON input for the Agent tool.
 struct AgentToolArgs {
 	prompt         string
 	description    string
@@ -71,6 +76,7 @@ struct AgentToolArgs {
 	run_in_background bool @[json: 'run_in_background']
 }
 
+// execute resolves the profile, spawns the subagent, and returns its handoff.
 pub fn (t AgentTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	parsed := json.decode(AgentToolArgs, args.raw) or {
 		return ToolResult{

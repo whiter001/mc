@@ -129,6 +129,7 @@ pub mut:
 	session_id string
 }
 
+// new_hook_engine creates an empty hook engine for the session.
 pub fn new_hook_engine(cwd string, session_id string) HookEngine {
 	return HookEngine{
 		by_event: map[string][]HookDef{}
@@ -137,6 +138,7 @@ pub fn new_hook_engine(cwd string, session_id string) HookEngine {
 	}
 }
 
+// add registers a hook definition under its event type.
 pub fn (mut e HookEngine) add(def HookDef) {
 	key := hook_event_name(def.event)
 	if key !in e.by_event {
@@ -145,10 +147,12 @@ pub fn (mut e HookEngine) add(def HookDef) {
 	e.by_event[key] << def
 }
 
+// has_hooks reports whether any hooks are configured.
 pub fn (e HookEngine) has_hooks() bool {
 	return e.by_event.len > 0
 }
 
+// summary returns a count of registered hooks per event name.
 pub fn (e HookEngine) summary() map[string]int {
 	mut out := map[string]int{}
 	for ev, defs in e.by_event {
@@ -212,6 +216,7 @@ pub fn (e HookEngine) trigger_block(event HookEventType, matcher_value string, i
 	return none
 }
 
+// matching filters the hook definitions by matcher regex against the value.
 fn (e HookEngine) matching(matcher_value string, defs []HookDef) []HookDef {
 	mut out := []HookDef{}
 	for d in defs {
@@ -292,6 +297,7 @@ fn run_hook_with_input(command string, payload string, cwd string, timeout_sec i
 	out <- result
 }
 
+// read_file_or_empty reads a file, returning an empty string on any error.
 fn read_file_or_empty(path string) string {
 	return os.read_file(path) or { '' }
 }

@@ -16,15 +16,18 @@ import strings
 // web_search
 // =============================================================================
 
+// WebSearchTool searches the web via DuckDuckGo and returns result summaries.
 pub struct WebSearchTool {
 pub:
 	// Reserved for future: region, safe-search, custom UA.
 }
 
+// name returns the tool identifier used in LLM tool calls.
 pub fn (t WebSearchTool) name() string {
 	return 'web_search'
 }
 
+// description returns the human-readable description shown to the LLM.
 pub fn (t WebSearchTool) description() string {
 	return 'Search the web via DuckDuckGo and return a numbered list of results ' +
 		'(title, URL, snippet). Use when you need up-to-date information, docs, or ' +
@@ -32,12 +35,14 @@ pub fn (t WebSearchTool) description() string {
 		'content, prefer web_fetch.'
 }
 
+// parameters_schema returns the JSON Schema describing the tool's arguments.
 pub fn (t WebSearchTool) parameters_schema() string {
 	return '{"type":"object","properties":{"query":{"type":"string","description":"Search query"},' +
 		'"max_results":{"type":"integer","description":"Optional cap on number of results (default 8)"}},' +
 		'"required":["query"],"additionalProperties":false}'
 }
 
+// execute runs the DuckDuckGo search and formats the results as a numbered list.
 pub fn (t WebSearchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json.decode(map[string]string, args.raw) or {
 		return ToolResult{

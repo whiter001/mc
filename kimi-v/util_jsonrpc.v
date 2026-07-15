@@ -8,6 +8,7 @@ import json
 
 pub const jsonrpc_version = '2.0'
 
+// JsonRpcRequest is a JSON-RPC 2.0 request envelope with an optional params string.
 pub struct JsonRpcRequest {
 pub:
 	jsonrpc string = jsonrpc_version  @[json: jsonrpc]
@@ -16,6 +17,7 @@ pub:
 	params  ?string @[json: params]
 }
 
+// JsonRpcNotification is a JSON-RPC 2.0 notification (no id).
 pub struct JsonRpcNotification {
 pub:
 	jsonrpc string = jsonrpc_version  @[json: jsonrpc]
@@ -23,6 +25,7 @@ pub:
 	params  ?string @[json: params]
 }
 
+// JsonRpcResponse is a JSON-RPC 2.0 response envelope.
 pub struct JsonRpcResponse {
 pub:
 	jsonrpc string        @[json: jsonrpc]
@@ -31,6 +34,7 @@ pub:
 	err     ?JsonRpcError @[json: error]
 }
 
+// JsonRpcError is the error object inside a JSON-RPC response.
 pub struct JsonRpcError {
 pub:
 	code    int     @[json: code]
@@ -38,6 +42,7 @@ pub:
 	data    ?string @[json: data]
 }
 
+// encode_request builds a JSON-RPC request string from id, method and params.
 pub fn encode_request(id int, method string, params string) !string {
 	r := JsonRpcRequest{
 		id:     id
@@ -47,6 +52,7 @@ pub fn encode_request(id int, method string, params string) !string {
 	return json.encode(r)
 }
 
+// encode_notification builds a JSON-RPC notification string.
 pub fn encode_notification(method string, params string) !string {
 	n := JsonRpcNotification{
 		method: method
@@ -55,6 +61,7 @@ pub fn encode_notification(method string, params string) !string {
 	return json.encode(n)
 }
 
+// decode_response parses a JSON-RPC response line.
 pub fn decode_response(line string) !JsonRpcResponse {
 	return json.decode(JsonRpcResponse, line)!
 }

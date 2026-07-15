@@ -185,6 +185,9 @@ pub mut:
 	mcp_clients map[string]&McpClient
 }
 
+// new_agent creates an Agent with default channels, thresholds, and an
+// empty tool registry. The caller must register tools and wire callbacks
+// before running the loop.
 pub fn new_agent(provider Provider, system string) Agent {
 	return Agent{
 		provider:         provider
@@ -239,6 +242,7 @@ pub fn (a Agent) hooks_engine() HookEngine {
 	return a.hooks
 }
 
+// attach_tool registers a tool on the agent so the model can invoke it.
 pub fn (mut a Agent) attach_tool(t Tool) {
 	a.registry.register(t)
 }
@@ -387,7 +391,8 @@ fn (a Agent) skills_prompt() string {
 }
 
 // step runs a single LLM call and returns the resulting assistant message
-// plus any tool calls the model emitted. Pure: doesn't touch the
+// plus any tool calls the model emitted. Pure: doesn't touch the session
+// directly (the caller appends the result).
 //
 // The channel is closed by the provider goroutine (it sends a
 // `.end_of_stream` sentinel and then closes). We keep reading past
@@ -529,6 +534,9 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 	return error('stream ended without sentinel')
 }
 
+// StepResult is the output of one agent step: the assistant text, any
+// tool calls requested by the model, and finish metadata including token
+// usage.
 pub struct StepResult {
 pub mut:
 	text       string

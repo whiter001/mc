@@ -220,6 +220,7 @@ pub mut:
 	carry []u8
 }
 
+// new_stdin_reader creates an unbuffered stdin reader for raw-mode input.
 pub fn new_stdin_reader() StdinReader {
 	return StdinReader{ carry: []u8{} }
 }
@@ -328,6 +329,7 @@ pub mut:
 	attachments []Attachment
 }
 
+// new_input_buf creates an empty input buffer with an empty history.
 pub fn new_input_buf() InputBuf {
 	return InputBuf{
 		history: []string{}

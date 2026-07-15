@@ -20,25 +20,30 @@ pub:
 	agent &Agent
 }
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t SkillTool) name() string {
 	return 'Skill'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t SkillTool) description() string {
 	return 'Invoke a skill by name to load its instructions into context. ' +
 		'Use this when the user references a skill, or when a task matches a skill\'s described use case. ' +
 		'Pass the skill name and any arguments. Skills provide specialised, reusable workflows.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t SkillTool) parameters_schema() string {
 	return '{"type":"object","properties":{"skill":{"type":"string","description":"The skill name to invoke"},"args":{"type":"string","description":"Optional arguments passed to the skill ($ARGUMENTS / $1 / $name placeholders)"}},"required":["skill"],"additionalProperties":false}'
 }
 
+// SkillToolArgs is the parsed JSON input for the Skill tool.
 struct SkillToolArgs {
 	skill string
 	args  string
 }
 
+// execute looks up the named skill, expands its placeholders, and returns the instruction body.
 pub fn (t SkillTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	parsed := json.decode(SkillToolArgs, args.raw) or {
 		return ToolResult{

@@ -6,6 +6,7 @@ module main
 // Roles and messages
 // -----------------------------------------------------------------------------
 
+// Role represents the speaker of a message in the conversation.
 pub enum Role {
 	system
 	user
@@ -13,6 +14,7 @@ pub enum Role {
 	tool
 }
 
+// str returns the wire-format string for the role.
 pub fn (r Role) str() string {
 	return match r {
 		.system { 'system' }
@@ -67,6 +69,7 @@ pub:
 // Tool definitions (what we tell the model it can call)
 // -----------------------------------------------------------------------------
 
+// ToolDef describes a callable tool exposed to the model.
 pub struct ToolDef {
 pub:
 	name        string
@@ -81,6 +84,7 @@ pub:
 // Request and streaming events
 // -----------------------------------------------------------------------------
 
+// ChatRequest is the canonical input to a chat completions call.
 pub struct ChatRequest {
 pub:
 	model       string
@@ -116,6 +120,7 @@ pub:
 	err string
 }
 
+// ChatEventKind tags the payload type of a ChatEvent.
 pub enum ChatEventKind {
 	delta
 	thinking
@@ -126,11 +131,13 @@ pub enum ChatEventKind {
 	end_of_stream
 }
 
+// DeltaEvent carries a incremental text fragment from the model.
 pub struct DeltaEvent {
 pub:
 	content string
 }
 
+// ToolCallEvent carries an incremental or complete tool call fragment.
 pub struct ToolCallEvent {
 pub:
 	index int
@@ -140,6 +147,7 @@ pub:
 	arguments string
 }
 
+// FinishReason explains why the model stopped generating tokens.
 pub enum FinishReason {
 	stop
 	length
@@ -149,6 +157,7 @@ pub enum FinishReason {
 	unknown
 }
 
+// FinishEvent signals the end of a model response.
 pub struct FinishEvent {
 pub:
 	reason FinishReason
@@ -161,6 +170,7 @@ pub:
 // Errors
 // -----------------------------------------------------------------------------
 
+// ProviderError is a structured error returned by an LLM provider.
 pub struct ProviderError {
 pub:
 	code      string
@@ -168,10 +178,12 @@ pub:
 	retryable bool
 }
 
+// msg returns the error code and message as a single string.
 pub fn (e ProviderError) msg() string {
 	return '${e.code}: ${e.message}'
 }
 
+// str returns the string representation of the error.
 pub fn (e ProviderError) str() string {
 	return e.msg()
 }
@@ -180,6 +192,7 @@ pub fn (e ProviderError) str() string {
 // Session metadata (used by Agent to record turns)
 // -----------------------------------------------------------------------------
 
+// Usage records token consumption for one turn.
 pub struct Usage {
 pub:
 	input_tokens  int
@@ -187,6 +200,7 @@ pub:
 	total_tokens  int
 }
 
+// new_usage creates a Usage record from input and output token counts.
 pub fn new_usage(input int, output int) Usage {
 	return Usage{
 		input_tokens:  input

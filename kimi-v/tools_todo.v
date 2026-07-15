@@ -29,6 +29,7 @@ fn normalize_status(s string) string {
 	}
 }
 
+// todos_to_markdown renders the todo list as markdown with checkboxes.
 fn todos_to_markdown(items []TodoItem) string {
 	if items.len == 0 {
 		return '(todo list is empty)'
@@ -54,12 +55,15 @@ fn todos_to_markdown(items []TodoItem) string {
 // TodoWrite
 // =============================================================================
 
+// TodoWriteTool replaces the agent's current todo list with a new one.
 pub struct TodoWriteTool {}
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t TodoWriteTool) name() string {
 	return 'TodoWrite'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t TodoWriteTool) description() string {
 	return 'Use this to create and manage a structured task list for your current coding session. ' +
 		'This helps you track progress, organize complex tasks, and demonstrate thoroughness. ' +
@@ -68,20 +72,24 @@ pub fn (t TodoWriteTool) description() string {
 		'(pending | in_progress | completed), and an optional activeForm.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t TodoWriteTool) parameters_schema() string {
 	return '{"type":"object","properties":{"todos":{"type":"array","description":"The complete list of todos (replaces any prior list)","items":{"type":"object","properties":{"content":{"type":"string","description":"Task description"},"status":{"type":"string","description":"pending | in_progress | completed"},"activeForm":{"type":"string","description":"Optional present-participle form, e.g. \"Fixing the bug\""}},"required":["content","status"]}}},"required":["todos"],"additionalProperties":false}'
 }
 
+// TodoRaw is one todo entry as received from the model.
 struct TodoRaw {
 	content     string
 	status      string
 	active_form string @[json: 'activeForm']
 }
 
+// TodoArgs is the parsed JSON input for TodoWrite.
 struct TodoArgs {
 	todos []TodoRaw
 }
 
+// execute normalizes the input and stores the updated todo list on the Agent.
 pub fn (t TodoWriteTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	// The model sends `todos` as a JSON array inside the args object.
 	parsed := json.decode(TodoArgs, args.raw) or {
@@ -128,21 +136,26 @@ pub fn (t TodoWriteTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 // TodoRead
 // =============================================================================
 
+// TodoReadTool returns the current todo list for this session.
 pub struct TodoReadTool {}
 
+// name returns the tool identifier used in the registry and provider.
 pub fn (t TodoReadTool) name() string {
 	return 'TodoRead'
 }
 
+// description returns the human-readable description shown to the model.
 pub fn (t TodoReadTool) description() string {
 	return 'Read the current todo list for this session. Returns the items and their statuses. ' +
 		'Use this to check what you have left to do before reporting completion.'
 }
 
+// parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t TodoReadTool) parameters_schema() string {
 	return '{"type":"object","properties":{},"additionalProperties":false}'
 }
 
+// execute returns the stored todos formatted as markdown.
 pub fn (t TodoReadTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	a := ctx.agent or {
 		return ToolResult{

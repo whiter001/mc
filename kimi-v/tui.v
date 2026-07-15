@@ -19,6 +19,7 @@
 module main
 
 import os
+import term
 
 // ---------- ANSI helpers --------------------------------------------------
 
@@ -62,34 +63,26 @@ fn cursor_show() string {
 
 // ---------- Terminal size -------------------------------------------------
 
-// term_size queries the terminal size via `stty size` (POSIX) or the
-// `COLUMNS` / `LINES` env vars (commonly set by shells).
+// term_size queries the terminal size via V's standard library
+// `term.get_terminal_size()` (which uses ioctl(TIOCGWINSZ)). This is more
+// reliable than forking `stty size` and avoids shell/exec overhead.
 //
-// We can't easily use ioctl(TIOCGWINSZ) from V without C bindings; stty is
-// universally available on macOS and Linux. On Windows we'd fall back to
-// env vars.
+// Falls back to env vars COLUMNS/LINES or 80x24 when stdout is not a TTY.
 fn term_size() (int, int) {
-	out := os.execute('stty size 2>/dev/null')
-	if out.exit_code == 0 {
-		parts := out.output.split(' ')
-		if parts.len >= 2 {
-			rows := parts[0].trim_space().int()
-			cols := parts[1].trim_space().int()
-			if rows > 0 && cols > 0 {
-				return rows, cols
-			}
-		}
+	cols, rows := term.get_terminal_size()
+	if cols > 0 && rows > 0 {
+		return rows, cols
 	}
 	// Fallback: env vars.
-	mut cols := 80
-	mut rows := 24
+	mut fcols := 80
+	mut frows := 24
 	cols_str := os.getenv('COLUMNS')
 	rows_str := os.getenv('LINES')
-	if cols_str.len > 0 { cols = cols_str.int() }
-	if rows_str.len > 0 { rows = rows_str.int() }
-	if cols <= 0 { cols = 80 }
-	if rows <= 0 { rows = 24 }
-	return rows, cols
+	if cols_str.len > 0 { fcols = cols_str.int() }
+	if rows_str.len > 0 { frows = rows_str.int() }
+	if fcols <= 0 { fcols = 80 }
+	if frows <= 0 { frows = 24 }
+	return frows, fcols
 }
 
 // ---------- Raw mode ------------------------------------------------------
@@ -195,6 +188,7 @@ pub enum BlockKind {
 	system
 }
 
+// Block is one rendered item in the conversation scrollback.
 pub struct Block {
 pub:
 	kind BlockKind
@@ -215,6 +209,9 @@ pub mut:
 	collapsed bool
 }
 
+// new_tui_state creates an initial TuiState with the current terminal size
+// and an empty block list. The state starts dirty so the first frame is
+// painted immediately.
 pub fn new_tui_state() TuiState {
 	rows, cols := term_size()
 	return TuiState{

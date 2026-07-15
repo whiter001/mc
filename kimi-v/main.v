@@ -16,6 +16,7 @@ import json
 
 const version = '0.1.0'
 
+// Cli holds the parsed command-line flags and positional arguments.
 struct Cli {
 mut:
 	cmd             string
@@ -39,6 +40,8 @@ mut:
 	show_version   bool
 }
 
+// main is the CLI entry point. It parses arguments, dispatches to the
+// requested subcommand, and handles top-level error reporting.
 fn main() {
 	cli := parse_args(os.args) or {
 		eprintln('error: ${err.msg()}')
@@ -96,6 +99,8 @@ fn main() {
 	}
 }
 
+// parse_args converts os.args into a populated Cli struct. Unknown flags
+// produce an error; missing values for flags that require them also error.
 fn parse_args(args []string) !Cli {
 	mut cli := Cli{}
 	cli.cmd = 'run'
@@ -231,6 +236,9 @@ fn parse_args(args []string) !Cli {
 	return cli
 }
 
+// run_prompt executes a single-shot task (`kimi -p "..."`). It builds the
+// provider and agent from CLI/config, wires callbacks, runs the loop, and
+// saves the session. Stream-json output is emitted here when requested.
 fn run_prompt(cli Cli, mut log Logger) ! {
 	if cli.prompt.len == 0 {
 		print_help()
@@ -415,6 +423,8 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	save(sess) or { log.warn('session save failed: ${err.msg()}') }
 }
 
+// run_login interactively prompts for provider and API key, then persists
+// them to the user config file.
 fn run_login(cli Cli) ! {
 	println('Kimi Code CLI — login')
 	println('')
@@ -457,6 +467,8 @@ fn run_login(cli Cli) ! {
 	}
 }
 
+// persist_credentials writes a minimal config.toml containing the provider,
+// base URL, model, and API key to the user's Kimi config directory.
 fn persist_credentials(api_base string, model string, api_key string) {
 	dir := config_dir()
 	ensure_dir(dir) or { return }
@@ -483,6 +495,8 @@ fn read_secret() string {
 	return read_line().trim_space()
 }
 
+// run_sessions lists all saved sessions, newest first, with a hint for
+// resuming a session.
 fn run_sessions() ! {
 	summaries := list_all()!
 	if summaries.len == 0 {
@@ -621,6 +635,7 @@ fn run_export(cli Cli) ! {
 // config_paths_struct returns the standard on-disk locations so run_export
 // (and any future command that needs the layout) can find session files
 // and logs without re-deriving paths.
+// ConfigPaths groups the standard on-disk directories used by the CLI.
 struct ConfigPaths {
 pub:
 	config  string
@@ -655,6 +670,8 @@ fn config_paths_struct() ConfigPaths {
 // `json.encode`. Numbers are stringified before encoding; consumers
 // parse them with `parseInt`/`parseFloat` on their side.
 
+// emit_jsonl_event writes a single JSON object to stdout. Used in
+// stream-json mode so scripts can parse events line-by-line.
 fn emit_jsonl_event(kind string, fields map[string]string) {
 	mut obj := {
 		'type': kind
@@ -667,6 +684,8 @@ fn emit_jsonl_event(kind string, fields map[string]string) {
 	stdout_flush()
 }
 
+// outcome_str returns the string representation of a LoopOutcome for
+// stream-json events.
 fn outcome_str(o LoopOutcome) string {
 	match o {
 		.finished { return 'finished' }
@@ -675,6 +694,9 @@ fn outcome_str(o LoopOutcome) string {
 	}
 }
 
+// emit_assistant_message emits the most recent assistant message from the
+// session as a stream-json event. It also reports how many tool calls were
+// attached to that message.
 fn emit_assistant_message(sess &Session) {
 	// Walk the session backwards to find the last assistant message.
 	mut last := ''
@@ -695,6 +717,8 @@ fn emit_assistant_message(sess &Session) {
 	emit_jsonl_event('assistant', fields)
 }
 
+// print_help shows the CLI usage, options, environment variables, and
+// config file locations.
 fn print_help() {
 	println('kimi ${version} — terminal AI coding agent')
 	println('')

@@ -6,12 +6,14 @@ module main
 
 import json
 
+// LoopOutcome describes why the agent loop stopped.
 pub enum LoopOutcome {
 	finished
 	max_turns
 	errored
 }
 
+// LoopResult summarizes a completed agent run.
 pub struct LoopResult {
 pub:
 	outcome    LoopOutcome
