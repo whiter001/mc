@@ -23,6 +23,8 @@
 //   Ctrl-C                        signal interrupt (handled by main loop)
 //   Ctrl-L                        clear screen (handled by render loop)
 //   Ctrl-O                        toggle collapse of all tool result blocks
+//   Ctrl-V                        paste system clipboard (macOS pbpaste /
+//                                   Linux wl-paste|xclip / Windows PowerShell)
 //   Ctrl-X                        clear pending image attachments
 //   Esc, Esc                      exit TUI
 //
@@ -71,6 +73,7 @@ pub const ctrl_o        = 15
 pub const ctrl_p        = 16
 pub const ctrl_s        = 19
 pub const ctrl_u        = 21
+pub const ctrl_v        = 22
 pub const ctrl_w        = 23
 pub const ctrl_x        = 24
 
@@ -182,6 +185,17 @@ pub fn (mut r StdinReader) read_key() KeyEvent {
 		}
 		ctrl_x {
 			return KeyEvent{ kind: .clear_attachments }
+		}
+		ctrl_v {
+			// Ctrl+V: read the system clipboard and treat the result as a
+			// bracketed-paste event. This matches upstream's "paste from
+			// clipboard" shortcut on Unix-like terminals where Ctrl+V is
+			// not already converted into bracketed paste by the emulator.
+			content := read_clipboard()
+			if content.len > 0 {
+				return KeyEvent{ kind: .paste, text: content }
+			}
+			return KeyEvent{ kind: .none }
 		}
 		ctrl_d {
 			// Ctrl-D on empty input = EOF; we treat it as interrupt to be safe.
@@ -344,6 +358,33 @@ fn (mut r StdinReader) read_bracketed_paste() KeyEvent {
 		}
 	}
 	return KeyEvent{ kind: .paste, text: buf.bytestr() }
+}
+
+// read_clipboard returns the current system clipboard contents as text.
+// Best-effort across macOS / Linux / Windows; returns an empty string if
+// no clipboard reader is available or the clipboard is empty.
+fn read_clipboard() string {
+	$if macos {
+		res := os.execute('pbpaste')
+		if res.exit_code == 0 {
+			return res.output
+		}
+	} $else $if linux {
+		// Prefer Wayland, fall back to X11.
+		mut res := os.execute('wl-paste 2>/dev/null')
+		if res.exit_code != 0 {
+			res = os.execute('xclip -selection clipboard -o 2>/dev/null')
+		}
+		if res.exit_code == 0 {
+			return res.output
+		}
+	} $else $if windows {
+		res := os.execute('powershell -command "Get-Clipboard"')
+		if res.exit_code == 0 {
+			return res.output
+		}
+	}
+	return ''
 }
 
 // ---------- Input buffer -------------------------------------------------
