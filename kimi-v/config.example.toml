@@ -1,0 +1,118 @@
+# Kimi-v configuration example.
+# Copy this file to your config directory as `config.toml`:
+#   macOS: ~/Library/Application Support/kimi/config.toml
+#   Linux: ~/.config/kimi/config.toml
+#   Windows: %APPDATA%\kimi\config.toml
+# You can also put it at `<project>/.kimi/config.toml` for project-local overrides.
+#
+# Precedence (low → high):
+#   defaults < user config < project config < env vars (KIMI_*) < CLI flags
+
+# ---- Provider ----
+
+# Provider backend. Currently only "openai-compat" is supported.
+# Env: KIMI_PROVIDER
+provider = "openai-compat"
+
+# Base URL for the OpenAI-compatible API.
+# Env: KIMI_API_BASE
+api_base = "https://api.openai.com"
+
+# API key for the provider.
+# Env: KIMI_API_KEY
+api_key = "sk-..."
+
+# Model name to use. Must be set.
+# Env: KIMI_MODEL
+model = "gpt-4o"
+
+# ---- Agent ----
+
+# System prompt injected at the start of every session.
+# Env: KIMI_SYSTEM_PROMPT
+system_prompt = ""
+
+# ---- Logging ----
+
+# Log verbosity: "debug", "info", "warn", "error".
+# Env: KIMI_LOG_LEVEL
+log_level = "info"
+
+# ---- Limits ----
+
+# Maximum number of agent turns per user request.
+max_turns = 32
+
+# Maximum tokens per model response.
+max_tokens = 4096
+
+# ---- Permissions ----
+
+# List of tool names that always require explicit user approval before running.
+# If empty, the built-in default risky-tools list is used.
+# Env: KIMI_RISKY_TOOLS (comma-separated)
+risky_tools = []
+# Example:
+# risky_tools = ["bash", "write_file", "apply_patch"]
+
+# YOLO mode: skip all approval prompts. Sensitive patterns (rm -rf, sudo, etc.)
+# still re-prompt as a safety backstop.
+# Env: KIMI_YOLO (set to 1/true/yes/on)
+yolo = false
+
+# ---- Output ----
+
+# Output format for `-p` (prompt) mode.
+# "text"      -> plain text to stdout (default)
+# "stream-json" -> one JSON object per line (JSONL) for scripting/CI
+# Note: this is normally controlled by the --output-format CLI flag.
+output_format = "text"
+
+# ---- Lifecycle hooks ----
+
+# Each [[hooks]] entry runs a command when the specified event fires.
+# Events: session_start, session_end, user_prompt_submit, pre_tool_use,
+#         post_tool_use, stop, stop_failure, interrupt.
+# Some events are "blockable": a non-zero exit or {"action":"block"} output
+# can abort the turn (pre_tool_use, user_prompt_submit, stop).
+#
+# Fields:
+#   event   - required, which lifecycle event triggers this hook
+#   command - required, shell command to run
+#   matcher - optional regex; for pre_tool_use/post_tool_use it filters by tool name
+#   timeout - optional, seconds to wait (0 means default 30s)
+#   cwd     - optional working directory for the command
+
+# [[hooks]]
+# event = "user_prompt_submit"
+# command = "echo 'new prompt: '"
+
+# [[hooks]]
+# event = "pre_tool_use"
+# matcher = "bash"
+# command = "python3 ~/.config/kimi/hooks/audit.py"
+# timeout = 10
+
+# ---- MCP servers ----
+
+# Each [[mcp]] entry connects to an external Model Context Protocol server.
+# Exactly one transport must be configured: `command` (stdio) OR `url` (HTTP).
+#
+# Fields:
+#   name     - required logical name; tools appear as "<name>.<tool_name>"
+#   command  - stdio transport: executable to spawn
+#   args     - stdio transport: argv after command
+#   url      - HTTP streamable transport endpoint
+#   headers  - HTTP-only extra headers (table of string -> string)
+#   required - if true, startup fails when the server cannot connect
+
+# [[mcp]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/workspace"]
+# required = false
+
+# [[mcp]]
+# name = "remote"
+# url = "http://localhost:8000/mcp"
+# headers = { Authorization = "Bearer token" }
