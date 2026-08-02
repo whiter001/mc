@@ -25,17 +25,13 @@ import term
 
 pub const esc          = '\x1b'
 pub const esc_reset    = '\x1b[0m'
-pub const esc_bold     = '\x1b[1m'
 pub const esc_dim      = '\x1b[2m'
 pub const esc_red      = '\x1b[31m'
 pub const esc_green    = '\x1b[32m'
 pub const esc_yellow   = '\x1b[33m'
-pub const esc_blue     = '\x1b[34m'
-pub const esc_magenta  = '\x1b[35m'
 pub const esc_cyan     = '\x1b[36m'
 pub const esc_gray     = '\x1b[90m'
 pub const esc_bg_blue  = '\x1b[44m'
-pub const esc_bg_gray  = '\x1b[100m'
 
 // clear_screen wipes the visible screen.
 fn clear_screen() string {

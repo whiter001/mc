@@ -1,5 +1,6 @@
 # Build outputs
 kimi
+kimi-v
 kimi-debug
 *.exe
 *.out

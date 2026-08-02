@@ -450,14 +450,6 @@ fn camel_to_snake(value string) string {
 	return out
 }
 
-// HookEngineTriggerArgs is a convenience for callers that want to build the
-// input map with snake_case keys already. (Kept for clarity at call sites.)
-pub struct HookTriggerArgs {
-pub:
-	matcher_value string
-	input         map[string]string
-}
-
 // run_hook_for_event is the top-level entry used by the agent loop: fire the
 // hooks for `event`, and if blockable + a block was returned, return the
 // reason string (caller should abort). Observation-only events return none.

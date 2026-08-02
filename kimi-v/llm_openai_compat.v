@@ -18,8 +18,6 @@ pub:
 	model    string
 	api_base string = 'https://api.openai.com'
 	api_key  string
-pub mut:
-	unused int
 }
 
 // ---- Wire types (only the fields we actually need) -----------------------

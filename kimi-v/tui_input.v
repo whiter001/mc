@@ -57,7 +57,6 @@ import encoding.base64
 pub const key_enter     = 13
 pub const key_esc       = 27
 pub const key_backspace = 127
-pub const key_tab       = 9
 pub const ctrl_a        = 1
 pub const ctrl_b        = 2
 pub const ctrl_c        = 3
