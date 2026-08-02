@@ -3,8 +3,6 @@
 
 module main
 
-import strings
-
 fn test_parse_selection_single() {
 	got := parse_selection('2', 4, false)
 	assert got == [2]

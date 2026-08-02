@@ -6,7 +6,7 @@
 module main
 
 import os
-import json
+import json2
 
 // ---------- emit_jsonl_event (item #2) -----------------------------------
 
@@ -20,13 +20,13 @@ fn test_emit_jsonl_event_emits_valid_jsonl() {
 	}
 	obj['name'] = 'bash'
 	obj['args'] = '{"command":"ls"}'
-	line := json.encode(obj)
+	line := json2.encode(obj)
 	// Sanity: starts with {, ends with }, no newlines.
 	assert line.starts_with('{')
 	assert line.ends_with('}')
 	assert !line.contains('\n')
 	// And decodes back to the same shape.
-	decoded := json.decode(map[string]string, line) or {
+	decoded := json2.decode[map[string]string](line) or {
 		assert false, 'invalid json: ${err.msg()}'
 		return
 	}
@@ -42,8 +42,8 @@ fn test_emit_jsonl_event_includes_all_fields() {
 	obj['turns'] = '3'
 	obj['input_tokens'] = '100'
 	obj['output_tokens'] = '50'
-	line := json.encode(obj)
-	decoded := json.decode(map[string]string, line) or {
+	line := json2.encode(obj)
+	decoded := json2.decode[map[string]string](line) or {
 		assert false, err.msg()
 		return
 	}
@@ -72,8 +72,8 @@ fn test_jsonl_roundtrip_preserves_unicode() {
 		'type': 'assistant'
 	}
 	obj['content'] = '你好 🌍 — kimi is ready.'
-	line := json.encode(obj)
-	decoded := json.decode(map[string]string, line) or {
+	line := json2.encode(obj)
+	decoded := json2.decode[map[string]string](line) or {
 		assert false, err.msg()
 		return
 	}

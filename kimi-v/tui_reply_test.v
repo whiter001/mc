@@ -4,8 +4,6 @@
 // is correct and the "reply not showing" bug lives upstream (provider/agent).
 module main
 
-import os
-
 fn test_assistant_reply_renders_without_network() {
 	mut state := new_tui_state()
 	ib := new_input_buf()

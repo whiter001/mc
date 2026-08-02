@@ -11,7 +11,7 @@
 // Agent so the stateless Tool interface can reach it through ctx.agent.
 module main
 
-import json
+import json2
 
 // skill_catalog is stored on the Agent so tools can look skills up. We keep a
 // pointer; the runner populates it before the loop starts.
@@ -45,7 +45,7 @@ struct SkillToolArgs {
 
 // execute looks up the named skill, expands its placeholders, and returns the instruction body.
 pub fn (t SkillTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	parsed := json.decode(SkillToolArgs, args.raw) or {
+	parsed := json2.decode[SkillToolArgs](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()} (expected {"skill":"...","args":"..."})'
 			is_error: true

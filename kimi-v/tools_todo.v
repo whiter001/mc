@@ -9,7 +9,7 @@
 
 module main
 
-import json
+import json2
 
 // TodoItem is one tracked task.
 pub struct TodoItem {
@@ -92,7 +92,7 @@ struct TodoArgs {
 // execute normalizes the input and stores the updated todo list on the Agent.
 pub fn (t TodoWriteTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	// The model sends `todos` as a JSON array inside the args object.
-	parsed := json.decode(TodoArgs, args.raw) or {
+	parsed := json2.decode[TodoArgs](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()} (expected {"todos":[...]})'
 			is_error: true

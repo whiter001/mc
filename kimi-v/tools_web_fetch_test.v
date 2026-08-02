@@ -6,7 +6,7 @@
 // the quality of fetched documentation pages.
 module main
 
-import json
+import json2
 
 // ---------- html_to_text --------------------------------------------------
 
@@ -173,11 +173,12 @@ fn test_webfetch_schema_is_valid_json() {
 	schema := tool.parameters_schema()
 	// Lightweight sanity check: the schema should parse and look like an
 	// object schema. We don't pull in a full JSON AST here.
-	parsed := json.decode(map[string]string, schema) or {
+	parsed := json2.decode[map[string]json2.Any](schema) or {
 		assert false, 'schema is not valid JSON: ${err.msg()}'
 		return
 	}
-	assert parsed['type'] == 'object'
+	typ := parsed['type'] or { json2.Any('') }
+	assert typ == json2.Any('object')
 }
 
 fn test_webfetch_schema_requires_url() {

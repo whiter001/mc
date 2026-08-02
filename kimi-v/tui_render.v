@@ -234,7 +234,7 @@ fn render_exit_plan_modal(mut buf strings.Builder, req ExitPlanRequest, cols int
 // bottom of the screen. We use a single bright row instead of a centered
 // box to keep the diff small; users on narrow terminals still see the
 // prompt and the tool name.
-fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, cols int) {
+fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, _ int) {
 	// Truncate the args display so a 4KB bash command doesn't flood the
 	// modal. 200 chars is enough to see what's about to run.
 	preview := if req.args.len > 200 { req.args[..200] + '...' } else { req.args }

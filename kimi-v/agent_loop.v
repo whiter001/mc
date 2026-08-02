@@ -4,7 +4,7 @@
 // errors.
 module main
 
-import json
+import json2
 import time
 
 // LoopOutcome describes why the agent loop stopped.
@@ -306,7 +306,7 @@ fn (a Agent) sleep_or_cancel(ms int) bool {
 // malformed. Used by the plan-mode read-only guard to decide whether a write
 // is allowed (only the plan file may be written while plan mode is active).
 fn tool_write_path(raw_args string) string {
-	args_map := json.decode(map[string]string, raw_args) or {
+	args_map := json2.decode[map[string]string](raw_args) or {
 		return ''
 	}
 	return args_map['path'] or { '' }

@@ -8,7 +8,7 @@
 // one tool result per subagent.
 module main
 
-import json
+import json2
 
 // =============================================================================
 // AgentSwarm (batch subagent dispatch)
@@ -60,7 +60,7 @@ struct AgentSwarmArgs {
 // execute validates the batch, then launches every subagent (resumed sessions
 // first, item spawns after) either in the foreground or in the background.
 pub fn (t AgentSwarmTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	parsed := json.decode(AgentSwarmArgs, args.raw) or {
+	parsed := json2.decode[AgentSwarmArgs](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()} (expected {"prompt_template":..., "items":[...]})'
 			is_error: true

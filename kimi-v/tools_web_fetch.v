@@ -6,9 +6,8 @@
 
 module main
 
-import os
 import net.http
-import json
+import json2
 import strings
 
 // =============================================================================
@@ -44,7 +43,7 @@ pub fn (t WebFetchTool) parameters_schema() string {
 // execute performs the HTTP fetch, converts HTML to text when needed, and
 // returns the page content capped at max_bytes.
 pub fn (t WebFetchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true

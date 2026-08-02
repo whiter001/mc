@@ -2,7 +2,7 @@ module main
 
 import os
 import time
-import json
+import json2
 
 fn setup_plan_agent() Agent {
 	mut a := new_agent(OpenAICompatProvider{}, 'sys')
@@ -60,7 +60,7 @@ fn test_exit_plan_options_reserved_labels_filtered() {
 	// (the filtering happens inside execute; here we just sanity-check the
 	// struct decodes).
 	raw := '{"options":[{"label":"Approve","description":"x"}]}'
-	decoded := json.decode(ExitPlanArgs, raw) or { panic('decode failed') }
+	decoded := json2.decode[ExitPlanArgs](raw) or { panic('decode failed') }
 	// The reserved label is filtered out by execute(); decoding alone keeps
 	// it, so we assert the raw decode works.
 	assert decoded.options.len == 1

@@ -5,7 +5,7 @@
 module main
 
 import os
-import json
+import json2
 import regex
 import time
 
@@ -55,7 +55,7 @@ pub fn (t ReadFileTool) parameters_schema() string {
 
 // execute reads the requested file and returns its contents.
 pub fn (t ReadFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true
@@ -111,7 +111,7 @@ pub fn (t WriteFileTool) parameters_schema() string {
 
 // execute resolves the path, creates parents, and writes the provided content.
 pub fn (t WriteFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true
@@ -190,7 +190,7 @@ pub fn (t EditFileTool) parameters_schema() string {
 
 // execute verifies the replacement text is unique and applies it.
 pub fn (t EditFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true
@@ -338,20 +338,20 @@ pub fn (t BashTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	// for the string form.
 	mut command := ''
 	mut timeout_ms := bash_default_timeout_ms
-	if parsed := json.decode(BashToolArgs, args.raw) {
+	if parsed := json2.decode[BashToolArgs](args.raw) {
 		command = parsed.command
 		mut timeout_req := parsed.timeout_ms
 		if timeout_req == 0 && args.raw.contains('"timeout_ms"') {
 			// timeout_ms was present but didn't survive the typed decode
 			// (e.g. the model sent it as a string, which coerces to 0).
 			// Retry through the map decode, which keeps string values.
-			if args_map := json.decode(map[string]string, args.raw) {
+			if args_map := json2.decode[map[string]string](args.raw) {
 				timeout_req = (args_map['timeout_ms'] or { '' }).int()
 			}
 		}
 		timeout_ms = bash_timeout_ms(timeout_req)
 	} else {
-		args_map := json.decode(map[string]string, args.raw) or {
+		args_map := json2.decode[map[string]string](args.raw) or {
 			return ToolResult{
 				content:  'invalid arguments: ${err.msg()}'
 				is_error: true
@@ -446,7 +446,7 @@ pub fn (t GlobTool) parameters_schema() string {
 
 // execute resolves the pattern and returns matching file paths.
 pub fn (t GlobTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true
@@ -583,7 +583,7 @@ pub fn (t GrepTool) parameters_schema() string {
 
 // execute runs ripgrep if available, otherwise falls back to a built-in walker.
 pub fn (t GrepTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true

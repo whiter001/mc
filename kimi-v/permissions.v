@@ -32,7 +32,7 @@
 module main
 
 import os
-import json
+import json2
 
 // PermissionVerdict is the outcome of evaluating the configured rules
 // against a tool call.
@@ -99,7 +99,7 @@ pub fn permission_match_arg(tool_name string, args string) string {
 		'bash' { return args }
 		'write_file', 'edit_file' { return tool_write_path(args) }
 		'web_fetch' {
-			m := json.decode(map[string]string, args) or { return args }
+			m := json2.decode[map[string]string](args) or { return args }
 			return m['url'] or { args }
 		}
 		else { return args }

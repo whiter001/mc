@@ -4,7 +4,7 @@
 // (there isn't one) and lets us evolve the schema alongside the protocol.
 module main
 
-import json
+import json2
 
 pub const jsonrpc_version = '2.0'
 
@@ -49,7 +49,7 @@ pub fn encode_request(id int, method string, params string) !string {
 		method: method
 		params: if params.len > 0 { params } else { none }
 	}
-	return json.encode(r)
+	return json2.encode(r)
 }
 
 // encode_notification builds a JSON-RPC notification string.
@@ -58,10 +58,10 @@ pub fn encode_notification(method string, params string) !string {
 		method: method
 		params: if params.len > 0 { params } else { none }
 	}
-	return json.encode(n)
+	return json2.encode(n)
 }
 
 // decode_response parses a JSON-RPC response line.
 pub fn decode_response(line string) !JsonRpcResponse {
-	return json.decode(JsonRpcResponse, line)!
+	return json2.decode[JsonRpcResponse](line)!
 }

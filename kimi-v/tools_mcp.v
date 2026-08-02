@@ -54,7 +54,7 @@ pub fn (t McpTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	a := ctx.agent or {
 		return error('mcp tool "${t.display_name}" requires an agent context')
 	}
-	mut ag := a
+	ag := a
 	if t.server_name !in ag.mcp_clients {
 		return error('mcp server "${t.server_name}" is not connected')
 	}

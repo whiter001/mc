@@ -9,7 +9,7 @@
 module main
 
 import net.http
-import json
+import json2
 import strings
 
 // =============================================================================
@@ -44,7 +44,7 @@ pub fn (t WebSearchTool) parameters_schema() string {
 
 // execute runs the DuckDuckGo search and formats the results as a numbered list.
 pub fn (t WebSearchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
+	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()}'
 			is_error: true

@@ -11,7 +11,7 @@
 // ExitPlanMode case, block on the TUI-owned approval channel.
 module main
 
-import json
+import json2
 
 // =============================================================================
 // EnterPlanMode
@@ -116,7 +116,7 @@ pub fn (t ExitPlanModeTool) execute(args ToolArgs, ctx ToolContext) !ToolResult 
 
 	// Parse optional `options` (alternative approaches).
 	mut opts := []PlanOption{}
-	decoded := json.decode(ExitPlanArgs, args.raw) or {
+	decoded := json2.decode[ExitPlanArgs](args.raw) or {
 		// No options / empty args is fine; proceed with the plan only.
 		ExitPlanArgs{}
 	}

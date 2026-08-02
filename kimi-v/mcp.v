@@ -10,7 +10,7 @@
 module main
 
 import mcp
-import json
+import json2
 
 // McpServerConfig describes one MCP server to connect to. Mirrors the
 // `[[mcp]]` array-of-tables in config.toml. Exactly one transport must be
@@ -74,13 +74,12 @@ fn connect_mcp_server(cfg McpServerConfig) !McpClient {
 	for k, v in cfg.headers {
 		client_config.headers[k] = v
 	}
-	mut client := mcp.Client{}
-	if cfg.url.len > 0 {
-		client = mcp.connect_http(cfg.url, client_config) or {
+	mut client := if cfg.url.len > 0 {
+		mcp.connect_http(cfg.url, client_config) or {
 			return error('mcp connect (http ${cfg.url}) failed: ${err.msg()}')
 		}
 	} else if cfg.command.len > 0 {
-		client = mcp.connect_stdio(cfg.command, cfg.args, client_config) or {
+		mcp.connect_stdio(cfg.command, cfg.args, client_config) or {
 			return error('mcp connect (stdio ${cfg.command}) failed: ${err.msg()}')
 		}
 	} else {
@@ -121,7 +120,7 @@ fn list_mcp_tools(clients map[string]&McpClient, server_name string) ![]mcp.Tool
 	if resp.error.code != 0 {
 		return error('mcp tools/list (${server_name}) error ${resp.error.code}: ${resp.error.message}')
 	}
-	parsed := json.decode(McpToolsListResult, resp.result) or {
+	parsed := json2.decode[McpToolsListResult](resp.result) or {
 		return error('mcp tools/list (${server_name}) decode failed: ${err.msg()}')
 	}
 	return parsed.tools
@@ -136,7 +135,7 @@ fn call_mcp_tool(clients map[string]&McpClient, server_name string, tool_name st
 	}
 	// `tools/call` params: { "name": ..., "arguments": <json object> }.
 	arg_obj := if args_raw.trim_space().len > 0 { args_raw } else { '{}' }
-	params := '{"name":${json.encode(tool_name)},"arguments":${arg_obj}}'
+	params := '{"name":${json2.encode(tool_name)},"arguments":${arg_obj}}'
 	resp := mc.client.request_message('tools/call', params) or {
 		return error('mcp tools/call (${server_name}/${tool_name}) failed: ${err.msg()}')
 	}
@@ -146,12 +145,12 @@ fn call_mcp_tool(clients map[string]&McpClient, server_name string, tool_name st
 			is_error: true
 		}
 	}
-	parsed := json.decode(McpToolCallResult, resp.result) or {
+	parsed := json2.decode[McpToolCallResult](resp.result) or {
 		return error('mcp tools/call (${server_name}/${tool_name}) decode failed: ${err.msg()}')
 	}
 	mut out := ''
 	if parsed.content.trim_space().len > 0 {
-		items := json.decode([]McpContentItem, parsed.content) or { []McpContentItem{} }
+		items := json2.decode[[]McpContentItem](parsed.content) or { []McpContentItem{} }
 		for i, item in items {
 			if i > 0 {
 				out += '\n'

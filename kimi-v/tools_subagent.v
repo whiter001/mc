@@ -12,7 +12,7 @@
 // end user.
 module main
 
-import json
+import json2
 
 // =============================================================================
 // Agent (subagent dispatch)
@@ -80,7 +80,7 @@ struct AgentToolArgs {
 
 // execute resolves the profile, spawns the subagent, and returns its handoff.
 pub fn (t AgentTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	parsed := json.decode(AgentToolArgs, args.raw) or {
+	parsed := json2.decode[AgentToolArgs](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()} (expected {"prompt":..., "description":...})'
 			is_error: true

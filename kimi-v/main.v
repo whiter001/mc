@@ -392,11 +392,11 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 			})
 		}
 	} else {
-		a.on_delta = fn [log] (chunk string) {
+		a.on_delta = fn (chunk string) {
 			print(chunk)
 			stdout_flush()
 		}
-		a.on_thinking = fn [log] (chunk string) {
+		a.on_thinking = fn (chunk string) {
 			print('\x1b[90m${chunk}\x1b[0m') // grey
 			stdout_flush()
 		}
@@ -897,7 +897,7 @@ fn print_help() {
 
 // run_tui_cmd is the interactive TUI entry. Builds the same agent as
 // run_prompt but defers to run_tui() for the loop.
-fn run_tui_cmd(cli Cli, mut log Logger) ! {
+fn run_tui_cmd(cli Cli, mut _ Logger) ! {
 	cli_cfg := Config{
 		provider:      cli.provider
 		api_base:      cli.api_base

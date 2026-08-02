@@ -20,16 +20,16 @@
 //   {"type":"message_stop"}
 //   {"type":"error","error":{"type":"overloaded_error","message":"..."}}
 //
-// NOTE on request encoding: V 0.5's `json.encode` no longer honors custom
+// NOTE on request encoding: V 0.5's `json2.encode` no longer honors custom
 // `json()` hooks (llm_openai_compat.v's RawJson relies on that trick), so a
 // pre-encoded JSON object can't be embedded through struct encoding. We
 // hand-assemble the request body instead: string values are escaped with
-// `json.encode(s)` (which returns a quoted literal), pre-encoded JSON
+// `json2.encode(s, escape_unicode: true)` (which returns a quoted literal), pre-encoded JSON
 // (`input`, `input_schema`) is spliced in verbatim, and numbers are
 // interpolated directly.
 module main
 
-import json
+import json2
 import os
 import strings
 import time
@@ -45,7 +45,7 @@ pub:
 
 // json_lit returns s as a quoted, escaped JSON string literal.
 fn json_lit(s string) string {
-	return json.encode(s)
+	return json2.encode(s, escape_unicode: true)
 }
 
 // ---- Request body assembly -----------------------------------------------
@@ -163,7 +163,7 @@ pub fn build_anthropic_body(req ChatRequest) string {
 
 // ---- SSE event types (decode side only) ----------------------------------
 //
-// V 0.5's json.decode ignores missing fields, so every field is optional
+// V 0.5's json2.decode ignores missing fields, so every field is optional
 // except the discriminator; ?-wrapped fields are used where a key is absent
 // from some event types.
 
@@ -236,7 +236,7 @@ fn new_anthropic_parser() AnthropicSseParser {
 
 // feed decodes one SSE data payload and emits the corresponding ChatEvents.
 fn (mut p AnthropicSseParser) feed(event_data string, out chan ChatEvent, cancel_ch chan int) {
-	ev := json.decode(AnthropicEventT, event_data) or {
+	ev := json2.decode[AnthropicEventT](event_data) or {
 		return
 	}
 	// Non-blocking cancel check before processing the event.

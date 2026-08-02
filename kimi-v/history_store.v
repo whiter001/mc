@@ -97,7 +97,7 @@ pub fn save_history(history []string) ! {
 	}
 	// Cap to the most recent N entries.
 	if kept_rev.len > history_max_entries {
-		kept_rev = kept_rev[..history_max_entries]
+		kept_rev = kept_rev[..history_max_entries].clone()
 	}
 	// Reverse to chronological order (oldest first, newest last) for
 	// nicer on-disk format and to match the order load_history returns.

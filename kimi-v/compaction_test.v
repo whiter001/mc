@@ -4,8 +4,6 @@
 // (or v test . from the project root)
 module main
 
-import strings
-
 // ---------- Fake provider --------------------------------------------------
 //
 // We don't want to hit a real LLM in unit tests. FakeProvider implements

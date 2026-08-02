@@ -29,7 +29,7 @@ module main
 
 import net
 import net.openssl { SSLConn, SSLConnectConfig, new_ssl_conn }
-import json
+import json2
 import strings
 import strconv
 import time
@@ -554,7 +554,7 @@ fn new_sse_parser() SseParser {
 
 // feed decodes one SSE data payload and emits the corresponding ChatEvents.
 fn (mut p SseParser) feed(event_data string, out chan ChatEvent, cancel_ch chan int) {
-	chunk := json.decode(OaiStreamChunk, event_data) or {
+	chunk := json2.decode[OaiStreamChunk](event_data) or {
 		return
 	}
 

@@ -8,7 +8,7 @@
 
 module main
 
-import json
+import json2
 import time
 
 // AskUserQuestionTool lets the model ask the user a question mid-turn.
@@ -47,7 +47,7 @@ struct AskArgs {
 
 // execute parses the question/options, forwards them to the TUI, and returns the user's selection or a timeout message in non-interactive mode.
 pub fn (t AskUserQuestionTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	parsed := json.decode(AskArgs, args.raw) or {
+	parsed := json2.decode[AskArgs](args.raw) or {
 		return ToolResult{
 			content:  'invalid arguments: ${err.msg()} (expected {"question":..., "options":[...]})'
 			is_error: true

@@ -25,7 +25,7 @@
 module main
 
 import os
-import json
+import json2
 import regex
 
 // HookEventType is one of the 15 supported hook events.
@@ -250,7 +250,7 @@ fn (e HookEngine) build_payload(event HookEventType, matcher_value string, input
 	if matcher_value.len > 0 {
 		payload['matcher_value'] = matcher_value
 	}
-	return json.encode(payload)
+	return json2.encode(payload)
 }
 
 // run_hook executes one hook command, feeding `payload` on stdin, and returns
@@ -467,7 +467,3 @@ pub fn (e HookEngine) run_hook_for_event(event HookEventType, matcher_value stri
 	}
 	return e.trigger_block(event, matcher_value, input)
 }
-
-// ensure time import is used (timestamps not strictly needed but kept for
-// parity with upstream timeout semantics naming).
-const _hooks_time_unused = 0

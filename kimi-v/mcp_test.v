@@ -1,7 +1,7 @@
 // mcp_test.v — unit tests for MCP config parsing and tool-name namespacing.
 module main
 
-import json
+import json2
 import os
 import toml
 
@@ -82,12 +82,12 @@ command = "echo"
 // kinds is flattened correctly by the decode structs used in call_mcp_tool.
 fn test_mcp_content_parsing() {
 	raw := '{"content":[{"type":"text","text":"hello"},{"type":"image","mimeType":"image/png","data":"AAA="}],"isError":false}'
-	parsed := json.decode(McpToolCallResult, raw) or {
+	parsed := json2.decode[McpToolCallResult](raw) or {
 		assert false
 		return
 	}
 	assert parsed.is_error == false
-	items := json.decode([]McpContentItem, parsed.content) or {
+	items := json2.decode[[]McpContentItem](parsed.content) or {
 		assert false
 		return
 	}

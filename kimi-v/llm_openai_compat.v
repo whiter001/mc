@@ -8,7 +8,7 @@
 // and will replace this in P0.5.
 module main
 
-import json
+import json2
 import net.http
 
 // OpenAICompatProvider implements an OpenAI-compatible chat completions client.
@@ -301,7 +301,7 @@ pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent, cancel
 // chat_streaming_http issues a streaming HTTP request and feeds SSE events to out.
 fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	wire := build_streaming_request(p, req)
-	body := json.encode(wire)
+	body := json2.encode(wire)
 
 	mut reader := http_post_streaming(url, body, {
 		'Authorization': 'Bearer ${p.api_key}'
@@ -311,7 +311,7 @@ fn chat_streaming_http(p OpenAICompatProvider, url ParsedUrl, req ChatRequest, o
 }
 
 // build_streaming_request builds the wire payload for a streaming chat request.
-fn build_streaming_request(p OpenAICompatProvider, req ChatRequest) OaiRequestT {
+fn build_streaming_request(_ OpenAICompatProvider, req ChatRequest) OaiRequestT {
 	mut msgs := []OaiReqMessageT{cap: req.messages.len}
 	for m in req.messages {
 		mut tcs := []OaiToolCallT{}
@@ -355,7 +355,7 @@ fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEve
 	// (or fails); cancellation at this layer is best-effort.
 	_ = cancel_ch
 	wire := p.build_request(req)
-	body := json.encode(wire)
+	body := json2.encode(wire)
 
 	url := '${p.api_base}/v1/chat/completions'
 	header := http.new_header(http.HeaderConfig{ key: .content_type, value: 'application/json' }, http.HeaderConfig{
@@ -380,7 +380,7 @@ fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEve
 
 	if resp.status_code != 200 {
 		retry := is_retryable_status(resp.status_code)
-		if err_resp := json.decode(OaiResponseT, resp.body) {
+		if err_resp := json2.decode[OaiResponseT](resp.body) {
 			if err_resp.error != none {
 				e := err_resp.error or { return }
 				out <- ChatEvent{
@@ -399,7 +399,7 @@ fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEve
 		return
 	}
 
-	parsed := json.decode(OaiResponseT, resp.body) or {
+	parsed := json2.decode[OaiResponseT](resp.body) or {
 		out <- ChatEvent{
 			kind: .err_kind
 			err:  'parse error: ${err.msg()}'

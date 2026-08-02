@@ -9,7 +9,7 @@
 // image".
 module main
 
-import json
+import json2
 import os
 
 // ---------- mime_for_image_ext (table-driven) ----------------------------
@@ -169,7 +169,7 @@ fn test_build_content_parts_wire_json_shape() {
 			Attachment{ mime: 'image/png', b64: 'AAAA', name: 'a.png' },
 		]
 	})
-	wire := json.encode(parts)
+	wire := json2.encode(parts)
 	// Expected: [{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]
 	// The text part is first; image_url is second; both have their
 	// own field set and the other's field absent (V's json encoder
