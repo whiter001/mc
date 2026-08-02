@@ -198,6 +198,10 @@ pub mut:
 	// an image and the TUI window has focus (e.g. "Ctrl+V to paste image").
 	// Rendered as a footer row above the input box; cleared on user input.
 	clipboard_hint string
+	// Session picker modal state. Non-empty while the /sessions modal is
+	// open; each entry is one selectable session (newest first, max 9).
+	// Rendered as an overlay; digit keys pick a session, Esc dismisses.
+	session_modal []SessionSummary
 	// dirty is set whenever the visible state changes (new block,
 	// streaming chunk, input edit, resize, modal). The render loop only
 	// repaints when dirty is true (or streaming is in progress), which

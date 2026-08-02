@@ -248,7 +248,13 @@ fn http_post_streaming_plain(url ParsedUrl, body string, headers map[string]stri
 	req += body
 
 	addr := '${url.host}:${url.port}'
-	mut conn := net.dial_tcp(addr) or { return error('dial ${addr} failed: ${err.msg()}') }
+	mut conn := net.dial_tcp(addr) or {
+		return IError(ProviderError{
+			message:   'dial_failed: dial ${addr} failed: ${err.msg()}'
+			kind:      'dial_failed'
+			retryable: true
+		})
+	}
 	conn.set_read_timeout(60 * time.second)
 	conn.write(req.bytes()) or {
 		conn.close() or {}
@@ -279,7 +285,12 @@ fn http_post_streaming_plain(url ParsedUrl, body string, headers map[string]stri
 			body_acc.write_string('\n')
 		}
 		reader.close()
-		return error('http ${status_code}: ${body_acc.str()}')
+		return IError(ProviderError{
+			message:   'http_${status_code}: ${body_acc.str().trim_space()}'
+			status:    status_code
+			kind:      'http_${status_code}'
+			retryable: is_retryable_status(status_code)
+		})
 	}
 
 	// Headers (until empty line)
@@ -300,7 +311,11 @@ fn http_post_streaming_plain(url ParsedUrl, body string, headers map[string]stri
 fn https_post_streaming(url ParsedUrl, body string, headers map[string]string) !StreamReader {
 	mut ssl := new_ssl_conn(SSLConnectConfig{})!
 	ssl.dial(url.host, url.port) or {
-		return error('tls dial ${url.host}:${url.port} failed: ${err.msg()}')
+		return IError(ProviderError{
+			message:   'dial_failed: tls dial ${url.host}:${url.port} failed: ${err.msg()}'
+			kind:      'dial_failed'
+			retryable: true
+		})
 	}
 
 	mut req := 'POST ${url.path} HTTP/1.1\r\n'
@@ -341,7 +356,12 @@ fn https_post_streaming(url ParsedUrl, body string, headers map[string]string) !
 			body_acc.write_string('\n')
 		}
 		reader.close()
-		return error('http ${status_code}: ${body_acc.str()}')
+		return IError(ProviderError{
+			message:   'http_${status_code}: ${body_acc.str().trim_space()}'
+			status:    status_code
+			kind:      'http_${status_code}'
+			retryable: is_retryable_status(status_code)
+		})
 	}
 
 	for {

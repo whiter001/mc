@@ -271,9 +271,14 @@ pub fn (p OpenAICompatProvider) chat(req ChatRequest, out chan ChatEvent, cancel
 
 	if parsed_url.scheme == 'http' || parsed_url.scheme == 'https' {
 		chat_streaming_http(p, parsed_url, req, out, cancel_ch) or {
+			// ProviderError carries a retryable flag (429 / 5xx / dial
+			// failures); anything else here is a mid-stream read failure,
+			// which is a network problem and also worth retrying.
+			retry := if err is ProviderError { err.retryable } else { true }
 			out <- ChatEvent{
-				kind: .err_kind
-				err:  'streaming failed: ${err.msg()}'
+				kind:      .err_kind
+				err:       'streaming failed: ${err.msg()}'
+				retryable: retry
 			}
 		}
 	} else {
@@ -364,27 +369,32 @@ fn chat_buffered_https(p OpenAICompatProvider, req ChatRequest, out chan ChatEve
 		header: header
 		data:   body
 	}) or {
+		// Network-level failure (DNS / connect / TLS / timeout) — transient.
 		out <- ChatEvent{
-			kind: .err_kind
-			err:  'http error: ${err.msg()}'
+			kind:      .err_kind
+			err:       'http error: ${err.msg()}'
+			retryable: true
 		}
 		return
 	}
 
 	if resp.status_code != 200 {
+		retry := is_retryable_status(resp.status_code)
 		if err_resp := json.decode(OaiResponseT, resp.body) {
 			if err_resp.error != none {
 				e := err_resp.error or { return }
 				out <- ChatEvent{
-					kind: .err_kind
-					err:  'http ${resp.status_code}: ${e.message}'
+					kind:      .err_kind
+					err:       'http ${resp.status_code}: ${e.message}'
+					retryable: retry
 				}
 				return
 			}
 		}
 		out <- ChatEvent{
-			kind: .err_kind
-			err:  'http ${resp.status_code}: ${resp.body}'
+			kind:      .err_kind
+			err:       'http ${resp.status_code}: ${resp.body}'
+			retryable: retry
 		}
 		return
 	}

@@ -118,6 +118,10 @@ pub:
 	output_tokens int
 	// err
 	err string
+	// True when the error is transient (HTTP 429 / 5xx / connection
+	// failure) and the step is worth retrying. Set by the provider on
+	// .err_kind events; consumed by the agent loop's retry logic.
+	retryable bool
 }
 
 // ChatEventKind tags the payload type of a ChatEvent.
@@ -171,21 +175,38 @@ pub:
 // -----------------------------------------------------------------------------
 
 // ProviderError is a structured error returned by an LLM provider.
+// The msg()/code() methods implement vlib's IError interface, so
+// returning a ProviderError from a `!`-typed function yields a proper
+// error value that `err is ProviderError` can still recover the
+// retryable flag from.
 pub struct ProviderError {
 pub:
-	code      string
-	message   string
+	message   string // full human-readable message
+	kind      string // provider/HTTP code string, e.g. 'http_429', 'dial_failed'
+	status    int    // HTTP status code when applicable (0 otherwise)
 	retryable bool
 }
 
-// msg returns the error code and message as a single string.
+// msg implements IError.
 pub fn (e ProviderError) msg() string {
-	return '${e.code}: ${e.message}'
+	return e.message
+}
+
+// code implements IError (HTTP status, or 0 when not applicable).
+pub fn (e ProviderError) code() int {
+	return e.status
 }
 
 // str returns the string representation of the error.
 pub fn (e ProviderError) str() string {
-	return e.msg()
+	return e.message
+}
+
+// is_retryable_status reports whether an HTTP status code is worth
+// retrying: 429 (rate limit) and any 5xx are transient; other 4xx are
+// client errors a retry won't fix.
+fn is_retryable_status(code int) bool {
+	return code == 429 || code >= 500
 }
 
 // -----------------------------------------------------------------------------

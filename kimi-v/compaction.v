@@ -110,9 +110,14 @@ fn format_messages_for_summary(messages []Message) string {
 // Everything before that is summarized and replaced with two synthetic
 // messages: a user message containing the summary, and an assistant
 // acknowledgement.
-pub fn (mut a Agent) compact(mut sess Session) !bool {
+//
+// `force` bypasses the threshold check (used by the manual `/compact`
+// command) but the min-messages / keep-recent guards still apply.
+// `instruction`, when non-empty, is injected into the summary prompt so a
+// manual /compact can steer what the summary should focus on.
+pub fn (mut a Agent) compact(mut sess Session, force bool, instruction string) !bool {
 	estimated := estimate_tokens(sess.messages)
-	if !should_compact(estimated, a.context_window, a.compact_threshold) {
+	if !force && !should_compact(estimated, a.context_window, a.compact_threshold) {
 		return false
 	}
 	if sess.messages.len < compact_min_messages {
@@ -126,13 +131,18 @@ pub fn (mut a Agent) compact(mut sess Session) !bool {
 	to_summarize := sess.messages[..cutoff].clone()
 	recent := sess.messages[cutoff..].clone()
 
+	mut trigger := 'auto'
+	if force {
+		trigger = 'manual'
+	}
+
 	// ── PreCompact hook (observation-only; return value ignored) ──
 	mut pre_c := map[string]string{}
-	pre_c['trigger'] = 'auto'
+	pre_c['trigger'] = trigger
 	pre_c['estimated_tokens'] = estimated.str()
-	a.hooks_engine().run_hook_for_event(.pre_compact, 'auto', pre_c)
+	a.hooks_engine().run_hook_for_event(.pre_compact, trigger, pre_c)
 
-	summary := a.summarize_messages(to_summarize) or {
+	summary := a.summarize_messages(to_summarize, instruction) or {
 		eprintln('compaction: summary call failed: ${err.msg()}')
 		return false
 	}
@@ -145,11 +155,11 @@ pub fn (mut a Agent) compact(mut sess Session) !bool {
 	// assistant, then the recent messages we kept verbatim.
 	mut new_messages := []Message{cap: recent.len + 2}
 	new_messages << Message{
-		role: .user
+		role:    .user
 		content: 'Here is a summary of the earlier conversation that has been compacted to save context space:\n\n${summary}\n\nThe most recent messages follow. Continue from where we left off.'
 	}
 	new_messages << Message{
-		role: .assistant
+		role:    .assistant
 		content: 'Understood. I have the summarized context. Continuing with the recent messages.'
 	}
 	new_messages << recent
@@ -164,12 +174,30 @@ pub fn (mut a Agent) compact(mut sess Session) !bool {
 	}
 	// ── PostCompact hook (observation-only) ──
 	mut post_c := map[string]string{}
-	post_c['trigger'] = 'auto'
+	post_c['trigger'] = trigger
 	post_c['before_tokens'] = estimated.str()
 	post_c['after_tokens'] = after_tokens.str()
-	a.hooks_engine().run_hook_for_event(.post_compact, 'auto', post_c)
+	a.hooks_engine().run_hook_for_event(.post_compact, trigger, post_c)
 	eprintln('compaction: ${before} messages (${estimated} est tokens) → ${after} messages (${after_tokens} est tokens)')
 	return true
+}
+
+// build_summary_prompt renders the "summarize this conversation" prompt
+// sent to the LLM. A non-empty `instruction` (from a manual `/compact
+// <instruction>`) is injected before the conversation body so the summary
+// focuses on what the user asked to preserve. Pure function — kept
+// separate so it is easy to unit-test.
+pub fn build_summary_prompt(body string, instruction string) string {
+	extra := if instruction.len > 0 {
+		'Additional user instruction for this compaction:\n${instruction}\n\n'
+	} else {
+		''
+	}
+	return 'You are summarizing a coding agent conversation for context preservation. ' +
+		'Produce a concise summary that preserves:\n' + "- The user's original goal(s)\n" +
+		'- Key file paths and code snippets referenced\n' +
+		'- Decisions made and the reasoning behind them\n' + '- Open issues / next steps\n' +
+		'- Tool results that contain essential state (e.g. test output, file listings)\n\n' + 'Be concise but lossless on facts. Do not editorialize. ' + 'Write in the same language as the conversation (English or Chinese).\n\n' + extra + '--- Conversation to summarize ---\n\n${body}'
 }
 
 // summarize_messages calls the LLM to summarize the given message list.
@@ -184,18 +212,11 @@ pub fn (mut a Agent) compact(mut sess Session) !bool {
 //   - Tool results containing essential state (test output, file listings)
 //
 // Max output capped at 1024 tokens to keep the summary bounded.
-fn (mut a Agent) summarize_messages(messages []Message) !string {
+// A non-empty `instruction` is injected into the prompt (see
+// build_summary_prompt) to steer what the summary should focus on.
+fn (mut a Agent) summarize_messages(messages []Message, instruction string) !string {
 	body := format_messages_for_summary(messages)
-	prompt := 'You are summarizing a coding agent conversation for context preservation. ' +
-		'Produce a concise summary that preserves:\n' +
-		'- The user\'s original goal(s)\n' +
-		'- Key file paths and code snippets referenced\n' +
-		'- Decisions made and the reasoning behind them\n' +
-		'- Open issues / next steps\n' +
-		'- Tool results that contain essential state (e.g. test output, file listings)\n\n' +
-		'Be concise but lossless on facts. Do not editorialize. ' +
-		'Write in the same language as the conversation (English or Chinese).\n\n' +
-		'--- Conversation to summarize ---\n\n${body}'
+	prompt := build_summary_prompt(body, instruction)
 
 	req := ChatRequest{
 		model:       a.provider.model

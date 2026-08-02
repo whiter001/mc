@@ -14,7 +14,7 @@ import toml
 pub struct Config {
 pub mut:
 	// ---- Provider ----
-	provider string = 'openai-compat' // 'openai-compat' (default) | future: 'anthropic'
+	provider string = 'openai-compat' // 'openai-compat' (default) | 'anthropic'
 	api_base string = 'https://api.openai.com'
 	api_key  string
 	model    string
@@ -28,6 +28,11 @@ pub mut:
 	// ---- Limits ----
 	max_turns  int = 32
 	max_tokens int = 4096
+	// Retries per agent step on transient provider errors (HTTP 429 / 5xx /
+	// connection failures). Parity with kimi-code's
+	// `[loop_control] max_retries_per_step`. Overridable via config.toml or
+	// the KIMI_LOOP_MAX_RETRIES_PER_STEP env var.
+	max_retries_per_step int = 3
 
 	// ---- Permissions ----
 	// Names of tools that always require user approval before running.
@@ -35,11 +40,17 @@ pub mut:
 	// Populated from config.toml (`risky_tools = [...]`) and the
 	// `KIMI_RISKY_TOOLS` env var (comma-separated).
 	risky_tools []string
-	// Names of tools the user has chosen "always allow" for in the
-	// current session. Combines with `risky_tools`: a tool is gated
-	// if it's in `risky_tools` AND not in `approved_tools` (and not
-	// matching a sensitive pattern). Session-only — never persisted.
+	// Names of tools the user has chosen "always allow" for. Combines
+	// with `risky_tools`: a tool is gated if it's in `risky_tools` AND
+	// not in `approved_tools` (and not matching a sensitive pattern).
+	// Loaded from `<config_dir>/approved_tools` at startup and persisted
+	// when the user presses 'a' in the approval modal.
 	approved_tools []string
+	// Permission rules from config.toml `[[permission.rules]]`. Each
+	// entry pairs a decision (allow | deny | ask) with a `Tool(glob)`
+	// pattern. Evaluated before the built-in risky-tools logic: deny
+	// always wins, allow short-circuits the modal, ask forces it.
+	permission_rules []PermissionRule
 	// YOLO mode: skip approval entirely. Equivalent to "every tool is
 	// in approved_tools" but stronger — also bypasses the modal UI.
 	// Toggled at runtime via `/yolo` slash. Sensitive patterns are
@@ -103,8 +114,34 @@ pub fn load_config(cli_overrides Config) !Config {
 	// 4. CLI overrides (only non-empty fields)
 	apply_cli(mut cfg, cli_overrides)
 
+	// 5. Provider-specific fallbacks (e.g. ANTHROPIC_API_KEY for anthropic)
+	apply_provider_fallbacks(mut cfg)
+
+	// 6. OAuth credentials: if no api_key was configured anywhere, inject a
+	// saved OAuth access token (refreshing it when expired).
+	resolve_oauth_credentials(mut cfg)!
+
 	cfg.cwd = cwd
 	return cfg
+}
+
+// apply_provider_fallbacks fills in provider-specific defaults after all
+// normal config sources (toml, KIMI_*, CLI) have been merged. Currently only
+// the Anthropic provider needs this: when it is selected and no api_key /
+// api_base was set anywhere, fall back to the standard ANTHROPIC_API_KEY /
+// ANTHROPIC_BASE_URL environment variables and the official Anthropic
+// endpoint (the generic defaults point at OpenAI).
+fn apply_provider_fallbacks(mut cfg Config) {
+	if cfg.provider != 'anthropic' {
+		return
+	}
+	if cfg.api_key.len == 0 {
+		cfg.api_key = os.getenv('ANTHROPIC_API_KEY')
+	}
+	if cfg.api_base.len == 0 || cfg.api_base == 'https://api.openai.com' {
+		base := os.getenv('ANTHROPIC_BASE_URL')
+		cfg.api_base = if base.len > 0 { base } else { 'https://api.anthropic.com' }
+	}
 }
 
 pub fn apply_toml(mut cfg Config, raw string) {
@@ -131,6 +168,10 @@ pub fn apply_toml(mut cfg Config, raw string) {
 	if v7 !is toml.Null { cfg.max_turns = v7.int() }
 	v8 := doc.value('max_tokens')
 	if v8 !is toml.Null { cfg.max_tokens = v8.int() }
+	// [loop_control] nested table (parity with kimi-code). vlib/toml's
+	// value() supports dotted keys.
+	vl := doc.value('loop_control.max_retries_per_step')
+	if vl !is toml.Null { cfg.max_retries_per_step = vl.int() }
 	v9 := doc.value('risky_tools')
 	if v9 !is toml.Null {
 		// TOML arrays land as []toml.Any; coerce each element to a string.
@@ -146,6 +187,39 @@ pub fn apply_toml(mut cfg Config, raw string) {
 			}
 		}
 		cfg.risky_tools = risky
+	}
+
+	// Permission rules: parse [[permission.rules]] array-of-tables. Each
+	// entry has decision (allow|deny|ask, required), pattern (`Tool(glob)`
+	// or bare tool name, required), reason (string, optional). Malformed
+	// entries are skipped with a warning — fail-open, a typo must never
+	// lock the user out or crash the config load.
+	vp := doc.value('permission.rules')
+	if vp !is toml.Null {
+		pr_arr := vp.array()
+		mut rules := []PermissionRule{cap: pr_arr.len}
+		for item in pr_arr {
+			decision := item.value('decision').string()
+			pattern := item.value('pattern').string()
+			if decision.len == 0 || pattern.len == 0 {
+				eprintln('warning: skipping [[permission.rules]] entry without decision+pattern')
+				continue
+			}
+			if decision != 'allow' && decision != 'deny' && decision != 'ask' {
+				eprintln('warning: skipping [[permission.rules]] entry with unknown decision "${decision}"')
+				continue
+			}
+			if !permission_pattern_valid(pattern) {
+				eprintln('warning: skipping [[permission.rules]] entry with invalid pattern "${pattern}"')
+				continue
+			}
+			rules << PermissionRule{
+				decision: decision
+				pattern:  pattern
+				reason:   item.value('reason').string()
+			}
+		}
+		cfg.permission_rules = rules
 	}
 
 	// Hooks: parse [[hooks]] array-of-tables. Each entry has event
@@ -270,6 +344,10 @@ pub fn apply_env(mut cfg Config) {
 	if v8.len > 0 && v8 in ['1', 'true', 'yes', 'on'] {
 		cfg.yolo = true
 	}
+	v9 := os.getenv('KIMI_LOOP_MAX_RETRIES_PER_STEP')
+	if v9.len > 0 && v9.int() > 0 {
+		cfg.max_retries_per_step = v9.int()
+	}
 }
 
 // apply_cli copies non-empty fields from cli into cfg.
@@ -304,8 +382,11 @@ fn find_project_config(start string) string {
 
 // validate checks that the configuration has the minimum required fields.
 pub fn (c Config) validate() ! {
+	if c.provider != 'openai-compat' && c.provider != 'anthropic' {
+		return error('unknown provider "${c.provider}"; supported providers: openai-compat, anthropic')
+	}
 	if c.api_key.len == 0 {
-		return error('api_key is not set; pass --api-key, set KIMI_API_KEY, or run `kimi login`')
+		return error('api_key is not set; pass --api-key, set KIMI_API_KEY, run `kimi login`, or run `kimi login --oauth`')
 	}
 	if c.model.len == 0 {
 		return error('model is not set; pass --model or set KIMI_MODEL')

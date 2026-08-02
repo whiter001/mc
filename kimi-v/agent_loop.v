@@ -5,6 +5,7 @@
 module main
 
 import json
+import time
 
 // LoopOutcome describes why the agent loop stopped.
 pub enum LoopOutcome {
@@ -33,12 +34,22 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 	mut last_text := ''
 
 	for turn in 0 .. a.max_turns {
+		// Wall-clock deadline (set by the subagent runner to enforce the
+		// subagent timeout). Once it passes we stop making new turns and
+		// return whatever we've accumulated — this bounds a runaway loop
+		// even when max_turns is generous.
+		if a.deadline_ms > 0 && time.now().unix_milli() >= a.deadline_ms {
+			break
+		}
+		// Deliver finished background subagent results to the model before
+		// the next step so it can react to them on this turn.
+		a.drain_background_results(mut sess)
 		// Compact before each step so we never send an oversized request
 		// that the model would reject. Failure is non-fatal (logged inside
 		// compact()); we'd rather lose a turn than crash the loop.
-		a.compact(mut sess) or {}
+		a.compact(mut sess, false, '') or {}
 
-		step := a.step(mut sess)!
+		step := a.step_with_retry(mut sess)!
 
 		// Persist the assistant turn (text + tool calls).
 		sess.append_assistant(step.text, step.tool_calls)
@@ -46,8 +57,11 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 		total_in += step.finish.input_tokens
 		total_out += step.finish.output_tokens
 
-		// If the model didn't ask for tool calls, we're done.
+		// If the model didn't ask for tool calls, we're done. Drain any
+		// background results that landed during the turn first so they're
+		// not lost.
 		if step.tool_calls.len == 0 {
+			a.drain_background_results(mut sess)
 			return LoopResult{
 				outcome:    .finished
 				final_text: last_text
@@ -89,20 +103,38 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 				continue
 			}
 
-			// Risky tools (bash, write_file, edit_file, web_fetch) require
-			// user approval before running — UNLESS:
-			//   1. yolo mode is on (skip everything; sensitive patterns
+			// Tool approval gate. Risky tools (bash, write_file,
+			// edit_file, web_fetch) require user approval before running
+			// — UNLESS:
+			//   1. a config [[permission.rules]] allow rule matched (with
+			//      the same sensitive-pattern caveat), OR
+			//   2. yolo mode is on (skip everything; sensitive patterns
 			//      still re-prompt as a backstop), OR
-			//   2. the user previously chose "always allow" for this tool
-			//      in the current session (a / approved_tools), AND the
-			//      args don't trip a sensitive pattern (rm -rf, sudo,
-			//      /etc/* writes, etc. still re-prompt).
+			//   3. the user previously chose "always allow" for this tool
+			//      (a / approved_tools), AND the args don't trip a
+			//      sensitive pattern (rm -rf, sudo, /etc/* writes, etc.
+			//      still re-prompt).
+			// A deny rule ALWAYS wins — no modal, no yolo bypass, and the
+			// reason is fed back to the model. An ask rule forces the
+			// modal even for tools that aren't otherwise risky.
 			// Send the request and block until the TUI replies. If the
 			// decision channel is closed (e.g. TUI exited mid-turn)
 			// treat as denied.
+			verdict, rule_reason := evaluate_permission(a.permission_rules, call.name, call.arguments)
+			if verdict == .deny {
+				msg := if rule_reason.trim_space().len > 0 {
+					'[denied by permission rule: ${rule_reason}]'
+				} else {
+					'[denied by permission rule]'
+				}
+				sess.append_tool_result(call.id, call.name, msg)
+				continue
+			}
+			rule_allow := verdict == .allow && !is_sensitive(call.name, call.arguments)
+			must_ask := verdict == .ask
 			skip_for_yolo := a.yolo && !is_sensitive(call.name, call.arguments)
 			skip_for_session := should_skip_approval(call.name, call.arguments, a.approved_tools)
-			if needs_approval(call.name, a.risky_tools) && !skip_for_yolo && !skip_for_session {
+			if (needs_approval(call.name, a.risky_tools) || must_ask) && !rule_allow && !skip_for_yolo && !skip_for_session {
 				if a.non_interactive {
 					// One-shot / non-interactive mode (`-p`) has no UI to
 					// pump `approval_ch` / `decision_ch`, so blocking on
@@ -130,6 +162,15 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 				if !decision.approved {
 					sess.append_tool_result(call.id, call.name, '[user denied this action]')
 					continue
+				}
+				// "always allow for the rest of the session" (TUI 'a'
+				// key): remember the tool in our own list so the change
+				// takes effect within the same turn. The TUI also persists
+				// it to disk, so future sessions load it at startup.
+				if decision.remember {
+					if call.name !in a.approved_tools {
+						a.approved_tools << call.name
+					}
 				}
 			}
 
@@ -186,6 +227,9 @@ pub fn (mut a Agent) run(mut sess Session) !LoopResult {
 		results_ch.close()
 	}
 
+	// Drain background results before the final return so nothing queued
+	// during the last turn is left undelivered.
+	a.drain_background_results(mut sess)
 	return LoopResult{
 		outcome:    .max_turns
 		final_text: last_text
@@ -198,6 +242,63 @@ struct ToolExecResult {
 	call_id string
 	name    string
 	result  ToolResult
+}
+
+// step_with_retry wraps Agent.step with bounded retries for transient
+// provider errors — parity with kimi-code's `[loop_control]
+// max_retries_per_step`. Only ProviderError values flagged `retryable`
+// (HTTP 429 / 5xx / connection failures) are retried; cancellations and
+// client errors return immediately. The backoff between attempts is
+// exponential (1s, 2s, 4s … capped at 30s) and interruptible via the
+// agent's cancel channel (Ctrl-C aborts the wait, not just the request).
+fn (mut a Agent) step_with_retry(mut sess Session) !StepResult {
+	mut log := new_logger(.info)
+	for attempt := 0; ; attempt++ {
+		res := a.step(mut sess) or {
+			if err is ProviderError && err.retryable && attempt < a.max_retries_per_step {
+				backoff := retry_backoff_ms(attempt + 1)
+				log.warn('step failed (${err.msg()}); retrying in ${backoff}ms (attempt ${attempt + 1}/${a.max_retries_per_step})')
+				if a.sleep_or_cancel(backoff) {
+					return error('cancelled')
+				}
+				continue
+			}
+			return err
+		}
+		return res
+	}
+	return error('unreachable')
+}
+
+// retry_backoff_ms returns the backoff for the given 1-based attempt:
+// 1s, 2s, 4s, 8s … capped at 30s.
+fn retry_backoff_ms(attempt int) int {
+	mut ms := 1000
+	for _ in 1 .. attempt {
+		ms *= 2
+		if ms >= 30000 {
+			return 30000
+		}
+	}
+	return ms
+}
+
+// sleep_or_cancel sleeps for `ms` but returns early (true) when a cancel
+// arrives on the agent's cancel channel. Polls every 50ms — same
+// select-with-timeout workaround as step(), since a bare receive branch
+// on an often-idle channel hangs V 0.5.x's select.
+fn (a Agent) sleep_or_cancel(ms int) bool {
+	start := time.now()
+	for time.since(start).milliseconds() < ms {
+		select {
+			_ := <-a.cancel_ch {
+				return true
+			}
+			50 * time.millisecond {
+			}
+		}
+	}
+	return false
 }
 
 // tool_write_path extracts the `path` argument from a write_file / edit_file

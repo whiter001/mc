@@ -60,3 +60,81 @@ fn test_apply_env_risky_tools_unset_keeps_empty() {
 	apply_env(mut cfg)
 	assert cfg.risky_tools.len == 0
 }
+
+// ---------- [loop_control] max_retries_per_step ----------------------------
+
+fn test_apply_toml_loop_control_max_retries() {
+	mut cfg := default_config()
+	apply_toml(mut cfg, '[loop_control]\nmax_retries_per_step = 5\n')
+	assert cfg.max_retries_per_step == 5
+}
+
+fn test_apply_toml_loop_control_missing_keeps_default() {
+	mut cfg := default_config()
+	apply_toml(mut cfg, 'provider = "openai-compat"')
+	assert cfg.max_retries_per_step == 3
+}
+
+fn test_apply_env_max_retries_override() {
+	os.setenv('KIMI_LOOP_MAX_RETRIES_PER_STEP', '7', true)
+	defer { os.setenv('KIMI_LOOP_MAX_RETRIES_PER_STEP', '', true) }
+	mut cfg := default_config()
+	apply_env(mut cfg)
+	assert cfg.max_retries_per_step == 7
+}
+
+fn test_apply_env_max_retries_invalid_keeps_default() {
+	os.setenv('KIMI_LOOP_MAX_RETRIES_PER_STEP', 'not-a-number', true)
+	defer { os.setenv('KIMI_LOOP_MAX_RETRIES_PER_STEP', '', true) }
+	mut cfg := default_config()
+	apply_env(mut cfg)
+	assert cfg.max_retries_per_step == 3
+}
+
+// ---------- [permission.rules] ----------------------------------------------
+
+fn test_apply_toml_permission_rules_array() {
+	mut cfg := default_config()
+	apply_toml(mut cfg, '[[permission.rules]]\n' +
+		'decision = "deny"\n' +
+		'pattern = "Bash(rm -rf *)"\n' +
+		'reason = "protect against rm -rf"\n\n' +
+		'[[permission.rules]]\n' +
+		'decision = "allow"\n' +
+		'pattern = "Write(/tmp/**)"\n\n' +
+		'[[permission.rules]]\n' +
+		'decision = "ask"\n' +
+		'pattern = "Bash(pip install *)"\n')
+	assert cfg.permission_rules.len == 3
+	assert cfg.permission_rules[0].decision == 'deny'
+	assert cfg.permission_rules[0].pattern == 'Bash(rm -rf *)'
+	assert cfg.permission_rules[0].reason == 'protect against rm -rf'
+	assert cfg.permission_rules[1].decision == 'allow'
+	assert cfg.permission_rules[1].pattern == 'Write(/tmp/**)'
+	assert cfg.permission_rules[2].decision == 'ask'
+	assert cfg.permission_rules[2].pattern == 'Bash(pip install *)'
+}
+
+fn test_apply_toml_permission_rules_missing_keeps_empty() {
+	mut cfg := default_config()
+	apply_toml(mut cfg, 'provider = "openai-compat"')
+	assert cfg.permission_rules.len == 0
+}
+
+fn test_apply_toml_permission_rules_bad_entries_skipped() {
+	// Bad decision and bad pattern are skipped with a warning (fail-open):
+	// a typo must never lock the user out or crash the config load.
+	mut cfg := default_config()
+	apply_toml(mut cfg, '[[permission.rules]]\n' +
+		'decision = "maybe"\n' +
+		'pattern = "Bash(*)"\n\n' +
+		'[[permission.rules]]\n' +
+		'decision = "deny"\n' +
+		'pattern = "Bash("\n\n' +
+		'[[permission.rules]]\n' +
+		'decision = "deny"\n' +
+		'pattern = "Bash(rm -rf *)"\n')
+	assert cfg.permission_rules.len == 1
+	assert cfg.permission_rules[0].decision == 'deny'
+	assert cfg.permission_rules[0].pattern == 'Bash(rm -rf *)'
+}

@@ -4,7 +4,7 @@
 module main
 
 import os
-import json
+import json2
 import strings
 import time
 
@@ -16,12 +16,22 @@ pub:
 	created_at time.Time
 	updated_at time.Time
 	msg_count  int
+	// Flattened preview of the first user message (may be empty).
+	first_user string
 }
 
 // save persists sess to a TOML file under the sessions directory.
 pub fn save(sess Session) ! {
-	ensure_dir(sessions_dir())!
-	path := os.join_path(sessions_dir(), '${sess.id}.toml')
+	save_to(sessions_dir(), sess)!
+}
+
+// save_to persists sess to `<dir>/<id>.toml`. Shared by the regular session
+// store and the subagent session store (resume support) — subagent sessions
+// live under subagent_sessions_dir() so they don't pollute the user's session
+// list.
+pub fn save_to(dir string, sess Session) ! {
+	ensure_dir(dir)!
+	path := os.join_path(dir, '${sess.id}.toml')
 
 	mut buf := strings.new_builder(1024)
 	buf.write_string('[meta]\n')
@@ -57,13 +67,19 @@ fn write_message(mut buf strings.Builder, m Message) {
 		buf.write_string('name = "${m.name}"\n')
 	}
 	if m.tool_calls.len > 0 {
-		buf.write_string('tool_calls = ${json.encode(m.tool_calls)}\n')
+		buf.write_string('tool_calls = ${json2.encode(m.tool_calls, escape_unicode: true)}\n')
 	}
 }
 
 // load reads a session from its TOML file.
 pub fn load(id string) !Session {
-	path := os.join_path(sessions_dir(), '${id}.toml')
+	return load_from(sessions_dir(), id)!
+}
+
+// load_from reads a session from `<dir>/<id>.toml`. Missing files error out so
+// callers can distinguish "no such subagent" from an empty result.
+pub fn load_from(dir string, id string) !Session {
+	path := os.join_path(dir, '${id}.toml')
 	if !os.exists(path) {
 		return error('session not found: ${id}')
 	}
@@ -97,11 +113,27 @@ fn parse_summary(id string, content string) !SessionSummary {
 	}
 	lines := content.split_into_lines()
 	mut in_messages := false
+	// Track the first user message's triple-quoted content (may span lines).
+	mut want_first_user := false
+	mut in_content := false
+	mut content_lines := []string{}
 	for line in lines {
 		trimmed := line.trim_space()
 		if trimmed == '[[messages]]' {
 			in_messages = true
-			sess.messages << Message{}
+			want_first_user = false
+			in_content = false
+			content_lines = []string{}
+			continue
+		}
+		if in_content {
+			if trimmed.ends_with('"""') {
+				content_lines << trimmed[..trimmed.len - 3]
+				sess.metadata['__first_user'] = content_lines.join('\n')
+				in_content = false
+			} else {
+				content_lines << trimmed
+			}
 			continue
 		}
 		if trimmed == '[meta]' {
@@ -111,6 +143,24 @@ fn parse_summary(id string, content string) !SessionSummary {
 			continue
 		}
 		if in_messages {
+			if trimmed.starts_with('role = ') {
+				role_str := trimmed.all_after('role = ').trim(' "')
+				if role_str == 'user' && sess.metadata['__first_user'].len == 0 {
+					want_first_user = true
+				}
+			} else if trimmed.starts_with('content = """') && want_first_user {
+				idx := trimmed.index('"""') or { -1 }
+				if idx >= 0 {
+					rest := trimmed[idx + 3..]
+					if rest.ends_with('"""') {
+						sess.metadata['__first_user'] = rest[..rest.len - 3]
+						want_first_user = false
+					} else {
+						content_lines = [rest]
+						in_content = true
+					}
+				}
+			}
 			continue // [[messages]] block not needed for summary
 		}
 		if trimmed.starts_with('id = ') {
@@ -133,7 +183,18 @@ fn parse_summary(id string, content string) !SessionSummary {
 		created_at: sess.created_at
 		updated_at: sess.updated_at
 		msg_count:  if msg_count > 0 { msg_count } else { 0 }
+		first_user: first_user_preview(sess.metadata['__first_user'])
 	}
+}
+
+// first_user_preview flattens the first user message into a single-line,
+// truncated preview suitable for the sessions modal.
+fn first_user_preview(content string) string {
+	mut s := content.replace('\n', ' ').trim_space()
+	if s.len > 60 {
+		s = s[..60] + '…'
+	}
+	return s
 }
 
 // parse_session reconstructs a full Session from a TOML file.
@@ -156,11 +217,11 @@ fn parse_session(id string, content string) !Session {
 		if trimmed == '[[messages]]' {
 			// Emit the message we just finished.
 			sess.messages << Message{
-				role:       m_role
-				content:    m_content
+				role:         m_role
+				content:      m_content
 				tool_call_id: m_tool_call_id
-				name:       m_name
-				tool_calls: m_tool_calls
+				name:         m_name
+				tool_calls:   m_tool_calls
 			}
 			// Reset for next message.
 			m_role = .user
@@ -225,9 +286,7 @@ fn parse_session(id string, content string) !Session {
 		} else if trimmed.starts_with('tool_calls = ') {
 			json_str := trimmed.all_after('tool_calls = ').trim(' ')
 			if json_str.len > 0 {
-				m_tool_calls = json.decode([]ToolCall, json_str) or {
-					[]ToolCall{}
-				}
+				m_tool_calls = json2.decode[[]ToolCall](json_str) or { []ToolCall{} }
 			}
 		}
 	}

@@ -54,6 +54,13 @@ pub fn sessions_dir() string {
 	return os.join_path(config_dir(), 'sessions')
 }
 
+// subagent_sessions_dir returns the directory where persisted subagent
+// sessions (used by the Agent tool's resume) are stored, one TOML per
+// subagent id: <sessions_dir>/subagents/<id>.toml.
+pub fn subagent_sessions_dir() string {
+	return os.join_path(sessions_dir(), 'subagents')
+}
+
 // cache_dir returns the platform-specific directory for Kimi cache files.
 pub fn cache_dir() string {
 	override := os.getenv('KIMI_CACHE_DIR')

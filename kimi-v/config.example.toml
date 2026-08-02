@@ -46,6 +46,14 @@ max_turns = 32
 # Maximum tokens per model response.
 max_tokens = 4096
 
+# ---- Loop control ----
+
+# Max retries per agent step on transient provider errors (HTTP 429 / 5xx /
+# connection failures). Exponential backoff 1s/2s/4s... capped at 30s.
+# Env: KIMI_LOOP_MAX_RETRIES_PER_STEP
+# [loop_control]
+# max_retries_per_step = 3
+
 # ---- Permissions ----
 
 # List of tool names that always require explicit user approval before running.
@@ -54,6 +62,29 @@ max_tokens = 4096
 risky_tools = []
 # Example:
 # risky_tools = ["bash", "write_file", "apply_patch"]
+
+# Fine-grained permission rules (evaluated before risky_tools; deny always wins,
+# allow short-circuits the modal, ask forces it even for non-risky tools).
+# Pattern: `Tool(glob)` — tool name is case-insensitive (registry names:
+# bash / write_file / edit_file / web_fetch); bare tool name = `Tool(*)`.
+# Malformed entries are skipped with a warning (fail-open).
+# [[permission.rules]]
+# decision = "deny"
+# pattern  = "Bash(rm -rf *)"
+# reason   = "protect against accidental rm -rf"
+#
+# [[permission.rules]]
+# decision = "allow"
+# pattern  = "Bash(git *)"
+#
+# [[permission.rules]]
+# decision = "ask"
+# pattern  = "Bash(npm install *)"
+
+# Remembered "always allow" tools (written when you press 'a' in the approval
+# modal). Persisted at <config-dir>/approved_tools, one tool name per line.
+# Env: KIMI_APPROVED_TOOLS_FILE (override the file path)
+# TUI: /approvals (list), /approvals clear (reset)
 
 # YOLO mode: skip all approval prompts. Sensitive patterns (rm -rf, sudo, etc.)
 # still re-prompt as a safety backstop.

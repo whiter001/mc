@@ -6,6 +6,7 @@ module main
 
 import time
 import os
+import sync
 
 // AskOption is one selectable choice presented to the user.
 pub struct AskOption {
@@ -90,6 +91,10 @@ pub mut:
 	// Hard cap on think-act-observe turns. The original default is high
 	// enough that genuine runaway loops still fail loudly.
 	max_turns int = 32
+	// Retries per step on transient provider errors (parity with
+	// kimi-code's [loop_control] max_retries_per_step). Wired from
+	// Config by the runner; cancellations are never retried.
+	max_retries_per_step int = 3
 	registry  ToolRegistry
 	// When non-nil, the agent streams deltas as it receives them. Used by
 	// the TUI; P0 single-shot mode ignores it.
@@ -133,6 +138,11 @@ pub mut:
 	// modal for trusted tools (e.g. "always allow read_file"). Sensitive
 	// patterns (rm -rf, sudo, /etc/*) still re-prompt regardless.
 	approved_tools []string
+	// Permission rules from config.toml [[permission.rules]]. Evaluated
+	// before the built-in risky-tools logic: deny always wins, allow
+	// short-circuits the modal, ask forces it. Set by the runner from
+	// cfg.permission_rules.
+	permission_rules []PermissionRule
 	// YOLO mode: skip approval entirely for the rest of the session.
 	// Toggled at runtime via `/yolo` slash. Sensitive patterns still
 	// re-prompt as a backstop against the most obvious foot-guns.
@@ -183,6 +193,21 @@ pub mut:
 	// be reachable from a non-mut Tool.execute, hence it lives on the Agent
 	// rather than inside the stateless tool value.
 	mcp_clients map[string]&McpClient
+	// Background subagent support. When the model calls Agent with
+	// run_in_background=true, a goroutine runs the subagent and delivers its
+	// result as a <background-agent-result> user message on a later turn via
+	// bg_results_ch. The runner drains that channel at the top of each turn
+	// (see Agent.drain_background_results). bg_tasks holds the live status for
+	// the TaskList tool; it's guarded by bg_mutex because the finishing
+	// goroutine writes it from another thread.
+	bg_results_ch chan BackgroundAgentResult
+	bg_tasks      map[string]BackgroundTask
+	bg_mutex      sync.Mutex
+	// Wall-clock deadline (unix ms) after which the run() loop stops making
+	// turns and returns what it has. 0 = no deadline. Set by the subagent
+	// runner to enforce the subagent timeout; the check lives at the top of
+	// each loop iteration in run().
+	deadline_ms i64
 }
 
 // new_agent creates an Agent with default channels, thresholds, and an
@@ -201,6 +226,7 @@ pub fn new_agent(provider Provider, system string) Agent {
 		decision_ch:      chan ApprovalDecision{cap: 1}
 		risky_tools:      default_risky_tools.clone()
 		approved_tools:   []string{}
+		permission_rules: []PermissionRule{}
 		yolo:             false
 		ask_ch:           chan AskRequest{cap: 4}
 		ask_result_ch:    chan AskResult{cap: 1}
@@ -212,6 +238,10 @@ pub fn new_agent(provider Provider, system string) Agent {
 		hooks:            new_hook_engine('', '')
 		session_id:       ''
 		mcp_clients:      map[string]&McpClient{}
+		bg_results_ch:    chan BackgroundAgentResult{cap: 32}
+		bg_tasks:         map[string]BackgroundTask{}
+		bg_mutex:         sync.Mutex{}
+		deadline_ms:      i64(0)
 	}
 }
 
@@ -488,7 +518,14 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 						return result
 					}
 					.err_kind {
-						return error('provider error: ${ev.err}')
+						// Surface as ProviderError so the loop's retry
+						// logic can consult `retryable` (429 / 5xx /
+						// connection failures → retry; the rest → fail).
+						return ProviderError{
+							message:   ev.err
+							kind:      'provider_error'
+							retryable: ev.retryable
+						}
 					}
 				}
 			}

@@ -7,6 +7,7 @@ module main
 import os
 import json
 import regex
+import time
 
 // count_occurrences returns the number of non-overlapping occurrences of `sub` in `s`.
 fn count_occurrences(s string, sub string) int {
@@ -277,18 +278,89 @@ pub fn (t BashTool) description() string {
 
 // parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t BashTool) parameters_schema() string {
-	return '{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_ms":{"type":"integer","description":"Optional timeout in milliseconds (default 30000)"}},"required":["command"],"additionalProperties":false}'
+	return '{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_ms":{"type":"integer","description":"Optional timeout in milliseconds (default 60000, max 300000)"}},"required":["command"],"additionalProperties":false}'
 }
 
-// execute runs the command and returns its combined stdout and stderr.
-pub fn (t BashTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
-	args_map := json.decode(map[string]string, args.raw) or {
-		return ToolResult{
-			content:  'invalid arguments: ${err.msg()}'
-			is_error: true
-		}
+const bash_default_timeout_ms = 60_000
+const bash_max_timeout_ms = 300_000
+
+// BashToolArgs is the typed-decode form of the bash tool arguments.
+// Preferred over map[string]string because the map decode silently
+// drops JSON numbers (timeout_ms would come back as '').
+struct BashToolArgs {
+	command    string @[json: command]
+	timeout_ms int    @[json: timeout_ms]
+}
+
+// bash_timeout_ms resolves the effective timeout: the schema's
+// `timeout_ms` when positive, otherwise the 60s default, capped at 5min
+// (parity with kimi-code's bash timeout).
+fn bash_timeout_ms(requested int) int {
+	if requested <= 0 {
+		return bash_default_timeout_ms
 	}
-	command := args_map['command'] or {
+	if requested > bash_max_timeout_ms {
+		return bash_max_timeout_ms
+	}
+	return requested
+}
+
+// bash_shell returns the shell executable used to run bash commands.
+fn bash_shell() string {
+	$if windows {
+		return 'cmd'
+	} $else {
+		return 'sh'
+	}
+}
+
+// bash_shell_args wraps `command` in the shell invocation that reproduces
+// the old `os.execute('cd "<cwd>" && <command>')` semantics.
+fn bash_shell_args(cwd string, command string) []string {
+	$if windows {
+		return ['/c', 'cd /d "${cwd}" && ${command}']
+	} $else {
+		return ['-c', 'cd "${cwd}" && ${command}']
+	}
+}
+
+// execute runs the command with a timeout and returns its combined
+// stdout and stderr. os.execute has no timeout support, so we spawn the
+// shell as an os.Process and poll is_alive() until it exits or the
+// deadline passes. Stdout and stderr are merged into one pipe so the
+// result matches the old os.execute combined-output format. The pipe is
+// drained during polling so chatty commands can't deadlock on a full
+// pipe buffer.
+pub fn (t BashTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
+	// The schema declares timeout_ms as an integer, but some models send
+	// it as a string. A typed-struct decode handles the number form;
+	// fall back to the map[string]string decode used by the other tools
+	// for the string form.
+	mut command := ''
+	mut timeout_ms := bash_default_timeout_ms
+	if parsed := json.decode(BashToolArgs, args.raw) {
+		command = parsed.command
+		mut timeout_req := parsed.timeout_ms
+		if timeout_req == 0 && args.raw.contains('"timeout_ms"') {
+			// timeout_ms was present but didn't survive the typed decode
+			// (e.g. the model sent it as a string, which coerces to 0).
+			// Retry through the map decode, which keeps string values.
+			if args_map := json.decode(map[string]string, args.raw) {
+				timeout_req = (args_map['timeout_ms'] or { '' }).int()
+			}
+		}
+		timeout_ms = bash_timeout_ms(timeout_req)
+	} else {
+		args_map := json.decode(map[string]string, args.raw) or {
+			return ToolResult{
+				content:  'invalid arguments: ${err.msg()}'
+				is_error: true
+			}
+		}
+		command = args_map['command'] or { '' }
+		timeout_ms = bash_timeout_ms((args_map['timeout_ms'] or { '' }).int())
+	}
+	if command.len == 0 {
 		return ToolResult{
 			content:  'missing required argument: command'
 			is_error: true
@@ -296,15 +368,54 @@ pub fn (t BashTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	}
 
 	cwd := if ctx.cwd.len > 0 { ctx.cwd } else { os.getwd() }
-	result := os.execute('cd "${cwd}" && ${command}')
-	if result.exit_code != 0 {
+
+	mut p := os.new_process(bash_shell())
+	p.set_args(bash_shell_args(cwd, command))
+	p.set_redirect_stdio_merged()
+	// Own process group so a timeout kills the whole tree (e.g. a `sleep`
+	// child of the shell), not just the shell — otherwise stdout_slurp
+	// below would block until the surviving grandchild closes the pipe.
+	p.use_pgroup = true
+	p.run()
+	if p.err.len > 0 {
 		return ToolResult{
-			content:  '${result.output}\n[exit ${result.exit_code}]'
+			content:  'failed to start shell: ${p.err}'
+			is_error: true
+		}
+	}
+
+	deadline := time.now().add(time.millisecond * timeout_ms)
+	mut out := ''
+	mut timed_out := false
+	for p.is_alive() {
+		out += p.stdout_read()
+		if time.now() > deadline {
+			p.signal_pgkill()
+			timed_out = true
+			break
+		}
+		time.sleep(10 * time.millisecond)
+	}
+	// wait() is a no-op when is_alive() already reaped the child; on the
+	// timeout path it blocks until the SIGKILL lands (prompt).
+	p.wait()
+	out += p.stdout_slurp()
+	p.close()
+
+	if timed_out {
+		return ToolResult{
+			content:  '${out}\n[command timed out after ${timeout_ms} ms and was killed; increase timeout_ms (max ${bash_max_timeout_ms}) and retry if it legitimately needs longer]'
+			is_error: true
+		}
+	}
+	if p.code != 0 {
+		return ToolResult{
+			content:  '${out}\n[exit ${p.code}]'
 			is_error: true
 		}
 	}
 	return ToolResult{
-		content: result.output
+		content: out
 	}
 }
 
@@ -683,6 +794,8 @@ pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig) 
 	r.register(EnterPlanModeTool{ agent: &a })
 	r.register(ExitPlanModeTool{ agent: &a })
 	r.register(AgentTool{ agent: &a })
+	r.register(AgentSwarmTool{ agent: &a })
+	r.register(TaskListTool{ agent: &a })
 	r.register(SkillTool{ agent: &a })
 	// External MCP servers (config-driven). Failures are logged, not fatal,
 	// unless a server is explicitly marked required. Connections are stored

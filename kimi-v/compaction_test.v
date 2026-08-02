@@ -51,16 +51,33 @@ fn new_fake_err(msg string) FakeProvider {
 
 fn (p FakeProvider) chat(req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	if p.err_msg.len > 0 {
-		out <- ChatEvent{ kind: .err_kind, err: p.err_msg }
-		out <- ChatEvent{ kind: .end_of_stream }
+		out <- ChatEvent{
+			kind: .err_kind
+			err:  p.err_msg
+		}
+		out <- ChatEvent{
+			kind: .end_of_stream
+		}
 		return
 	}
 	for d in p.deltas {
-		out <- ChatEvent{ kind: .delta, content: d }
+		out <- ChatEvent{
+			kind:    .delta
+			content: d
+		}
 	}
-	out <- ChatEvent{ kind: .finish, reason: .stop }
-	out <- ChatEvent{ kind: .usage, input_tokens: 100, output_tokens: 50 }
-	out <- ChatEvent{ kind: .end_of_stream }
+	out <- ChatEvent{
+		kind:   .finish
+		reason: .stop
+	}
+	out <- ChatEvent{
+		kind:          .usage
+		input_tokens:  100
+		output_tokens: 50
+	}
+	out <- ChatEvent{
+		kind: .end_of_stream
+	}
 }
 
 // ---------- estimate_tokens -----------------------------------------------
@@ -91,15 +108,19 @@ fn test_estimate_tokens_long_message() {
 }
 
 fn test_estimate_tokens_counts_tool_calls() {
-	msgs := [Message{
-		role:    .assistant
-		content: 'calling tool'
-		tool_calls: [ToolCall{
-			id:        '1'
-			name:      'bash'
-			arguments: '{"cmd":"ls -la"}'
-		}]
-	}]
+	msgs := [
+		Message{
+			role:       .assistant
+			content:    'calling tool'
+			tool_calls: [
+				ToolCall{
+					id:        '1'
+					name:      'bash'
+					arguments: '{"cmd":"ls -la"}'
+				},
+			]
+		},
+	]
 	t := estimate_tokens(msgs)
 	// content "calling tool" = 12 bytes, 12/3 = 4, + 4 overhead = 8
 	// tool_call name "bash" = 4 bytes, 4/3 = 1
@@ -111,9 +132,18 @@ fn test_estimate_tokens_counts_tool_calls() {
 
 fn test_estimate_tokens_sum_across_messages() {
 	msgs := [
-		Message{ role: .user, content: 'hi' },
-		Message{ role: .assistant, content: 'hello there' },
-		Message{ role: .user, content: 'how are you?' },
+		Message{
+			role:    .user
+			content: 'hi'
+		},
+		Message{
+			role:    .assistant
+			content: 'hello there'
+		},
+		Message{
+			role:    .user
+			content: 'how are you?'
+		},
 	]
 	// msg 1: 2/3 + 4 = 4
 	// msg 2: 11/3 + 4 = 7
@@ -148,8 +178,14 @@ fn test_should_compact_zero_window() {
 
 fn test_format_messages_basic() {
 	msgs := [
-		Message{ role: .user, content: 'help me' },
-		Message{ role: .assistant, content: 'sure' },
+		Message{
+			role:    .user
+			content: 'help me'
+		},
+		Message{
+			role:    .assistant
+			content: 'sure'
+		},
 	]
 	s := format_messages_for_summary(msgs)
 	assert s.contains('[user]')
@@ -159,15 +195,19 @@ fn test_format_messages_basic() {
 }
 
 fn test_format_messages_includes_tool_calls() {
-	msgs := [Message{
-		role:    .assistant
-		content: 'running'
-		tool_calls: [ToolCall{
-			id:        '1'
-			name:      'bash'
-			arguments: '{"cmd":"ls"}'
-		}]
-	}]
+	msgs := [
+		Message{
+			role:       .assistant
+			content:    'running'
+			tool_calls: [
+				ToolCall{
+					id:        '1'
+					name:      'bash'
+					arguments: '{"cmd":"ls"}'
+				},
+			]
+		},
+	]
 	s := format_messages_for_summary(msgs)
 	assert s.contains('tool_call: bash(')
 	assert s.contains('"cmd":"ls"')
@@ -184,7 +224,7 @@ fn test_compact_noop_when_under_threshold() {
 	sess.append_user('hi')
 	sess.append_assistant('hello', []ToolCall{})
 	sess.append_user('how are you?')
-	compacted := a.compact(mut sess)!
+	compacted := a.compact(mut sess, false, '')!
 	assert compacted == false
 	// FakeProvider should NOT have been called.
 	// (FakeProvider's mut state isn't observable from here directly, but
@@ -194,13 +234,13 @@ fn test_compact_noop_when_under_threshold() {
 
 fn test_compact_noop_when_too_few_messages() {
 	mut a := new_agent(new_fake([]string{}), '')
-	a.context_window = 100  // tiny window, anything triggers should_compact
+	a.context_window = 100 // tiny window, anything triggers should_compact
 	a.compact_threshold = 0.1
 	mut sess := new_session('/tmp')
 	sess.append_user('hi')
 	sess.append_assistant('hello', []ToolCall{})
 	// Only 2 messages — below compact_min_messages (4).
-	compacted := a.compact(mut sess)!
+	compacted := a.compact(mut sess, false, '')!
 	assert compacted == false
 	assert sess.messages.len == 2
 }
@@ -208,9 +248,11 @@ fn test_compact_noop_when_too_few_messages() {
 // ---------- compact(): actual compaction ---------------------------------
 
 fn test_compact_replaces_old_messages_with_summary() {
-	mut a := new_agent(new_fake(['SUMMARY: The user asked to refactor a function. ' +
-		'I read the file, identified the issue, and proposed a fix.']), '')
-	a.context_window = 100  // tiny so should_compact always fires
+	mut a := new_agent(new_fake([
+		'SUMMARY: The user asked to refactor a function. ' +
+			'I read the file, identified the issue, and proposed a fix.',
+	]), '')
+	a.context_window = 100 // tiny so should_compact always fires
 	a.compact_threshold = 0.1
 	mut sess := new_session('/tmp')
 	sess.append_user('please refactor foo()')
@@ -220,7 +262,7 @@ fn test_compact_replaces_old_messages_with_summary() {
 	sess.append_user('also add tests')
 	assert sess.messages.len == 5
 
-	compacted := a.compact(mut sess)!
+	compacted := a.compact(mut sess, false, '')!
 	assert compacted == true
 	// After: 2 synthetic (summary + ack) + 2 kept recent = 4 messages.
 	assert sess.messages.len == 4, 'got len ${sess.messages.len}'
@@ -248,7 +290,7 @@ fn test_compact_preserves_only_compact_keep_recent() {
 	}
 	assert sess.messages.len == 20
 
-	compacted := a.compact(mut sess)!
+	compacted := a.compact(mut sess, false, '')!
 	assert compacted == true
 	// 2 synthetic + 2 recent = 4
 	assert sess.messages.len == 4
@@ -278,9 +320,9 @@ fn test_compact_calls_on_compact_callback() {
 	mut sess := new_session('/tmp')
 	// 8 long messages, well over the 200-token window.
 	for i in 0 .. 8 {
-		sess.append_user('user message number ${i}: ${"y".repeat(200)}')
+		sess.append_user('user message number ${i}: ${'y'.repeat(200)}')
 	}
-	a.compact(mut sess)!
+	a.compact(mut sess, false, '')!
 	before := <-cb_ch or {
 		assert false, 'on_compact was not called (channel empty for before)'
 		return
@@ -305,7 +347,7 @@ fn test_compact_graceful_on_summary_failure() {
 		sess.append_user('user ${i}')
 	}
 	before_len := sess.messages.len
-	compacted := a.compact(mut sess)!
+	compacted := a.compact(mut sess, false, '')!
 	assert compacted == false
 	// Session unchanged.
 	assert sess.messages.len == before_len
@@ -322,7 +364,7 @@ fn test_compact_graceful_on_empty_summary() {
 		sess.append_user('user ${i}')
 	}
 	before_len := sess.messages.len
-	compacted := a.compact(mut sess)!
+	compacted := a.compact(mut sess, false, '')!
 	assert compacted == false
 	assert sess.messages.len == before_len
 }
@@ -331,15 +373,36 @@ fn test_compact_reduces_estimated_tokens() {
 	// After compaction, the estimated token count should be noticeably
 	// smaller. We seed a long session, compact, then check.
 	mut a := new_agent(new_fake(['z'.repeat(500)]), '')
-	a.context_window = 100  // tiny window so compaction triggers
+	a.context_window = 100 // tiny window so compaction triggers
 	a.compact_threshold = 0.1
 	mut sess := new_session('/tmp')
-	long := 'x'.repeat(500)  // 500-byte message
+	long := 'x'.repeat(500) // 500-byte message
 	for i in 0 .. 6 {
 		sess.append_user('msg ${i}: ${long}')
 	}
 	before := estimate_tokens(sess.messages)
-	a.compact(mut sess)!
+	a.compact(mut sess, false, '')!
 	after := estimate_tokens(sess.messages)
 	assert after < before, 'expected after (${after}) < before (${before})'
+}
+
+fn test_build_summary_prompt() {
+	body := 'conversation body here'
+	// No instruction: the prompt should not contain the instruction marker.
+	plain := build_summary_prompt(body, '')
+	assert !plain.contains('Additional user instruction')
+	assert plain.contains('--- Conversation to summarize ---')
+	// The body must come after the section marker.
+	body_idx := plain.index(body) or { -1 }
+	marker_idx := plain.index('--- Conversation to summarize ---') or { -1 }
+	assert marker_idx >= 0 && body_idx > marker_idx
+	// With an instruction: marker present, instruction text present, body still last.
+	instr := 'focus on the API design decisions'
+	guided := build_summary_prompt(body, instr)
+	assert guided.contains('Additional user instruction for this compaction:')
+	assert guided.contains(instr)
+	assert guided.contains('--- Conversation to summarize ---')
+	assert guided.index(body) or { -1 } > guided.index('--- Conversation to summarize ---') or {
+		-1
+	}
 }

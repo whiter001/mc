@@ -18,6 +18,7 @@
 - ✅ **完整 TOML 解析** — `vlib/toml` 模块；user/project/env/CLI 四层合并
 - ✅ **内置工具**：`read_file` / `write_file` / `edit_file` / `bash` / `glob` / `grep`（正则，优先 rg）/ `web_fetch` / `web_search`（DuckDuckGo）/ `TodoWrite` / `TodoRead` / `AskUserQuestion`
 - ✅ **OpenAI 兼容 provider**（Kimi、OpenAI、DeepSeek、OpenRouter 通用）
+- ✅ **Anthropic provider**（`--provider anthropic`，Claude 系列；流式 SSE + 工具调用）
 - ✅ **多层 config**（CLI > env > project > user > default）
 - ✅ **跨平台路径**（XDG / macOS / Windows）
 - ✅ **Session 持久化**（写 TOML）
@@ -25,15 +26,21 @@
 - ✅ **P1.5**：流式 token 实时渲染 / Ctrl-C 中断 / 多行输入 / 历史持久化 / **context 压缩（60% 触发）**
 - ✅ **P2 审批**：`bash` / `write_file` / `edit_file` / `web_fetch` 走 TUI 模态 y/n
 - ✅ **P2 配置化审批**：`risky_tools` via `config.toml` 或 `KIMI_RISKY_TOOLS`
+- ✅ **P2 权限规则引擎**：`[[permission.rules]]` 定义 deny / allow / ask 规则（`Tool(glob)` 模式），deny 无条件优先，allow 免弹窗、ask 强制弹窗
+- ✅ **P2 审批记忆**：审批模态按 `a` 记住「always allow」，持久化到 `<config-dir>/approved_tools`，重启自动加载；`/approvals` 查看、`/approvals clear` 清空
+- ✅ **AGENTS.md 指令加载**：启动时把 `<config-dir>/AGENTS.md`、`~/.agents/AGENTS.md`、`<cwd>/.kimi/AGENTS.md`、`<cwd>/AGENTS.md` 按序拼进 system prompt（用户 `--system` 之后；-p 与 TUI 均生效）
+- ✅ **瞬态错误自动重试**：`[loop_control] max_retries_per_step`（默认 3，env `KIMI_LOOP_MAX_RETRIES_PER_STEP` 可覆盖），429 / 5xx / 连接失败指数退避（1s/2s/4s…上限 30s）重试整个 step；Ctrl-C 可打断退避
+- ✅ **Bash 工具超时**：`timeout_ms` 参数生效（默认 60s，上限 5min），超时 kill 整个进程组并返回带「timed out after N ms」的错误结果，模型可调大重试
 - ✅ **P2 sandbox**：`write_file` / `edit_file` 拒绝 `..` 逃逸到 cwd 外
 - ✅ **Plan-mode**：`/plan` 进入只读规划态；`EnterPlanMode` / `ExitPlanMode` 工具；规划态下除 plan 文件外禁止写文件；`ExitPlanMode` 弹出 plan 审阅模态（y 批准 / n 拒绝 / e 拒绝并退出 / r 修订 / Esc 忽略；多方案可数字键选）
-- ✅ **Slash 命令**：`/help` `/clear` `/login` `/model` `/plan` `/tokens` `/usage` `/compact` `/exit`
+- ✅ **Slash 命令**：`/help` `/clear` `/new` `/sessions` `/login` `/model` `/plan` `/tokens` `/usage` `/compact` `/exit`
 - ✅ **键盘**：字符输入 / Enter / Backspace / Ctrl-A / Ctrl-E / Ctrl-U / Ctrl-W / Esc Esc 退出
+- ✅ **OAuth 登录**：RFC 8628 device flow（`kimi login --oauth`，浏览器授权）；凭据存 `<config-dir>/credentials.json`（文件 0600、目录 0700）；access token 过期后自动用 refresh token 续期；`kimi logout` 删除凭据
 
 ### 还差（按 PLAN.md 阶段）
 
-- [ ] P3 多 provider（Anthropic/Google）+ OAuth（MCP 客户端已完成，见下）
-- [ ] P4 ACP server
+- [x] P3 多 provider：Anthropic ✅（`--provider anthropic`；OAuth ✅ 见下；Google 未做）
+- [x] P4 ACP server ✅
 - [x] P3 MCP 客户端 ✅
   - 基于 V 标准库 `mcp` 模块（JSON-RPC 2.0，支持 stdio 与 Streamable HTTP 两种传输）
   - 在 `config.toml` 用 `[[mcp]]` 表配置服务器（`command`/`args` 走 stdio，或 `url` 走 HTTP；`required` 控制是否致命；`headers` 传鉴权头）
@@ -57,8 +64,30 @@
   headers = { Authorization = "Bearer ${YOUR_TOKEN}" }
   ```
   连接后远程工具以 `mcp__<server>__<tool>` 暴露给模型（如 `mcp__fs__read_file`），直接调用即可；结果从 MCP `content` 数组扁平化为文本回传。
+- [x] P4 ACP server ✅
+  - ACP v1（Agent Client Protocol）stdio server：`kimi acp` 启动，stdin/stdout 走 newline-delimited JSON-RPC（每行一帧、即时 flush），日志只进 stderr，不污染协议流
+  - 实现方法：`initialize` / `notifications/initialized` / `authenticate` / `session/new` / `session/load` / `session/prompt` / `session/cancel`
+  - 提示在会话 cwd 下运行 agent（加载该目录 AGENTS.md、config.toml 的 MCP 服务器、skills、hooks）；无凭据时 `authenticate` 返回 -32001 并提示先 `kimi login` 或设 `KIMI_API_KEY`
+  - 流式输出：回复以 `agent_message_chunk` 文本增量实时推送 `session/update`，结束时回 `{"stopReason":"end_turn"|"max_turn_requests"}`；`session/load` 重放会话文本历史
+  - 子集限制：仅支持 `text` content block；thinking / tool-call 流式 update 未实现；`mcpServers` 字段接受但不转发；`session/close` / `session/list` / `session/delete` 及 fs / terminal 能力未实现；同一会话并发 prompt 返回 -32602
+
+  Zed `agent_servers` 配置示例（把 `/path/to/kimi` 换成实际路径）：
+  ```json
+  {
+    "agent_servers": {
+      "kimi": {
+        "command": ["/path/to/kimi", "acp"],
+        "transport": "stdio"
+      }
+    }
+  }
+  ```
+  协议文档：<https://agentclientprotocol.com/protocol/v1/overview>
 - [x] P5 子 agent（coder/explore/plan）+ hooks + skills ✅
   - **子 agent**：`/agent` 或 `Agent` 工具派发 `coder` / `explore` / `plan` 三种预设 profile，独立 Session 递归运行，结果回流父 agent
+  - **后台子 agent**：`Agent` 工具 `run_in_background: true` 时丢进 goroutine 异步执行，主循环不阻塞、可继续干活；`TaskList` 工具随时查看运行中/已完成任务及结果，完成结果以 `<background-agent-result>` 消息自动注入会话
+  - **resume**：`Agent` 工具传 `resume: <agent-id>` 从持久化 session（`<config-dir>/sessions/subagents/`）续跑超时/中断的子 agent；与 `subagent_type` 互斥
+  - **AgentSwarm**：一次派发多个子 agent —— `prompt_template` + `items` 批量展开（也可 `resume_agent_ids` 批量续跑），展开重复/缺占位符/未知类型在启动前校验；前台串行、后台（`run_in_background`）goroutine 并行，结束后汇总逐条结果
   - **Hooks**：15 类生命周期事件（tool / turn / session / message / agent / file / error / approval），fail-open，exit 0=allow / 2=block，支持 `permissionDecision:deny` 结构化拦截
   - **Skills**：`SKILL.md`（front matter + markdown body）loader，从 `~/.kimi/skills/` 与 `./.kimi/skills/` 装载，`/skill:NAME` 斜杠命令注入 system prompt，支持 `$ARGUMENTS` / `$N` / `$name` / `${KIMI_SKILL_DIR}` 占位符
 - [x] Plan-mode（`/plan` + EnterPlanMode/ExitPlanMode）✅
@@ -136,8 +165,16 @@ v -prod -os windows -o bin/kimi.exe . # 交叉到 Windows
 ## 使用
 
 ```sh
-# 1) 凭证
+# 1) 凭证（二选一）
+#    API key 方式（写入 config.toml）：
 ./bin/kimi login
+#    OAuth 方式（浏览器授权；凭据写入 credentials.json，不碰 config.toml）：
+./bin/kimi login --oauth
+#       OAuth 登录后使用 Kimi coding 端点需要设置：
+#       export KIMI_API_BASE=https://api.kimi.com/coding/v1
+#       export KIMI_MODEL=你的模型名
+#    删除 OAuth 凭据：
+./bin/kimi logout
 
 # 2) 单次任务
 ./bin/kimi -p "list every .v file in this directory and count lines"
@@ -150,7 +187,29 @@ KIMI_API_KEY=$YOUR_KEY \
 KIMI_API_BASE=https://api.moonshot.cn/v1 \
 KIMI_MODEL=moonshot-v1-8k \
 ./bin/kimi -p "summarize README.md"
+
+# 5) Anthropic（`--provider anthropic`；key 走 ANTHROPIC_API_KEY，base 默认 api.anthropic.com）
+ANTHROPIC_API_KEY=$ANTHROPIC_KEY \
+./bin/kimi --provider anthropic --model claude-sonnet-4-5 -p "summarize README.md"
 ```
+
+### OAuth 配置项
+
+`kimi login --oauth` 走 RFC 8628 device flow，端点默认对齐 kimi-code（`https://auth.kimi.com`），
+全部可用环境变量覆盖（测试 / 自建网关用）：
+
+| 环境变量 | 默认 |
+|---|---|
+| `KIMI_CODE_OAUTH_HOST` / `KIMI_OAUTH_HOST` | `https://auth.kimi.com` |
+| `KIMI_OAUTH_DEVICE_URL` | `<host>/api/oauth/device_authorization` |
+| `KIMI_OAUTH_TOKEN_URL` | `<host>/api/oauth/token` |
+| `KIMI_OAUTH_CLIENT_ID` | `17e5f671-d194-4dfb-9706-5516cb48c098`（kimi-code 同款） |
+| `KIMI_OAUTH_NO_BROWSER` | `1`/`true` 时不再自动打开浏览器（脚本/CI） |
+
+access token 15 分钟过期（TTL 与上游一致），过期后下次启动自动用 refresh token 续期并
+回写 `credentials.json`；refresh 失败会提示重新 `kimi login --oauth`。OAuth 凭据与
+`config.toml` 的 `api_key` 相互独立：只要配置了 `api_key`（或 `KIMI_API_KEY`），OAuth
+不参与。
 
 ### TUI 快捷键
 
@@ -175,10 +234,13 @@ KIMI_MODEL=moonshot-v1-8k \
 |---|---|
 | `/help` | 列出所有命令 |
 | `/clear` | 清空会话 |
-| `/login` | 提示去另一个 shell 跑 `kimi login`（TUI 暂不读密码） |
+| `/new` | `/clear` 的别名 |
+| `/sessions` | 浏览并切换持久化 session（数字键选择） |
+| `/login` | 提示去另一个 shell 跑 `kimi login --oauth`（TUI 暂不读密码） |
+| `/logout` | 删除 OAuth 凭据（重启 TUI 生效） |
 | `/model NAME` | 切换模型 |
 | `/tokens` / `/usage` | 显示当前 session 累计 token 用量 |
-| `/compact` | 提示下次 turn 触发 context 压缩（自动 60% 触发） |
+| `/compact [instruction]` | 立即强制压缩当前 session（跳过自动 60% 阈值；可选附加指令引导摘要侧重点） |
 | `/plan` | 进入 plan-mode（只读规划态，等价于模型调用 EnterPlanMode） |
 | `/exit` / `/quit` | 离开 TUI |
 
@@ -205,13 +267,14 @@ Flags：
 |---|---|
 | `--prompt` / `-p` | 必填 |
 | `--model` | env: `KIMI_MODEL` |
-| `--api-base` | env: `KIMI_API_BASE` (默认 `https://api.openai.com`) |
-| `--api-key` | env: `KIMI_API_KEY` |
-| `--provider` | `openai-compat` |
+| `--api-base` | env: `KIMI_API_BASE`（openai-compat 默认 `https://api.openai.com`；anthropic 默认 `https://api.anthropic.com`，可用 `ANTHROPIC_BASE_URL` 覆盖） |
+| `--api-key` | env: `KIMI_API_KEY`；anthropic 用 `ANTHROPIC_API_KEY` |
+| `--provider` | `openai-compat` (默认) / `anthropic` |
 | `--system` | env: `KIMI_SYSTEM_PROMPT` |
 | `--max-turns` | `32` |
 | `--max-tokens` | `4096` |
 | `--log-level` | env: `KIMI_LOG_LEVEL` |
+| `--oauth`（仅 `login`） | 用 OAuth device flow 登录（浏览器授权） |
 
 ### 审批 & sandbox
 
@@ -229,6 +292,41 @@ risky_tools = ["bash"]              # 只要 bash 问；其它写操作放行
 ```sh
 KIMI_RISKY_TOOLS="bash,web_fetch" ./bin/kimi
 ```
+
+要更精细的策略，用 `[[permission.rules]]` 定义 deny / allow / ask 规则。每条规则一个
+`Tool(glob)` 模式（工具名大小写不敏感，写注册表全名：`bash` / `write_file` /
+`edit_file` / `web_fetch`；裸工具名 = 匹配该工具的所有调用），按 deny → allow → ask
+顺序求值，deny 无条件优先（yolo 也不放过），并附上 reason 喂回给模型：
+
+```toml
+[[permission.rules]]
+decision = "deny"
+pattern  = "Bash(rm -rf *)"          # 任何 rm -rf 直接拦下，不弹窗
+reason   = "protect against accidental rm -rf"
+
+[[permission.rules]]
+decision = "deny"
+pattern  = "Write_file(/etc/**)"     # 写 /etc 直接拦下
+reason   = "never touch system config"
+
+[[permission.rules]]
+decision = "allow"
+pattern  = "Bash(git *)"             # git 命令免弹窗
+
+[[permission.rules]]
+decision = "ask"
+pattern  = "Bash(npm install *)"     # 装包强制弹窗确认
+```
+
+非法的规则条目（decision 不是 allow/deny/ask、pattern 解析不了）会在加载时
+warning 跳过 —— fail-open，写错也不会锁死或崩掉。
+
+**审批记忆**：审批模态里按 `a` = 批准本次并记住该工具「always allow」。记住的列表
+持久化在 `<config-dir>/approved_tools`（每行一个工具名，可用 `KIMI_APPROVED_TOOLS_FILE`
+环境变量覆盖路径），下次启动自动加载；敏感模式（`rm -rf`、`sudo`、`/etc/*` 等）
+即使在已批准列表里也仍会重新弹窗。TUI 里 `/approvals` 查看当前列表、`/approvals clear`
+清空（下一条指令的下一 turn 生效）。`-p` 单发模式没有「记住」入口，但会加载持久化
+列表并执行 deny/allow/ask 规则。
 
 `write_file` / `edit_file` 还会被 sandbox 拦在 session cwd 之外 —— `..` 逃逸、
 绝对路径指别处、共享前缀的兄弟目录（`/sandbox-evil` vs `/sandbox`）一律拒绝，
@@ -258,6 +356,7 @@ kimi-v/
 ├── llm_types.v          # Message / ToolCall / ChatEvent / FinishEvent
 ├── llm_provider.v       # Provider interface
 ├── llm_openai_compat.v  # OpenAI 兼容实现（dispatch HTTP→stream, HTTPS→buffered）
+├── llm_anthropic.v      # Anthropic 实现（/v1/messages 流式 + tool_use 增量累积）
 ├── streaming.v          # 裸 TCP HTTP client + SSE 状态机 + tool_call 累积
 │
 ├── agent.v              # Agent struct + step
@@ -274,13 +373,23 @@ kimi-v/
 ├── tools_mcp.v            # McpTool：把远程 MCP 工具适配为本地 Tool 接口
 ├── mcp.v                 # MCP 客户端管理：connect / list_tools / call_tool（基于 vlib/mcp）
 │
+├── subagent.v             # 子 agent 运行器：run_subagent / 后台任务 / 结果回流
+├── subagent_profiles.v    # coder / explore / plan 预设 profile
+├── tools_subagent.v       # Agent 工具（run_in_background / resume / 结果格式化）
+├── tools_subagent_tasklist.v  # TaskList 工具（查看后台子 agent 任务）
+├── tools_subagent_swarm.v     # AgentSwarm 工具（批量派发 / 批量续跑）
+│
 ├── config_loader.v      # 多层 config（含 [[mcp]] 服务器配置）
 ├── config_paths.v
+├── oauth.v              # Kimi Code OAuth 登录（RFC 8628 device flow + refresh）
+├── oauth_test.v         # OAuth 单测（凭据存取/权限/过期/轮询状态机）
 │
 ├── session_store.v
+├── session_switch.v      # /sessions 切换 + /compact 控制通道（SessionControl）
 │
 ├── sandbox.v            # write_file/edit_file cwd 边界检查
 ├── approval.v           # risky-tool 审批流（pure helpers + channel struct）
+├── permissions.v        # [[permission.rules]] 规则引擎 + approved_tools 持久化
 ├── compaction.v         # context-window 压缩（60% 触发）
 │
 ├── tui.v                # P1 TUI: ANSI helpers, raw mode, alt screen
@@ -301,7 +410,7 @@ main()
   │
   ├─ load_config(CLI overrides)
   │
-  ├─ OpenAICompatProvider{model, api_base, api_key}
+  ├─ make_provider(cfg)   # OpenAICompat 或 Anthropic
   │
   ├─ Agent(provider, system)
   │     .registry = default_registry(cwd)
@@ -370,7 +479,8 @@ Provider.chat()
 ## 已知的限制
 
 - **Bash 不做 sandbox**：解析 shell 太复杂，靠审批 + 用户眼睛盯。`write_file` / `edit_file` 已做路径边界
-- **审批每次都问**：还没实现"approve for the rest of the session"（`ApprovalDecision.remember` 字段已预留）
+- **Permission 模式不含嵌套括号**：`Tool(glob)` 只认第一个 `(` 与末尾 `)`，glob 内不能有 `)`（如 `Bash(cd /a && rm -rf *)` 里的括号不解析，会 warning 跳过）；含 `)` 的路径模式建议用通配写法覆盖
+- **`/approvals clear` 下一 turn 生效**：agent 在每 turn 开头重载持久化列表，所以 clear 后正在进行的 turn 里已批准的调用仍放行
 - **Grep 是字串匹配**：没接正则（`name.matches(rx)` 在 V 0.5 里不可用，手写 glob 已经替换）
 - **Glob 手写**：`*` `?` 支持，复杂模式不支持
 - **TLS 证书验证**：默认接受所有证书（自签名友好），生产用法需要传 `SSLConnectConfig{ verify: '/path/to/ca.pem' }`

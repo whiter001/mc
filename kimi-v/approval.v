@@ -30,9 +30,11 @@ pub struct ApprovalDecision {
 pub:
 	id         u64
 	approved   bool
-	// `remember` is reserved for a future "approve for the rest of the
-	// session" option; for now it's always false (every call is asked
-	// individually).
+	// `remember` marks "always allow for the rest of the session": the
+	// TUI sets it when the user presses 'a' in the approval modal. The
+	// agent then adds the tool to its own approved_tools list (same-turn
+	// effect), and the TUI persists the choice to <config_dir>/approved_tools
+	// so future sessions load it at startup.
 	remember   bool
 }
 

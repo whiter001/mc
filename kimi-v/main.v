@@ -4,40 +4,45 @@
 //   kimi -p "task"        single-shot mode (no TUI)
 //   kimi -p "task" --model ... --api-base ... --api-key ...
 //   kimi login            store an API key
+//   kimi login --oauth    log in via OAuth (browser device flow)
+//   kimi logout           remove saved OAuth credentials
 //   kimi version          print version
 //   kimi help             show usage
+//   kimi acp              serve the ACP v1 protocol over stdio
 //
-// TUI (`kimi` with no `-p`) and ACP (`kimi acp`) land in P1 / P4.
+// TUI (`kimi` with no `-p`) lands in P1; the rest of the roadmap is in
+// README.md.
 module main
 
 import os
 import time
-import json
+import json2
 
 const version = '0.1.0'
 
 // Cli holds the parsed command-line flags and positional arguments.
 struct Cli {
 mut:
-	cmd             string
-	prompt          string
+	cmd              string
+	prompt           string
 	continue_session string
-	model          string
-	api_base       string
-	api_key        string
-	log_level      string
-	provider       string
-	max_turns      int
-	max_tokens     int
-	system         string
-	yolo           bool
-	output_format  string // "text" (default) | "stream-json"
-	export_session string
-	export_output  string
-	export_yes     bool
-	export_no_log  bool
-	show_help      bool
-	show_version   bool
+	model            string
+	api_base         string
+	api_key          string
+	log_level        string
+	provider         string
+	max_turns        int
+	max_tokens       int
+	system           string
+	yolo             bool
+	output_format    string // "text" (default) | "stream-json"
+	export_session   string
+	export_output    string
+	export_yes       bool
+	export_no_log    bool
+	show_help        bool
+	show_version     bool
+	oauth_login      bool
 }
 
 // main is the CLI entry point. It parses arguments, dispatches to the
@@ -61,6 +66,12 @@ fn main() {
 		'login' {
 			run_login(cli) or {
 				eprintln('login failed: ${err.msg()}')
+				exit(1)
+			}
+		}
+		'logout' {
+			run_logout() or {
+				eprintln('logout failed: ${err.msg()}')
 				exit(1)
 			}
 		}
@@ -89,6 +100,13 @@ fn main() {
 					eprintln('error: ${err.msg()}')
 					exit(1)
 				}
+			}
+		}
+		'acp' {
+			// ACP v1 stdio server.
+			run_acp_cmd(cli, mut log) or {
+				eprintln('error: ${err.msg()}')
+				exit(1)
 			}
 		}
 		else {
@@ -204,8 +222,14 @@ fn parse_args(args []string) !Cli {
 					cli.export_session = args[i]
 				}
 			}
+			'--oauth' {
+				cli.oauth_login = true
+			}
 			'login' {
 				cli.cmd = 'login'
+			}
+			'logout' {
+				cli.cmd = 'logout'
 			}
 			'version' {
 				cli.cmd = 'version'
@@ -215,6 +239,9 @@ fn parse_args(args []string) !Cli {
 			}
 			'sessions' {
 				cli.cmd = 'sessions'
+			}
+			'acp' {
+				cli.cmd = 'acp'
 			}
 			else {
 				return error('unknown argument: ${a}')
@@ -239,6 +266,22 @@ fn parse_args(args []string) !Cli {
 // run_prompt executes a single-shot task (`kimi -p "..."`). It builds the
 // provider and agent from CLI/config, wires callbacks, runs the loop, and
 // saves the session. Stream-json output is emitted here when requested.
+// make_provider builds the LLM provider selected by cfg.provider.
+fn make_provider(cfg Config) Provider {
+	if cfg.provider == 'anthropic' {
+		return AnthropicProvider{
+			model:    cfg.model
+			api_base: cfg.api_base
+			api_key:  cfg.api_key
+		}
+	}
+	return OpenAICompatProvider{
+		model:    cfg.model
+		api_base: cfg.api_base
+		api_key:  cfg.api_key
+	}
+}
+
 fn run_prompt(cli Cli, mut log Logger) ! {
 	if cli.prompt.len == 0 {
 		print_help()
@@ -273,19 +316,19 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	log.info('provider=${cfg.provider} model=${cfg.model} base=${cfg.api_base}')
 	log.info('cwd=${cfg.cwd}')
 
-	mut provider := OpenAICompatProvider{
-		model:    cfg.model
-		api_base: cfg.api_base
-		api_key:  cfg.api_key
-	}
+	mut provider := make_provider(cfg)
 
 	default_system := 'You are Kimi Code, an AI coding assistant running in the terminal. ' +
 		'Use the available tools to read files, edit files, and run shell commands. ' +
 		'Be concise. Prefer reading files before editing them.'
-	system := if cfg.system_prompt.len > 0 { cfg.system_prompt } else { default_system }
+	base_system := if cfg.system_prompt.len > 0 { cfg.system_prompt } else { default_system }
+	// Layer AGENTS.md instruction files after the user system prompt
+	// (parity with kimi-code). User --system / default stays first.
+	system := base_system + load_agents_md(cfg.cwd, config_dir())
 
 	mut a := new_agent(provider, system)
 	a.max_turns = cfg.max_turns
+	a.max_retries_per_step = cfg.max_retries_per_step
 	a.registry = default_registry(mut a, cfg.cwd, cfg.mcp_servers)
 	// Tear down MCP connections on any exit path (best-effort).
 	defer {
@@ -306,9 +349,14 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	if cfg.risky_tools.len > 0 {
 		a.risky_tools = cfg.risky_tools
 	}
-	// approved_tools starts empty for a one-shot run — there's no
-	// "remember" UI in -p mode. The TUI mutates this in place.
-	a.approved_tools = cfg.approved_tools
+	// approved_tools comes from the persisted file (remembered "always
+	// allow" choices from interactive runs). -p mode has no "remember"
+	// UI, so nothing gets added mid-run.
+	a.approved_tools = load_approved_tools()
+	// Permission rules from config.toml [[permission.rules]]: deny /
+	// allow / ask verdicts evaluated before the built-in risky-tools
+	// logic.
+	a.permission_rules = cfg.permission_rules
 	// yolo is propagated from cfg (--yolo flag or KIMI_YOLO=1).
 	// One-shot mode never shows the approval modal in yolo anyway
 	// (see agent_loop.gate), but we keep the wiring consistent.
@@ -423,11 +471,56 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	save(sess) or { log.warn('session save failed: ${err.msg()}') }
 }
 
-// run_login interactively prompts for provider and API key, then persists
-// them to the user config file.
+// run_login prompts for a login method and persists the result. Three paths:
+//   kimi login --oauth   → OAuth device flow (browser), saves credentials.json
+//   kimi login --api-key → store an API key in config.toml
+//   kimi login           → interactive menu (TTY) or plain key entry (piped stdin)
 fn run_login(cli Cli) ! {
 	println('Kimi Code CLI — login')
 	println('')
+	if cli.oauth_login {
+		run_oauth_login()!
+		return
+	}
+	if cli.api_key.len > 0 {
+		persist_credentials('https://api.moonshot.cn/v1', 'moonshot-v1-8k', cli.api_key)
+		println('Saved. Try: kimi -p "hello"')
+		return
+	}
+	if os.is_atty(0) == 0 {
+		// Non-interactive stdin (scripts/CI): read the key directly.
+		println('Enter your API key:')
+		key := read_secret()
+		if key.len == 0 {
+			return error('empty key')
+		}
+		persist_credentials('https://api.moonshot.cn/v1', 'moonshot-v1-8k', key)
+		println('Saved. Try: kimi -p "hello"')
+		return
+	}
+	println('How do you want to log in?')
+	println('  1) OAuth (browser)')
+	println('  2) API key')
+	println('')
+	print('Choose [1/2]: ')
+	stdout_flush()
+	choice := read_line().trim_space()
+	match choice {
+		'1' {
+			run_oauth_login()!
+		}
+		'2' {
+			run_api_key_login()!
+		}
+		else {
+			return error('invalid choice: ${choice}')
+		}
+	}
+}
+
+// run_api_key_login interactively prompts for provider and API key, then
+// persists them to the user config file.
+fn run_api_key_login() ! {
 	println('Available providers:')
 	println('  1) Moonshot OpenAI-compatible  (https://api.moonshot.cn/v1)')
 	println('  2) Custom OpenAI-compatible   (BYO base URL)')
@@ -465,6 +558,33 @@ fn run_login(cli Cli) ! {
 			return error('invalid choice: ${choice}')
 		}
 	}
+}
+
+// run_oauth_login runs the OAuth device flow and stores the resulting
+// credentials in <config-dir>/credentials.json. It never touches config.toml;
+// set KIMI_API_BASE=https://api.kimi.com/coding/v1 and KIMI_MODEL to point at
+// the Kimi coding endpoint.
+fn run_oauth_login() ! {
+	oc := default_oauth_config()
+	token := run_device_flow(oc)!
+	creds := credentials_from_token(token)
+	save_credentials(creds)!
+	println('')
+	println('OAuth credentials saved to ${credentials_path()}')
+	println('')
+	println('Set these environment variables to use the Kimi coding endpoint:')
+	println('  export KIMI_API_BASE=https://api.kimi.com/coding/v1')
+	println('  export KIMI_MODEL=your-kimi-model')
+	println('')
+	println('Then run: kimi -p "hello"')
+}
+
+// run_logout removes the saved OAuth credentials. The api_key stored in
+// config.toml (if any) is left alone — it is not an OAuth secret.
+fn run_logout() ! {
+	delete_credentials()!
+	println('OAuth credentials removed.')
+	println('If you previously stored an api_key in config.toml, remove it manually.')
 }
 
 // persist_credentials writes a minimal config.toml containing the provider,
@@ -579,13 +699,13 @@ fn run_export(cli Cli) ! {
 	// Build the source list. We always include the session TOML;
 	// optionally include the global log.
 	cli_cfg := Config{
-		provider:  cli.provider
-		api_base:  cli.api_base
-		api_key:   cli.api_key
-		model:     cli.model
+		provider:      cli.provider
+		api_base:      cli.api_base
+		api_key:       cli.api_key
+		model:         cli.model
 		system_prompt: cli.system
-		log_level: cli.log_level
-		max_turns: cli.max_turns
+		log_level:     cli.log_level
+		max_turns:     cli.max_turns
 	}
 	_ = cli_cfg // not used here; only present for consistency with run_prompt
 	dirs := config_paths_struct()
@@ -638,9 +758,9 @@ fn run_export(cli Cli) ! {
 // ConfigPaths groups the standard on-disk directories used by the CLI.
 struct ConfigPaths {
 pub:
-	config  string
+	config   string
 	sessions string
-	logs    string
+	logs     string
 }
 
 fn config_paths_struct() ConfigPaths {
@@ -679,7 +799,7 @@ fn emit_jsonl_event(kind string, fields map[string]string) {
 	for k, v in fields {
 		obj[k] = v
 	}
-	line := json.encode(obj)
+	line := json2.encode(obj, escape_unicode: true)
 	println(line)
 	stdout_flush()
 }
@@ -726,8 +846,11 @@ fn print_help() {
 	println('    kimi -p "task"                    run a single task and exit')
 	println('    kimi --continue <id> -p "task"     resume a session and run task')
 	println('    kimi --sessions                    list saved sessions')
-	println('    kimi login                          store credentials')
+	println('    kimi login                          store credentials (interactive)')
+	println('    kimi login --oauth                  log in via OAuth device flow')
+	println('    kimi logout                         remove saved OAuth credentials')
 	println('    kimi version                        print version')
+	println('    kimi acp                            run an ACP v1 stdio server')
 	println('    kimi help                           this message')
 	println('')
 	println('OPTIONS:')
@@ -735,9 +858,10 @@ fn print_help() {
 	println('        --continue <id>            resume a saved session')
 	println('        --sessions                 list all saved sessions')
 	println('        --model NAME               model identifier')
-	println('        --api-base URL             OpenAI-compatible endpoint')
+	println('        --api-base URL             provider API base URL')
 	println('        --api-key KEY              API key (prefer KIMI_API_KEY env)')
-	println('        --provider NAME            provider (default: openai-compat)')
+	println('        --oauth                    with login: use the OAuth device flow')
+	println('        --provider NAME            provider: openai-compat (default) | anthropic')
 	println('        --system TEXT               override system prompt')
 	println('        --max-turns INT             agent loop cap (default 32)')
 	println('        --max-tokens INT            completion token cap (default 4096)')
@@ -752,14 +876,22 @@ fn print_help() {
 	println('    KIMI_API_BASE                  API base URL')
 	println('    KIMI_MODEL                     model name')
 	println('    KIMI_PROVIDER                  provider')
+	println('    ANTHROPIC_API_KEY              Anthropic API key (provider=anthropic fallback)')
+	println('    ANTHROPIC_BASE_URL             Anthropic API base (provider=anthropic fallback)')
 	println('    KIMI_SYSTEM_PROMPT             system prompt override')
 	println('    KIMI_LOG_LEVEL                 log verbosity')
 	println('    KIMI_CONFIG_DIR                config dir override')
+	println('    KIMI_CODE_OAUTH_HOST           OAuth server host (default https://auth.kimi.com)')
+	println('    KIMI_OAUTH_DEVICE_URL          OAuth device authorization URL')
+	println('    KIMI_OAUTH_TOKEN_URL           OAuth token URL')
+	println('    KIMI_OAUTH_CLIENT_ID           OAuth client id')
+	println('    KIMI_OAUTH_NO_BROWSER          1|true to disable auto-opening the browser')
 	println('    KIMI_RISKY_TOOLS               comma-separated list of tools requiring approval')
 	println('    KIMI_YOLO                      1|true to skip approvals by default')
 	println('')
 	println('FILES:')
 	println('    <config-dir>/config.toml       user config')
+	println('    <config-dir>/credentials.json  OAuth credentials (file 0600)')
 	println('    <config-dir>/sessions/         saved sessions')
 }
 
@@ -783,11 +915,7 @@ fn run_tui_cmd(cli Cli, mut log Logger) ! {
 	}
 	_ = cli.output_format
 
-	mut provider := OpenAICompatProvider{
-		model:    cfg.model
-		api_base: cfg.api_base
-		api_key:  cfg.api_key
-	}
+	mut provider := make_provider(cfg)
 
 	mut cfg_mut := cfg
 	result := run_tui(mut cfg_mut, provider)

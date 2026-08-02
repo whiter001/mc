@@ -61,7 +61,6 @@ fn render(s TuiState, ib InputBuf) string {
 	}
 	mut conv_rows := s.rows - reserved
 	if conv_rows < 3 { conv_rows = 3 }
-
 	// Use absolute cursor addressing for every row so a single misplaced
 	// cursor (or a terminal that doesn't reset the column after \n) can't
 	// push the whole frame to the right.
@@ -168,6 +167,11 @@ fn render(s TuiState, ib InputBuf) string {
 		render_exit_plan_modal(mut buf, preq, s.cols, s.rows)
 	}
 
+	// 11. /sessions picker modal (drawn last / on top).
+	if s.session_modal.len > 0 {
+		render_session_modal(mut buf, s.session_modal, s.cols, s.rows)
+	}
+
 	return buf.str()
 }
 
@@ -266,7 +270,11 @@ fn render_ask_modal(mut buf strings.Builder, req AskRequest, cols int, rows int)
 		desc := if opt.description.len > 0 { ' — ${opt.description}' } else { '' }
 		lines << '  ${i + 1}) ${opt.label}${desc}'
 	}
-	lines << if req.multi { 'pick one or more (e.g. "1,3"); Esc to skip' } else { 'pick a number; Esc to skip' }
+	lines << if req.multi {
+		'pick one or more (e.g. "1,3"); Esc to skip'
+	} else {
+		'pick a number; Esc to skip'
+	}
 
 	modal_height := lines.len
 	start_row := if rows > modal_height { rows - modal_height + 1 } else { 1 }
@@ -292,7 +300,37 @@ fn render_ask_modal(mut buf strings.Builder, req AskRequest, cols int, rows int)
 	buf.write_string(cursor_show())
 }
 
-// input_line_count returns how many screen rows the input area will
+// render_session_modal draws the /sessions picker overlay anchored to the
+// bottom of the screen. The first line is the header (highlighted like the
+// ask/plan modals), then one numbered row per persisted session (newest
+// first), and a hint row. Digit keys select, Esc dismisses (handled in
+// tui_loop.handle_key).
+fn render_session_modal(mut buf strings.Builder, summaries []SessionSummary, cols int, rows int) {
+	lines := format_session_modal_lines(summaries)
+	modal_height := lines.len
+	start_row := if rows > modal_height { rows - modal_height + 1 } else { 1 }
+
+	for i, line in lines {
+		row := start_row + i
+		buf.write_string(esc + '[${row};1H')
+		buf.write_string(esc + '[2K')
+		// Highlight the header line subtly, like the ask modal.
+		if i == 0 {
+			buf.write_string(esc_bg_blue)
+			buf.write_string(esc + '[97m')
+			buf.write_string('  ')
+		} else {
+			buf.write_string(esc + '[96m') // cyan for session rows
+			buf.write_string('  ')
+		}
+		// Truncate to terminal width to avoid wrap.
+		disp := if line.len > cols - 3 { line[..cols - 4] + '…' } else { line }
+		buf.write_string(disp)
+		buf.write_string(esc_reset)
+	}
+	buf.write_string(cursor_show())
+}
+
 // occupy when rendered. It's 1 + the number of \n in the text, plus
 // one row for the attachment badges when any attachments are pending
 // (P0.7). Soft-wrapping long single lines isn't counted (we accept
@@ -510,19 +548,25 @@ fn wrap_lines(text string, first_prefix string, rest_prefix string, width int) [
 // occupy 2 cells. This matches how terminals lay out text so the TUI's
 // cursor placement and wrapping line up with what's actually drawn.
 fn rune_width(r rune) int {
-	if (r >= 0x1100 && r <= 0x115F) || // Hangul Jamo
-		(r >= 0x2E80 && r <= 0x303E) || // CJK radicals, Kangxi radials
-		(r >= 0x3041 && r <= 0x33FF) || // Hiragana, Katakana, CJK symbols
-		(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
-		(r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
-		(r >= 0xA000 && r <= 0xA4CF) || // Yi syllables
-		(r >= 0xAC00 && r <= 0xD7A3) || // Hangul Syllables
-		(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility Ideographs
-		(r >= 0xFE30 && r <= 0xFE4F) || // CJK Compatibility Forms
-		(r >= 0xFF00 && r <= 0xFF60) || // Fullwidth Forms
-		(r >= 0xFFE0 && r <= 0xFFE6) || // Fullwidth signs
-		(r >= 0x1F300 && r <= 0x1FAFF) || // emoji & pictographs
-		(r >= 0x20000 && r <= 0x3FFFD) { // CJK Extension B and beyond
+	if (r >= 0x1100 && r <= 0x115F) || (r >= 0x2E80 && r <= 0x303E)
+		|| (r >= 0x3041 && r <= 0x33FF) || (r >= 0x3400 && r <= 0x4DBF)
+		|| (r >= 0x4E00 && r <= 0x9FFF) || (r >= 0xA000 && r <= 0xA4CF)
+		|| (r >= 0xAC00 && r <= 0xD7A3) || (r >= 0xF900 && r <= 0xFAFF)
+		|| (r >= 0xFE30 && r <= 0xFE4F) || (r >= 0xFF00 && r <= 0xFF60)
+		|| (r >= 0xFFE0 && r <= 0xFFE6) || (r >= 0x1F300 && r <= 0x1FAFF)
+		|| (r >= 0x20000 && r <= 0x3FFFD) // Hangul Jamo
+	// CJK radicals, Kangxi radials
+	// Hiragana, Katakana, CJK symbols
+	// CJK Extension A
+	// CJK Unified Ideographs
+	// Yi syllables
+	// Hangul Syllables
+	// CJK Compatibility Ideographs
+	// CJK Compatibility Forms
+	// Fullwidth Forms
+	// Fullwidth signs
+	// emoji & pictographs
+	  { // CJK Extension B and beyond
 		return 2
 	}
 	return 1

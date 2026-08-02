@@ -36,6 +36,44 @@ pub:
 	ok     bool
 	// Non-fatal error detail (e.g. launch failure, timeout message).
 	err string
+	// True when the run hit the wall-clock subagent timeout; the handoff is
+	// then partial and ok is false.
+	timed_out bool
+}
+
+// BackgroundAgentResult is the delivery of a finished background subagent.
+// The background goroutine pushes it onto the parent's bg_results_ch; the
+// parent's run loop drains it on a later turn and injects it into the
+// session as a <background-agent-result> user message so the model sees it.
+pub struct BackgroundAgentResult {
+pub:
+	agent_id     string
+	profile_name string
+	result       string
+	ok           bool
+	err          string
+	elapsed_ms   i64
+}
+
+// BackgroundTask is the live status entry for one background subagent,
+// surfaced by the TaskList tool. Written by the finishing goroutine under
+// the parent's bg_mutex; read by TaskListTool under the same lock.
+pub struct BackgroundTask {
+pub mut:
+	agent_id     string
+	profile_name string
+	status       string // 'running' | 'completed' | 'failed'
+	started_ms   i64
+	finished_ms  i64
+	elapsed_ms   i64
+	result       string
+	err          string
+}
+
+// new_subagent_id generates a fresh subagent id: timestamp-hex + random
+// suffix. Shared by foreground spawns, background launches, and swarm items.
+fn new_subagent_id() string {
+	return 'sub-${time.now().unix_milli().hex()}-${short_rand()}'
 }
 
 // spawn_subagent runs one subagent to completion and returns its handoff.
@@ -46,13 +84,27 @@ pub:
 // prompt: the full task brief for the subagent.
 // non_interactive: when true, approvals auto-pass (matches parent mode).
 fn spawn_subagent(mut parent Agent, profile_name string, prompt string, non_interactive bool) SubagentResult {
+	id := new_subagent_id()
+	mut sess := new_session(parent_cwd(parent))
+	sess.id = id
+	sess.append_user(prompt)
+	return run_subagent(mut parent, profile_name, mut sess, non_interactive)
+}
+
+// run_subagent executes one subagent against an existing Session and returns
+// its handoff. This is the shared engine behind foreground spawns, background
+// launches, swarm items, and resume: the caller prepares the session (fresh
+// with a prompt, or a loaded persisted session with an appended prompt) and
+// run_subagent builds the child agent, runs it, and persists the session so
+// it can later be resumed.
+fn run_subagent(mut parent Agent, profile_name string, mut sess Session, non_interactive bool) SubagentResult {
 	profiles := default_profiles()
 	mut profile := profiles['coder']
 	if p := profiles[profile_name] {
 		profile = p
 	}
 
-	id := 'sub-${time.now().unix_milli().hex()}-${short_rand()}'
+	id := sess.id
 
 	// Build the subagent's own agent from the parent's provider + model.
 	mut child := new_agent(parent.provider, profile.system)
@@ -64,6 +116,10 @@ fn spawn_subagent(mut parent Agent, profile_name string, prompt string, non_inte
 	child.non_interactive = non_interactive
 	child.context_window = parent.context_window
 	child.compact_threshold = parent.compact_threshold
+	// Enforce the wall-clock subagent timeout: run() checks deadline_ms at
+	// the top of every turn and stops making new turns once it passes, so a
+	// runaway subagent is bounded even when max_turns is generous.
+	child.deadline_ms = time.now().unix_milli() + subagent_timeout_ms
 
 	// Trim the tool registry to the profile's allow-list.
 	child.registry = filter_registry(parent.registry, profile.tools)
@@ -72,39 +128,40 @@ fn spawn_subagent(mut parent Agent, profile_name string, prompt string, non_inte
 	child_ref := &child
 	child.registry = rewire_agent_ref(mut child.registry, child_ref)
 
-	// Fresh session for the subagent (isolated context).
-	mut sess := new_session(parent_cwd(parent))
-	sess.append_user(prompt)
-
-	// explore subagents get a git-context block (best-effort).
-	mut child_prompt := prompt
-	if profile_name == 'explore' {
-		git_ctx := collect_git_context(parent_cwd(parent))
-		if git_ctx.len > 0 {
-			child_prompt = '${git_ctx}\n\n${prompt}'
-			sess.messages[0] = Message{ role: .user, content: child_prompt }
-		}
+	// Capture the task brief before the explore git-context prepend, so the
+	// SubagentStart hook sees the raw prompt (matches pre-refactor behavior).
+	mut task_prompt := ''
+	if u := sess.last_user() {
+		task_prompt = u.content
 	}
 
-	// Run the subagent loop (with a simple turn cap guard). We do not
-	// enforce a hard wall-clock timeout here — the parent's max_turns cap
-	// bounds the work, and V has no first-class cross-goroutine deadline
-	// we'd want to thread through; the upstream 30-min timeout is a
-	// Kubernetes-ism we approximate with max_turns.
+	// explore subagents get a git-context block (best-effort). Only prepend
+	// to a fresh single-message session — a resumed session already carries
+	// its own context and must not be re-prefixed.
+	if profile_name == 'explore' && sess.messages.len == 1 {
+		git_ctx := collect_git_context(parent_cwd(parent))
+		if git_ctx.len > 0 {
+			sess.messages[0] = Message{ role: .user, content: '${git_ctx}\n\n${task_prompt}' }
+		}
+	}
 
 	// ── SubagentStart hook (observation-only) ──
 	mut sa_input := map[string]string{}
 	sa_input['agent_name'] = profile.name
-	sa_input['prompt'] = prompt
+	sa_input['prompt'] = task_prompt
 	parent.hooks_engine().run_hook_for_event(.subagent_start, profile.name, sa_input)
 
-	res := child.run(mut sess) or {
-		// ── SubagentStop hook (success path only fires on success; on
-		// failure we still emit it as observation with the error) ──
+	child.run(mut sess) or {
+		// ── SubagentStop hook (failure path: emit as observation with the
+		// error) ──
 		mut sf_input := map[string]string{}
 		sf_input['agent_name'] = profile.name
 		sf_input['response'] = err.msg()
 		parent.hooks_engine().run_hook_for_event(.subagent_stop, profile.name, sf_input)
+		// Persist the session even on failure so the parent can resume it
+		// for debugging (best-effort).
+		sess.metadata['subagent_profile'] = profile.name
+		save_to(subagent_sessions_dir(), sess) or {}
 		return SubagentResult{
 			agent_id:     id
 			profile_name: profile.name
@@ -116,28 +173,133 @@ fn spawn_subagent(mut parent Agent, profile_name string, prompt string, non_inte
 	// Extract the final assistant text.
 	mut result := last_assistant_text(sess)
 
-	// Bounded expansion: if the handoff is too terse, give it one more
-	// turn to expand. Mirrors upstream SUMMARY_CONTINUATION_ATTEMPTS = 1.
+	// Wall-clock timeout check: if the deadline passed while running, stop
+	// here and hand back the partial result as a timeout rather than
+	// pretending the subagent finished.
+	timed_out := time.now().unix_milli() >= child.deadline_ms
+
+	// Bounded expansion: if the handoff is too terse, give it one more turn
+	// to expand. Mirrors upstream SUMMARY_CONTINUATION_ATTEMPTS = 1. Skipped
+	// once the deadline is already hit.
 	mut remaining := 1
-	for remaining > 0 && result.len < summary_min_length {
+	for !timed_out && remaining > 0 && result.len < summary_min_length {
 		remaining--
 		sess.append_user(summary_continuation_prompt)
 		_ = child.run(mut sess) or { break }
 		result = last_assistant_text(sess)
 	}
 
-	_ = res
+	// Persist the subagent session so it can be resumed later (best-effort;
+	// the file lives under <config_dir>/sessions/subagents/<id>.toml).
+	sess.metadata['subagent_profile'] = profile.name
+	save_to(subagent_sessions_dir(), sess) or {}
+
 	// ── SubagentStop hook (observation-only) ──
 	mut ss_input := map[string]string{}
 	ss_input['agent_name'] = profile.name
 	ss_input['response'] = result
 	parent.hooks_engine().run_hook_for_event(.subagent_stop, profile.name, ss_input)
 
+	if timed_out {
+		return SubagentResult{
+			agent_id:     id
+			profile_name: profile.name
+			result:       result
+			ok:           false
+			err:          'timed out after ${subagent_timeout_ms} ms'
+			timed_out:    true
+		}
+	}
+
 	return SubagentResult{
 		agent_id:     id
 		profile_name: profile.name
 		result:       result
 		ok:           true
+	}
+}
+
+// launch_background starts a subagent in a goroutine and returns immediately.
+// The result is delivered to the parent on a later turn: run() drains
+// bg_results_ch (see drain_background_results) and injects a
+// <background-agent-result> user message; the TaskList tool reads the live
+// status from bg_tasks.
+fn launch_background(mut parent Agent, profile_name string, mut sess Session, non_interactive bool) SubagentResult {
+	id := sess.id
+	parent.register_background_task(BackgroundTask{
+		agent_id:     id
+		profile_name: profile_name
+		status:       'running'
+		started_ms:   time.now().unix_milli()
+	})
+	go fn (mut parent Agent, profile_name string, mut sess Session, non_interactive bool) {
+		res := run_subagent(mut parent, profile_name, mut sess, non_interactive)
+		parent.finish_background_task(res)
+	}(mut parent, profile_name, mut sess, non_interactive)
+	return SubagentResult{
+		agent_id:     id
+		profile_name: profile_name
+		ok:           true
+		result:       'launched in background (status: running)'
+	}
+}
+
+// register_background_task records a background subagent as running. Called
+// on the parent's own goroutine before the background worker starts.
+pub fn (mut a Agent) register_background_task(task BackgroundTask) {
+	a.bg_mutex.lock()
+	a.bg_tasks[task.agent_id] = task
+	a.bg_mutex.unlock()
+}
+
+// finish_background_task marks a background task as completed/failed and
+// queues its result for the next drain. Called from the background goroutine:
+// it only touches bg_tasks under the mutex and pushes onto the channel, so it
+// is safe to run concurrently with the parent's loop.
+pub fn (mut a Agent) finish_background_task(res SubagentResult) {
+	a.bg_mutex.lock()
+	mut task := a.bg_tasks[res.agent_id] or {
+		BackgroundTask{
+			agent_id:     res.agent_id
+			profile_name: res.profile_name
+			started_ms:   time.now().unix_milli()
+		}
+	}
+	task.status = if res.ok { 'completed' } else { 'failed' }
+	task.finished_ms = time.now().unix_milli()
+	task.elapsed_ms = task.finished_ms - task.started_ms
+	task.result = res.result
+	task.err = res.err
+	a.bg_tasks[res.agent_id] = task
+	a.bg_mutex.unlock()
+	a.bg_results_ch <- BackgroundAgentResult{
+		agent_id:     res.agent_id
+		profile_name: res.profile_name
+		result:       res.result
+		ok:           res.ok
+		err:          res.err
+		elapsed_ms:   task.elapsed_ms
+	}
+}
+
+// drain_background_results collects finished background subagent results and
+// injects them into the parent session as <background-agent-result> user
+// messages, so the model sees them on its next turn. Non-blocking: the 1ms
+// select timeout is the V 0.5.x workaround used throughout this codebase.
+// run() calls this at the top of every turn.
+pub fn (mut a Agent) drain_background_results(mut sess Session) {
+	mut draining := true
+	for draining {
+		select {
+			res := <-a.bg_results_ch {
+				status := if res.ok { 'completed' } else { 'failed' }
+				body := if res.ok { res.result } else { res.err }
+				sess.append_user('<background-agent-result agent_id="${res.agent_id}" status="${status}" profile="${res.profile_name}" elapsed_ms="${res.elapsed_ms}">${body}</background-agent-result>')
+			}
+			1 * time.millisecond {
+				draining = false
+			}
+		}
 	}
 }
 
