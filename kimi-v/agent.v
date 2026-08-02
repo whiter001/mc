@@ -506,10 +506,15 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 						}
 					}
 					.finish {
+						// Usage may arrive on the finish event itself
+						// (Anthropic provider) or as a separate .usage event
+						// (OpenAI provider); prefer whichever is non-zero.
+						fin_input := if ev.input_tokens > 0 { ev.input_tokens } else { usage_input }
+						fin_output := if ev.output_tokens > 0 { ev.output_tokens } else { usage_output }
 						result.finish = FinishEvent{
 							reason:        ev.reason
-							input_tokens:  usage_input
-							output_tokens: usage_output
+							input_tokens:  fin_input
+							output_tokens: fin_output
 						}
 						saw_finish = true
 					}

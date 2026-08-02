@@ -74,7 +74,7 @@ pub fn (t TodoWriteTool) description() string {
 
 // parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t TodoWriteTool) parameters_schema() string {
-	return '{"type":"object","properties":{"todos":{"type":"array","description":"The complete list of todos (replaces any prior list)","items":{"type":"object","properties":{"content":{"type":"string","description":"Task description"},"status":{"type":"string","description":"pending | in_progress | completed"},"activeForm":{"type":"string","description":"Optional present-participle form, e.g. \"Fixing the bug\""}},"required":["content","status"]}}},"required":["todos"],"additionalProperties":false}'
+	return '{"type":"object","properties":{"todos":{"type":"array","description":"The complete list of todos (replaces any prior list)","items":{"type":"object","properties":{"content":{"type":"string","description":"Task description"},"status":{"type":"string","description":"pending | in_progress | completed"},"activeForm":{"type":"string","description":"Optional present-participle form, e.g. \\"Fixing the bug\\""}},"required":["content","status"]}}},"required":["todos"],"additionalProperties":false}'
 }
 
 // TodoRaw is one todo entry as received from the model.

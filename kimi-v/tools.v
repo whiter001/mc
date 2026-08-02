@@ -441,7 +441,7 @@ pub fn (t GlobTool) description() string {
 
 // parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t GlobTool) parameters_schema() string {
-	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern, e.g. "**/*.v" or "/abs/path/**/*.md""}},"required":["pattern"],"additionalProperties":false}'
+	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern, e.g. \\"**/*.v\\" or \\"/abs/path/**/*.md\\""}},"required":["pattern"],"additionalProperties":false}'
 }
 
 // execute resolves the pattern and returns matching file paths.
@@ -578,7 +578,7 @@ pub fn (t GrepTool) description() string {
 
 // parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t GrepTool) parameters_schema() string {
-	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression pattern to search for (PCRE-ish via ripgrep, or V regex fallback)"},"path":{"type":"string","description":"Directory to search in (defaults to session cwd)"},"include":{"type":"string","description":"Optional glob filter for file names, e.g. "*.v""},"i":{"type":"boolean","description":"Optional case-insensitive match (default false)"}},"required":["pattern"],"additionalProperties":false}'
+	return '{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression pattern to search for (PCRE-ish via ripgrep, or V regex fallback)"},"path":{"type":"string","description":"Directory to search in (defaults to session cwd)"},"include":{"type":"string","description":"Optional glob filter for file names, e.g. \\"*.v\\""},"i":{"type":"boolean","description":"Optional case-insensitive match (default false)"}},"required":["pattern"],"additionalProperties":false}'
 }
 
 // execute runs ripgrep if available, otherwise falls back to a built-in walker.

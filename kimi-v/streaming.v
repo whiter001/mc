@@ -31,6 +31,7 @@ import net
 import net.openssl { SSLConn, SSLConnectConfig, new_ssl_conn }
 import json
 import strings
+import strconv
 import time
 
 // ---------- URL parsing ---------------------------------------------------
@@ -152,6 +153,34 @@ fn (mut r HttpStreamReader) close() {
 	r.conn.close() or {}
 }
 
+// read_bytes reads exactly n bytes (or fewer at EOF), honoring the carry buffer.
+fn (mut r HttpStreamReader) read_bytes(n int) ![]u8 {
+	mut acc := []u8{cap: n}
+	for acc.len < n && r.carry.len > 0 {
+		acc << r.carry[0]
+		r.carry = r.carry[1..]
+	}
+	mut buf := []u8{len: 4096}
+	for acc.len < n && !r.eof {
+		m := r.conn.read(mut buf)!
+		if m == 0 {
+			r.eof = true
+			break
+		}
+		remaining := n - acc.len
+		if m <= remaining {
+			acc << buf[..m]
+		} else {
+			acc << buf[..remaining]
+			r.carry << buf[remaining..m]
+		}
+	}
+	if acc.len == 0 {
+		return error('eof')
+	}
+	return acc
+}
+
 // ---------- HTTPS reader (via OpenSSL) -----------------------------------
 //
 // `net.openssl` is a thin wrapper around libssl/libcrypto. macOS systems
@@ -223,6 +252,34 @@ fn (mut r HttpsStreamReader) close() {
 	r.ssl.shutdown() or {}
 }
 
+// read_bytes reads exactly n bytes (or fewer at EOF), honoring the carry buffer.
+fn (mut r HttpsStreamReader) read_bytes(n int) ![]u8 {
+	mut acc := []u8{cap: n}
+	for acc.len < n && r.carry.len > 0 {
+		acc << r.carry[0]
+		r.carry = r.carry[1..]
+	}
+	mut buf := []u8{len: 4096}
+	for acc.len < n && !r.eof {
+		m := r.ssl.read(mut buf)!
+		if m == 0 {
+			r.eof = true
+			break
+		}
+		remaining := n - acc.len
+		if m <= remaining {
+			acc << buf[..m]
+		} else {
+			acc << buf[..remaining]
+			r.carry << buf[remaining..m]
+		}
+	}
+	if acc.len == 0 {
+		return error('eof')
+	}
+	return acc
+}
+
 // ---------- HTTP request helpers -----------------------------------------
 
 // http_post_streaming dials the URL and returns a StreamReader for the response body.
@@ -277,12 +334,47 @@ fn http_post_streaming_plain(url ParsedUrl, body string, headers map[string]stri
 	}
 	status_code := parts[1].int()
 	if status_code < 200 || status_code >= 300 {
-		// Drain error body
-		mut body_acc := strings.Builder{}
+		// Skip response headers first, then drain the error body.
+		mut content_length := -1
+		mut chunked := false
 		for {
-			l := reader.read_line() or { break }
-			body_acc.write_string(l)
-			body_acc.write_string('\n')
+			line := reader.read_line() or { break }
+			if line.len == 0 {
+				break
+			}
+			lower := line.to_lower()
+			if lower.starts_with('content-length:') {
+				content_length = lower.all_after(':').trim_space().int()
+			} else if lower.contains('transfer-encoding:') && lower.contains('chunked') {
+				chunked = true
+			}
+		}
+		mut body_acc := strings.Builder{}
+		if chunked {
+			// Read chunk size lines + chunk data until the zero chunk.
+			for {
+				size_line := reader.read_line() or { break }
+				hex := size_line.trim_space()
+				if hex.len == 0 {
+					continue
+				}
+				size := strconv.parse_int(hex.all_before(';'), 16, 64) or { break }
+				if size <= 0 {
+					break
+				}
+				chunk := reader.read_bytes(int(size)) or { break }
+				body_acc.write_string(chunk.bytestr())
+				reader.read_line() or { break } // trailing CRLF
+			}
+		} else if content_length > 0 {
+			data := reader.read_bytes(content_length) or { []u8{} }
+			body_acc.write_string(data.bytestr())
+		} else {
+			for {
+				l := reader.read_line() or { break }
+				body_acc.write_string(l)
+				body_acc.write_string('\n')
+			}
 		}
 		reader.close()
 		return IError(ProviderError{
@@ -349,11 +441,28 @@ fn https_post_streaming(url ParsedUrl, body string, headers map[string]string) !
 	}
 	status_code := parts[1].int()
 	if status_code < 200 || status_code >= 300 {
-		mut body_acc := strings.Builder{}
+		// Skip response headers, then read the error body by Content-Length.
+		mut content_length := -1
 		for {
-			l := reader.read_line() or { break }
-			body_acc.write_string(l)
-			body_acc.write_string('\n')
+			line := reader.read_line() or { break }
+			if line.len == 0 {
+				break
+			}
+			lower := line.to_lower()
+			if lower.starts_with('content-length:') {
+				content_length = lower.all_after(':').trim_space().int()
+			}
+		}
+		mut body_acc := strings.Builder{}
+		if content_length > 0 {
+			data := reader.read_bytes(content_length) or { []u8{} }
+			body_acc.write_string(data.bytestr())
+		} else {
+			for {
+				l := reader.read_line() or { break }
+				body_acc.write_string(l)
+				body_acc.write_string('\n')
+			}
 		}
 		reader.close()
 		return IError(ProviderError{

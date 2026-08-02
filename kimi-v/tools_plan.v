@@ -90,7 +90,7 @@ pub fn (t ExitPlanModeTool) description() string {
 
 // parameters_schema returns the JSON schema describing the tool's arguments.
 pub fn (t ExitPlanModeTool) parameters_schema() string {
-	return '{"type":"object","properties":{"options":{"type":"array","description":"When the plan contains multiple alternative approaches, list 2-3 of them so the user can choose which to execute. Each: {label: short name (1-8 words, append (Recommended) if recommended), description: trade-offs}. Do not use the reserved labels Approve/Reject/Revise/Reject and Exit.","items":{"type":"object","properties":{"label":{"type":"string","description":"Short name for this approach"},"description":{"type":"string","description":"Brief summary of this approach and its trade-offs"}},"required":["label","description"],"additionalProperties":false},"minItems":1,"maxItems":3}}},"required":[],"additionalProperties":false}'
+	return '{"type":"object","properties":{"options":{"type":"array","description":"When the plan contains multiple alternative approaches, list 2-3 of them so the user can choose which to execute. Each: {label: short name (1-8 words, append (Recommended) if recommended), description: trade-offs}. Do not use the reserved labels Approve/Reject/Revise/Reject and Exit.","items":{"type":"object","properties":{"label":{"type":"string","description":"Short name for this approach"},"description":{"type":"string","description":"Brief summary of this approach and its trade-offs"}},"required":["label","description"],"additionalProperties":false},"minItems":1,"maxItems":3}},"required":[],"additionalProperties":false}'
 }
 
 // exit_plan_args is the parsed input for ExitPlanMode. `options` is optional.

@@ -30,6 +30,7 @@
 module main
 
 import json
+import os
 import strings
 import time
 
@@ -442,6 +443,9 @@ pub fn (p AnthropicProvider) chat(req ChatRequest, out chan ChatEvent, cancel_ch
 // chat_anthropic_streaming issues a streaming request and feeds SSE events to out.
 fn chat_anthropic_streaming(p AnthropicProvider, url ParsedUrl, req ChatRequest, out chan ChatEvent, cancel_ch chan int) ! {
 	body := build_anthropic_body(req)
+	if os.getenv('KIMI_DEBUG_DUMP_REQUEST') != '' {
+		os.write_file(os.getenv('KIMI_DEBUG_DUMP_REQUEST'), body) or {}
+	}
 	mut reader := http_post_streaming(url, body, {
 		'x-api-key':         p.api_key
 		'anthropic-version': '2023-06-01'
