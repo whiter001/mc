@@ -14,7 +14,7 @@ import toml
 pub struct Config {
 pub mut:
 	// ---- Provider ----
-	provider string = 'openai-compat' // 'openai-compat' (default) | 'anthropic'
+	provider string = 'openai-compat' // 'openai-compat' (default) | 'anthropic' | 'openai-responses'
 	api_base string = 'https://api.openai.com'
 	api_key  string
 	model    string
@@ -32,7 +32,14 @@ pub mut:
 	// connection failures). Parity with kimi-code's
 	// `[loop_control] max_retries_per_step`. Overridable via config.toml or
 	// the KIMI_LOOP_MAX_RETRIES_PER_STEP env var.
-	max_retries_per_step int = 3
+	max_retries_per_step int = 10
+
+	// ---- Compaction ----
+	// Model context window (tokens) and the fraction of it above which the
+	// agent triggers compaction. Populated from config.toml; the agent
+	// defaults (128k / 0.6, see compaction.v) are used when unset.
+	context_window    int = default_context_window
+	compact_threshold f32 = default_compact_threshold
 
 	// ---- Permissions ----
 	// Names of tools that always require user approval before running.
@@ -77,8 +84,29 @@ pub mut:
 	// populated from config.toml. Empty means "no MCP servers".
 	mcp_servers []McpServerConfig
 
+	// ---- Web search ----
+	// Backend provider for the web_search tool (parity with kimi-code's
+	// MoonshotWebSearchProvider). 'duckduckgo' (default) is key-free and
+	// scrapes the HTML endpoint; 'moonshot' calls the hosted search API and
+	// needs an api_key. Populated from the [web_search] table and the
+	// KIMI_WEB_SEARCH_* env vars.
+	web_search WebSearchConfig
+
 	// ---- Misc ----
 	cwd string
+}
+
+// WebSearchConfig configures the web_search tool's backend provider.
+pub struct WebSearchConfig {
+pub mut:
+	// 'duckduckgo' (default) | 'moonshot'. Unknown values are rejected
+	// with a warning and fall back to 'duckduckgo' (fail-open).
+	provider string = 'duckduckgo'
+	// Endpoint for the 'moonshot' provider (POST, JSON body).
+	base_url string = 'https://api.moonshot.cn/v1/search'
+	// Bearer key for the 'moonshot' provider. When empty, the tool falls
+	// back to the main provider api_key.
+	api_key string
 }
 
 // default_config returns the built-in default configuration.
@@ -312,6 +340,28 @@ pub fn apply_toml(mut cfg Config, raw string) {
 		}
 		cfg.mcp_servers = servers
 	}
+
+	// Web search: [web_search] nested table. Unknown provider values are
+	// rejected with a warning and fall back to the default (fail-open), so
+	// a typo can never break the tool.
+	wsp := doc.value('web_search.provider')
+	if wsp !is toml.Null { cfg.web_search.provider = normalize_web_search_provider(wsp.string()) }
+	wsb := doc.value('web_search.base_url')
+	if wsb !is toml.Null { cfg.web_search.base_url = wsb.string() }
+	wsk := doc.value('web_search.api_key')
+	if wsk !is toml.Null { cfg.web_search.api_key = wsk.string() }
+}
+
+// normalize_web_search_provider maps a configured web_search provider onto
+// the supported set. Anything unknown logs a warning and falls back to the
+// key-free default 'duckduckgo' — fail-open, matching the rest of the
+// loader.
+fn normalize_web_search_provider(raw string) string {
+	if raw == 'duckduckgo' || raw == 'moonshot' {
+		return raw
+	}
+	eprintln('warning: unknown web_search provider "${raw}"; falling back to "duckduckgo"')
+	return 'duckduckgo'
 }
 
 // apply_env overrides cfg with values from KIMI_* environment variables.
@@ -348,6 +398,13 @@ pub fn apply_env(mut cfg Config) {
 	if v9.len > 0 && v9.int() > 0 {
 		cfg.max_retries_per_step = v9.int()
 	}
+	// Web search provider overrides (same validation as the toml path).
+	ws1 := os.getenv('KIMI_WEB_SEARCH_PROVIDER')
+	if ws1.len > 0 { cfg.web_search.provider = normalize_web_search_provider(ws1) }
+	ws2 := os.getenv('KIMI_WEB_SEARCH_BASE_URL')
+	if ws2.len > 0 { cfg.web_search.base_url = ws2 }
+	ws3 := os.getenv('KIMI_WEB_SEARCH_API_KEY')
+	if ws3.len > 0 { cfg.web_search.api_key = ws3 }
 }
 
 // apply_cli copies non-empty fields from cli into cfg.
@@ -382,8 +439,8 @@ fn find_project_config(start string) string {
 
 // validate checks that the configuration has the minimum required fields.
 pub fn (c Config) validate() ! {
-	if c.provider != 'openai-compat' && c.provider != 'anthropic' {
-		return error('unknown provider "${c.provider}"; supported providers: openai-compat, anthropic')
+	if c.provider != 'openai-compat' && c.provider != 'anthropic' && c.provider != 'openai-responses' {
+		return error('unknown provider "${c.provider}"; supported providers: openai-compat, anthropic, openai-responses')
 	}
 	if c.api_key.len == 0 {
 		return error('api_key is not set; pass --api-key, set KIMI_API_KEY, run `kimi login`, or run `kimi login --oauth`')

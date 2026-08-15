@@ -43,6 +43,7 @@ mut:
 	show_help        bool
 	show_version     bool
 	oauth_login      bool
+	plugin_sub       string
 }
 
 // main is the CLI entry point. It parses arguments, dispatches to the
@@ -108,6 +109,18 @@ fn main() {
 				eprintln('error: ${err.msg()}')
 				exit(1)
 			}
+		}
+		'doctor' {
+			// Offline configuration validation (no network).
+			exit(run_doctor())
+		}
+		'plugin' {
+			// Local plugins (issue #13): `kimi plugin list`.
+			run_plugin_cmd(cli)
+		}
+		'upgrade' {
+			// Self-update from GitHub Releases (issue #15).
+			exit(run_upgrade(version))
 		}
 		else {
 			eprintln('unknown command: ${cli.cmd}')
@@ -240,10 +253,28 @@ fn parse_args(args []string) !Cli {
 			'sessions' {
 				cli.cmd = 'sessions'
 			}
-			'acp' {
-				cli.cmd = 'acp'
+		'acp' {
+			cli.cmd = 'acp'
+		}
+		'doctor' {
+			cli.cmd = 'doctor'
+		}
+		'plugin' {
+			cli.cmd = 'plugin'
+			// Optional subcommand; the next non-flag arg is consumed.
+			if i + 1 < args.len && !args[i + 1].starts_with('-') {
+				i++
+				sub := args[i]
+				if sub != 'list' {
+					return error('unknown plugin subcommand: ${sub}')
+				}
+				cli.plugin_sub = sub
 			}
-			else {
+		}
+		'upgrade' {
+			cli.cmd = 'upgrade'
+		}
+		else {
 				return error('unknown argument: ${a}')
 			}
 		}
@@ -270,6 +301,13 @@ fn parse_args(args []string) !Cli {
 fn make_provider(cfg Config) Provider {
 	if cfg.provider == 'anthropic' {
 		return AnthropicProvider{
+			model:    cfg.model
+			api_base: cfg.api_base
+			api_key:  cfg.api_key
+		}
+	}
+	if cfg.provider == 'openai-responses' {
+		return OpenAIResponsesProvider{
 			model:    cfg.model
 			api_base: cfg.api_base
 			api_key:  cfg.api_key
@@ -329,7 +367,7 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	mut a := new_agent(provider, system)
 	a.max_turns = cfg.max_turns
 	a.max_retries_per_step = cfg.max_retries_per_step
-	a.registry = default_registry(mut a, cfg.cwd, cfg.mcp_servers)
+	a.registry = default_registry(mut a, cfg.cwd, cfg.mcp_servers, cfg.web_search)
 	// Tear down MCP connections on any exit path (best-effort).
 	defer {
 		close_all_mcp_servers(mut a.mcp_clients)
@@ -385,7 +423,7 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 			// upstream behaviour; thinking isn't useful to scripts and
 			// would bloat the log).
 		}
-		a.on_tool = fn (name string, args string) {
+		a.on_tool = fn (_ string, name string, args string) {
 			emit_jsonl_event('tool_call', {
 				'name': name
 				'args': args
@@ -409,6 +447,12 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 		log.info('new session')
 		new_session(cfg.cwd)
 	}
+	// Restore a persisted goal onto the agent (active goals come back
+	// paused — see restore_goal_from_metadata). No-op for fresh sessions.
+	restore_goal_from_metadata(mut a, sess)
+	// Restore the session's cron table. Headless mode runs no scheduler,
+	// but the Cron tools stay available (and persist eagerly on mutation).
+	restore_cron_tasks(mut a, sess)
 	a.session_id = sess.id
 	// Re-wire the hook engine with the now-known session id.
 	mut he2 := new_hook_engine(cfg.cwd, sess.id)
@@ -427,6 +471,7 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	if upb != none {
 		log.warn('prompt blocked by UserPromptSubmit hook: ${upb}')
 		eprintln('[blocked] ${upb}')
+		stash_goal_metadata(mut sess, a.goal)
 		save(sess) or {}
 		return
 	}
@@ -440,6 +485,7 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 		sf_input['error'] = err.msg()
 		he2.run_hook_for_event(.stop_failure, err.msg(), sf_input)
 		log.error('agent loop failed: ${err.msg()}')
+		stash_goal_metadata(mut sess, a.goal)
 		save(sess) or { log.warn('session save failed: ${err.msg()}') }
 		return error(err.msg())
 	}
@@ -468,6 +514,7 @@ fn run_prompt(cli Cli, mut log Logger) ! {
 	}
 	log.info('finished in ${elapsed.milliseconds()}ms, turns=${result.turns}, tokens=${result.usage.input_tokens}+${result.usage.output_tokens}')
 
+	stash_goal_metadata(mut sess, a.goal)
 	save(sess) or { log.warn('session save failed: ${err.msg()}') }
 }
 
@@ -635,6 +682,30 @@ fn run_sessions() ! {
 	}
 	println('To continue a session:')
 	println('  kimi --continue <id> -p "your next task"')
+}
+
+// run_plugin_cmd lists locally installed plugins (issue #13, option A).
+// Only `list` is supported; `kimi plugin` with no subcommand defaults to it.
+fn run_plugin_cmd(cli Cli) {
+	sub := if cli.plugin_sub.len > 0 { cli.plugin_sub } else { 'list' }
+	if sub != 'list' {
+		eprintln('error: unknown plugin subcommand: ${sub}')
+		exit(2)
+	}
+	plugins := discover_plugins()
+	if plugins.len == 0 {
+		println('No plugins installed.')
+		println('Plugins live in ${os.join_path(config_dir(), 'plugins')}')
+		return
+	}
+	for p in plugins {
+		println('${p.name}${if p.version.len > 0 { ' v' + p.version } else { '' }}')
+		if p.description.len > 0 {
+			println('  description: ${p.description}')
+		}
+		println('  skills: ${p.skills_dirs.len}')
+		println('  root: ${p.root}')
+	}
 }
 
 // run_export packages a session into a ZIP file for sharing, archiving,
@@ -851,6 +922,9 @@ fn print_help() {
 	println('    kimi logout                         remove saved OAuth credentials')
 	println('    kimi version                        print version')
 	println('    kimi acp                            run an ACP v1 stdio server')
+	println('    kimi doctor                         offline config validation')
+	println('    kimi plugin [list]                  list locally installed plugins')
+	println('    kimi upgrade                        self-update from GitHub Releases')
 	println('    kimi help                           this message')
 	println('')
 	println('OPTIONS:')

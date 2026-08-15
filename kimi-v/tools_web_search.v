@@ -1,10 +1,11 @@
-// tools_web_search.v — web search via DuckDuckGo's HTML endpoint.
+// tools_web_search.v — web search via a configurable provider.
 //
-// Phase 2 (parity with upstream `WebSearch` tool). Unlike web_fetch we
-// don't need a real API key: DuckDuckGo's html.duckduckgo.com endpoint
-// returns a results page we can scrape. We reuse the HTML→text pipeline
-// from tools_web_fetch.v (same `main` module) and then pick out the
-// result links + snippets with a tiny tag-aware extractor.
+// The default provider is DuckDuckGo's html.duckduckgo.com endpoint: key-free,
+// returns a results page we scrape with the same HTML→text pipeline as
+// web_fetch (pick out result links + snippets with a tiny tag-aware
+// extractor). The "moonshot" provider instead POSTs JSON to a hosted search
+// API (Bearer auth) and parses the search_results array. Both providers
+// share the same numbered-list output format.
 
 module main
 
@@ -16,10 +17,12 @@ import strings
 // web_search
 // =============================================================================
 
-// WebSearchTool searches the web via DuckDuckGo and returns result summaries.
+// WebSearchTool searches the web and returns result summaries. The backend
+// is chosen by cfg.provider: 'duckduckgo' (default, key-free HTML scrape)
+// or 'moonshot' (hosted search API, needs an API key).
 pub struct WebSearchTool {
 pub:
-	// Reserved for future: region, safe-search, custom UA.
+	cfg WebSearchConfig
 }
 
 // name returns the tool identifier used in LLM tool calls.
@@ -29,10 +32,10 @@ pub fn (t WebSearchTool) name() string {
 
 // description returns the human-readable description shown to the LLM.
 pub fn (t WebSearchTool) description() string {
-	return 'Search the web via DuckDuckGo and return a numbered list of results ' +
-		'(title, URL, snippet). Use when you need up-to-date information, docs, or ' +
-		'links the user might want to open. For fetching a specific page\'s full ' +
-		'content, prefer web_fetch.'
+	return 'Search the web via the configured search provider and return a ' +
+		'numbered list of results (title, URL, snippet). Use when you need ' +
+		'up-to-date information, docs, or links the user might want to open. ' +
+		'For fetching a specific page\'s full content, prefer web_fetch.'
 }
 
 // parameters_schema returns the JSON Schema describing the tool's arguments.
@@ -42,7 +45,7 @@ pub fn (t WebSearchTool) parameters_schema() string {
 		'"required":["query"],"additionalProperties":false}'
 }
 
-// execute runs the DuckDuckGo search and formats the results as a numbered list.
+// execute validates the args then dispatches to the configured provider.
 pub fn (t WebSearchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	args_map := json2.decode[map[string]string](args.raw) or {
 		return ToolResult{
@@ -62,6 +65,36 @@ pub fn (t WebSearchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 		max_results = 8
 	}
 
+	match t.cfg.provider {
+		'moonshot' {
+			return t.moonshot_search(query, max_results, ctx)
+		}
+		else {
+			// 'duckduckgo' (and any unrecognized value, which config
+			// loading already normalized away).
+			return search_duckduckgo(query, max_results)
+		}
+	}
+}
+
+// format_search_results renders results as a numbered list. Shared by every
+// provider so the output format is identical regardless of backend.
+fn format_search_results(results []SearchResult) string {
+	mut out := strings.new_builder(1024)
+	for i, r in results {
+		out.write_string('${i + 1}. ${r.title}\n')
+		out.write_string('   ${r.url}\n')
+		if r.snippet.len > 0 {
+			out.write_string('   ${r.snippet}\n')
+		}
+		out.write_string('\n')
+	}
+	return out.str().trim_space()
+}
+
+// search_duckduckgo runs the default key-free search: POST a form to
+// DuckDuckGo's HTML endpoint and scrape the results page.
+fn search_duckduckgo(query string, max_results int) ToolResult {
 	// Build the DuckDuckGo HTML request. We POST a form so long queries
 	// survive; the endpoint returns a results page.
 	header := http.new_header(
@@ -95,23 +128,102 @@ pub fn (t WebSearchTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 			content: '(no results found for "${query}")'
 		}
 	}
+	return ToolResult{ content: format_search_results(results) }
+}
 
-	mut out := strings.new_builder(1024)
-	for i, r in results {
-		out.write_string('${i + 1}. ${r.title}\n')
-		out.write_string('   ${r.url}\n')
-		if r.snippet.len > 0 {
-			out.write_string('   ${r.snippet}\n')
+// moonshot_search queries the Moonshot hosted search API (POST
+// {base_url}, JSON body {"text_query": query}, Bearer auth) and formats
+// the search_results array with the shared numbered-list format.
+fn (t WebSearchTool) moonshot_search(query string, max_results int, ctx ToolContext) ToolResult {
+	// Prefer the dedicated web_search.api_key; fall back to the main
+	// provider key (typically the same Moonshot account) when unset.
+	mut api_key := t.cfg.api_key
+	if api_key.len == 0 {
+		if ag := ctx.agent {
+			api_key = ag.provider.api_key
 		}
-		out.write_string('\n')
 	}
-	return ToolResult{ content: out.str().trim_space() }
+	if api_key.len == 0 {
+		return ToolResult{
+			content:  'web_search provider "moonshot" requires an API key: set [web_search] api_key in config.toml or KIMI_WEB_SEARCH_API_KEY'
+			is_error: true
+		}
+	}
+
+	header := http.new_header(
+		http.HeaderConfig{ key: .user_agent, value: 'kimi-v/0.1 (+https://github.com/whiter001/mc)' },
+		http.HeaderConfig{ key: .accept, value: 'application/json' },
+		http.HeaderConfig{ key: .content_type, value: 'application/json' },
+		http.HeaderConfig{ key: .authorization, value: 'Bearer ${api_key}' },
+	)
+
+	resp := http.fetch(http.FetchConfig{
+		url:    t.cfg.base_url
+		method: .post
+		header: header
+		data:   '{"text_query":${json2.encode(query)}}'
+	}) or {
+		return ToolResult{
+			content:  'search request failed: ${err.msg()}'
+			is_error: true
+		}
+	}
+	if resp.status_code !in [200, 201, 202, 203, 204] {
+		return ToolResult{
+			content:  'search failed: HTTP ${resp.status_code}'
+			is_error: true
+		}
+	}
+
+	results := parse_moonshot_results(resp.body, max_results)
+	if results.len == 0 {
+		return ToolResult{
+			content: '(no results found for "${query}")'
+		}
+	}
+	return ToolResult{ content: format_search_results(results) }
 }
 
 struct SearchResult {
 	title   string
 	url     string
 	snippet string
+}
+
+// MoonshotSearchResult is one entry of the hosted search API's
+// search_results array. Extra response fields (site_name, date, icon, ...)
+// are simply ignored by json2.
+struct MoonshotSearchResult {
+	title   string
+	url     string
+	snippet string
+}
+
+// MoonshotSearchResponse is the top-level hosted search response shape.
+struct MoonshotSearchResponse {
+	search_results []MoonshotSearchResult
+}
+
+// parse_moonshot_results decodes a Moonshot search response and returns up
+// to max_results entries, ordered as returned. Malformed JSON yields an
+// empty list (the caller reports "no results"), mirroring the empty-result
+// handling of the DDG path.
+fn parse_moonshot_results(json_str string, max_results int) []SearchResult {
+	resp := json2.decode[MoonshotSearchResponse](json_str) or {
+		return []SearchResult{}
+	}
+	mut results := []SearchResult{cap: resp.search_results.len}
+	for r in resp.search_results {
+		if results.len >= max_results {
+			break
+		}
+		results << SearchResult{
+			title:   r.title
+			url:     r.url
+			snippet: r.snippet
+		}
+	}
+	return results
 }
 
 // parse_ddg_results extracts results from DuckDuckGo's HTML. Each result is

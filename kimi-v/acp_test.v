@@ -35,6 +35,33 @@ struct AcpTestChunkContent {
 	text string
 }
 
+// agent_thought_chunk 载荷（复用 AcpTestChunkContent）
+struct AcpTestThought {
+	session_id string @[json: 'sessionId']
+	update     AcpTestThoughtUpdate
+}
+
+struct AcpTestThoughtUpdate {
+	session_update string @[json: 'sessionUpdate']
+	message_id     string @[json: 'messageId']
+	content        AcpTestChunkContent
+}
+
+// tool_call / tool_call_update 载荷（tool_call_update 只填 sessionUpdate /
+// toolCallId / status，title/kind 缺失时按默认值解码）
+struct AcpTestToolCall {
+	session_id string @[json: 'sessionId']
+	update     AcpTestToolCallUpdate
+}
+
+struct AcpTestToolCallUpdate {
+	session_update string @[json: 'sessionUpdate']
+	tool_call_id   string @[json: 'toolCallId']
+	title          string
+	kind           string
+	status         string
+}
+
 // ---- acp_build_result ----
 
 fn test_acp_build_result() {
@@ -86,6 +113,98 @@ fn test_acp_chunk_update() {
 	assert line.contains('\\"')
 	assert line.contains('\\n')
 	assert line.contains('\\\\')
+}
+
+// ---- acp_thought_chunk_update ----
+
+fn test_acp_thought_chunk_update() {
+	text := 'reasoning "deep"\nstep\\two'
+	line := acp_thought_chunk_update('s-1', 'm-2', text)
+	dec := json2.decode[AcpTestThought](line) or {
+		assert false, 'invalid JSON: ${err.msg()}'
+		return
+	}
+	assert dec.session_id == 's-1'
+	assert dec.update.session_update == 'agent_thought_chunk'
+	assert dec.update.message_id == 'm-2'
+	assert dec.update.content.typ == 'text'
+	assert dec.update.content.text == text
+	assert line.contains('\\"')
+	assert line.contains('\\n')
+	assert line.contains('\\\\')
+}
+
+// ---- acp_tool_call_update ----
+
+fn test_acp_tool_call_update() {
+	line := acp_tool_call_update('s-1', 'call-9', 'bash', 'execute')
+	dec := json2.decode[AcpTestToolCall](line) or {
+		assert false, 'invalid JSON: ${err.msg()}'
+		return
+	}
+	assert dec.session_id == 's-1'
+	assert dec.update.session_update == 'tool_call'
+	assert dec.update.tool_call_id == 'call-9'
+	assert dec.update.title == 'bash'
+	assert dec.update.kind == 'execute'
+	assert dec.update.status == 'in_progress'
+	// 含特殊字符的 id/title 必须正确 JSON 转义，往返不变
+	raw := 'a"b\nc\\d'
+	esc_line := acp_tool_call_update('s-1', raw, raw, 'other')
+	dec2 := json2.decode[AcpTestToolCall](esc_line) or {
+		assert false, 'invalid JSON: ${err.msg()}'
+		return
+	}
+	assert dec2.update.tool_call_id == raw
+	assert dec2.update.title == raw
+	assert esc_line.contains('\\"')
+	assert esc_line.contains('\\n')
+	assert esc_line.contains('\\\\')
+}
+
+// ---- acp_tool_done_update ----
+
+fn test_acp_tool_done_update() {
+	line := acp_tool_done_update('s-1', 'call-9', 'completed')
+	dec := json2.decode[AcpTestToolCall](line) or {
+		assert false, 'invalid JSON: ${err.msg()}'
+		return
+	}
+	assert dec.session_id == 's-1'
+	assert dec.update.session_update == 'tool_call_update'
+	assert dec.update.tool_call_id == 'call-9'
+	assert dec.update.status == 'completed'
+	// failed 变体
+	line_f := acp_tool_done_update('s-1', 'call-9', 'failed')
+	dec_f := json2.decode[AcpTestToolCall](line_f) or {
+		assert false, 'invalid JSON: ${err.msg()}'
+		return
+	}
+	assert dec_f.update.status == 'failed'
+}
+
+// ---- acp_tool_kind 映射表 ----
+
+fn test_acp_tool_kind() {
+	assert acp_tool_kind('bash') == 'execute'
+	assert acp_tool_kind('write_file') == 'edit'
+	assert acp_tool_kind('edit_file') == 'edit'
+	assert acp_tool_kind('read_file') == 'read'
+	assert acp_tool_kind('grep') == 'search'
+	assert acp_tool_kind('glob') == 'search'
+	assert acp_tool_kind('web_fetch') == 'fetch'
+	assert acp_tool_kind('web_search') == 'fetch'
+	// 未识别工具 → other
+	assert acp_tool_kind('TodoWrite') == 'other'
+	assert acp_tool_kind('Agent') == 'other'
+	assert acp_tool_kind('') == 'other'
+}
+
+// ---- acp_tool_done_status ----
+
+fn test_acp_tool_done_status() {
+	assert acp_tool_done_status(false) == 'completed'
+	assert acp_tool_done_status(true) == 'failed'
 }
 
 // ---- acp_stop_reason ----

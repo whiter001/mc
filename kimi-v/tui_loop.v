@@ -45,6 +45,9 @@ pub enum StatusKind {
 	plan_mode        // plan-mode state change (enter/exit) — carries text
 	compacted        // manual /compact completed — carries result text
 	session_switched // runner switched to another session — carries session_id
+	goal             // goal state change — carries goal_summary / goal_detail
+	undone           // /undo or /undo list completed — carries result text
+	reloaded         // /reload completed — carries result text
 }
 
 // PlanControl is a control message from the TUI (e.g. the `/plan` slash
@@ -53,6 +56,41 @@ pub enum StatusKind {
 pub struct PlanControl {
 pub:
 	kind string // 'enter' (enter plan mode) | 'exit' (exit plan mode)
+}
+
+// GoalControl is a control message from the TUI (the `/goal` slash
+// command) to the agent runner, which owns the live agent goal state.
+pub struct GoalControl {
+pub:
+	kind string // 'pause' | 'resume' | 'cancel'
+}
+
+// UndoControl is a control message from the TUI (the `/undo` slash
+// command) to the agent runner, which owns the live Agent and its
+// per-session checkpoint store.
+pub struct UndoControl {
+pub:
+	kind string // 'undo' (revert newest checkpoint) | 'list' (show recent)
+}
+
+// ReloadControl is a control message from the TUI (the `/reload` slash
+// command) to the agent runner, which owns the live Agent. It carries the
+// config fields that can be hot-applied without rebuilding the provider:
+// risky_tools / permission_rules / hooks / max_turns / max_retries_per_step
+// / compact_threshold / context_window / approved_tools. provider / model /
+// api_base / api_key are intentionally excluded — the live agent holds the
+// old provider, so those take effect only after a restart or /new.
+pub struct ReloadControl {
+pub:
+	kind                 string
+	risky_tools          []string
+	permission_rules     []PermissionRule
+	hooks                []HookDef
+	max_turns            int
+	max_retries_per_step int
+	compact_threshold     f32
+	context_window       int
+	approved_tools       []string
 }
 
 pub struct TuiStatus {
@@ -74,6 +112,14 @@ pub:
 	// For .session_switched: the id of the session the runner switched to.
 	// The TUI reloads that session from disk to rebuild the view.
 	session_id string
+	// For .goal: the header badge content ('' = no goal, hide badge) and
+	// the multi-line detail snapshot shown by `/goal`.
+	goal_summary string
+	goal_detail  string
+	// When true, the .goal update is also appended to the scrollback as a
+	// system block (used for /goal pause|resume|cancel feedback; periodic
+	// badge refreshes stay silent).
+	goal_announce bool
 }
 
 // status_started returns a status marking the start of an agent turn.
@@ -172,6 +218,35 @@ pub fn status_session_switched(sid string, text string) TuiStatus {
 	}
 }
 
+// status_goal returns a status carrying a goal badge + detail update.
+// When announce is true the detail is also appended as a system block.
+pub fn status_goal(summary string, detail string, announce bool) TuiStatus {
+	return TuiStatus{
+		kind:          .goal
+		goal_summary:  summary
+		goal_detail:   detail
+		goal_announce: announce
+	}
+}
+
+// status_undone returns a status carrying the result of a /undo or
+// /undo list request, rendered as a system block.
+pub fn status_undone(text string) TuiStatus {
+	return TuiStatus{
+		kind: .undone
+		err:  text
+	}
+}
+
+// status_reloaded returns a status carrying the result of a /reload
+// request, rendered as a system block.
+pub fn status_reloaded(text string) TuiStatus {
+	return TuiStatus{
+		kind: .reloaded
+		err:  text
+	}
+}
+
 // run_tui is the main interactive loop. Returns:
 //   - .clean_exit on user request (Esc Esc or /exit)
 //   - .fallback_to_stdout if TUI can't initialize (non-TTY)
@@ -229,6 +304,15 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 	// /compact requests to the runner, which owns the live Session. cap 2
 	// so a switch + compact can queue without blocking the input loop.
 	session_control_ch := chan SessionControl{cap: 2}
+	// Goal-control channel: the TUI sends /goal pause|resume|cancel
+	// requests to the runner, which owns the live Agent (and its goal).
+	goal_control_ch := chan GoalControl{cap: 2}
+	// Undo-control channel: the TUI sends /undo [list] requests to the
+	// runner, which owns the live Agent (and its checkpoint store).
+	undo_control_ch := chan UndoControl{cap: 2}
+	// Reload-control channel: the TUI sends /reload requests to the runner,
+	// which hot-applies the runtime config fields to the live Agent.
+	reload_control_ch := chan ReloadControl{cap: 2}
 	// Shutdown channel: signal handlers (SIGHUP / SIGTERM) push 1 here;
 	// the main loop picks it up on its next iteration and unwinds.
 	shutdown_ch := chan int{cap: 1}
@@ -246,7 +330,7 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 	mut agent := new_agent(provider, cfg.system_prompt + load_agents_md(cfg.cwd, config_dir()))
 	agent.max_turns = cfg.max_turns
 	agent.max_retries_per_step = cfg.max_retries_per_step
-	agent.registry = default_registry(mut agent, cfg.cwd, cfg.mcp_servers)
+	agent.registry = default_registry(mut agent, cfg.cwd, cfg.mcp_servers, cfg.web_search)
 	agent.set_skills(discover_skills(cfg.cwd))
 	state.mcp_connected = agent.mcp_clients.keys()
 	// Tear down MCP connections on any exit path (best-effort).
@@ -257,7 +341,7 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 	spawn key_reader_loop(key_ch)
 	spawn agent_runner_loop(mut &agent, cfg, submit_ch, status_ch, cancel_request_ch, approval_ch,
 		decision_ch, steer_ch, ask_ch, ask_result_ch, exit_plan_ch, exit_plan_result_ch,
-		plan_control_ch, session_control_ch)
+		plan_control_ch, session_control_ch, goal_control_ch, undo_control_ch, reload_control_ch)
 
 	state.should_exit = false
 	state.should_interrupt = false
@@ -283,6 +367,9 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 					// Risky tool call pending — render the modal and wait
 					// for the user's y/n.
 					state.pending_approval = req
+					// Compute the diff preview once here (file read + LCS);
+					// the render loop only reads the cached result.
+					state.pending_approval_diff = approval_diff_lines(req.tool_name, req.args)
 					state.status = 'awaiting approval: ${req.tool_name}'
 					state.dirty = true
 				}
@@ -311,7 +398,8 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 			select {
 				ev := <-key_ch {
 					handle_key(ev, mut state, mut ib, submit_ch, mut cfg, decision_ch, steer_ch,
-						ask_result_ch, exit_plan_result_ch, plan_control_ch, session_control_ch)
+						ask_result_ch, exit_plan_result_ch, plan_control_ch, session_control_ch,
+						goal_control_ch, undo_control_ch, reload_control_ch)
 				}
 				1 * time.millisecond {
 					drain_keys = false
@@ -334,6 +422,42 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 		}
 
 		now_ms := time.now().unix_milli()
+
+		// ── Cron scheduler tick (1s cadence) ──
+		// Poll the agent's cron table; a due job is wrapped in a
+		// <cron-fire> envelope and injected as a queued SubmitMsg once the
+		// agent is idle. While a turn is running the due job parks in
+		// state.cron_pending and a newer due job overwrites it, so bursts
+		// coalesce into a single (latest) injection after the turn ends
+		// (same drain timing as the goal-control channel in the runner).
+		if now_ms - state.cron_last_check_ms >= 1000 {
+			state.cron_last_check_ms = now_ms
+			due := check_due_cron(agent.cron_tasks, mut state.cron_last_fired, now_ms)
+			for t in due {
+				state.cron_pending = t
+			}
+			if p := state.cron_pending {
+				if state.status == 'idle' {
+					mut pushed := true
+					submit_ch <- SubmitMsg{
+						prompt: cron_fire_prompt(p)
+					} or {
+						// Queue full — keep it pending for the next tick.
+						pushed = false
+					}
+					if pushed {
+						state.cron_pending = none
+						// One-shots fire exactly once: drop from the table
+						// and persist right after injection.
+						if !p.recurring {
+							cron_remove_task(mut agent.cron_tasks, p.id)
+							save_cron_tasks(agent.session_id, agent.cron_tasks) or {}
+						}
+					}
+				}
+			}
+		}
+
 		if now_ms - last_render_ms >= render_interval_ms {
 			// Only repaint when something actually changed. This keeps a
 			// static screen from being cleared + redrawn ~30×/s (which
@@ -388,6 +512,9 @@ pub fn run_tui(mut cfg Config, provider Provider) TuiLoopResult {
 	// shouldn't crash the TUI; we just log and move on. The user can
 	// still quit; they'll lose history but the session itself is fine.
 	save_history(ib.history) or { eprintln('[warn] failed to save history: ${err.msg()}') }
+	// Persist the cron table on exit (best-effort safety net — the Cron
+	// tools and the one-shot removal already save eagerly).
+	save_cron_tasks(agent.session_id, agent.cron_tasks) or {}
 	return .clean_exit
 }
 
@@ -410,7 +537,7 @@ fn key_reader_loop(key_ch chan KeyEvent) {
 
 // agent_runner_loop consumes SubmitMsg and runs the agent, pushing status
 // updates as it goes.
-fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision, steer_ch chan string, ask_ch chan AskRequest, ask_result_ch chan AskResult, exit_plan_ch chan ExitPlanRequest, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl, session_control_ch chan SessionControl) {
+fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, status_ch chan TuiStatus, cancel_request_ch chan int, approval_ch chan ApprovalRequest, decision_ch chan ApprovalDecision, steer_ch chan string, ask_ch chan AskRequest, ask_result_ch chan AskResult, exit_plan_ch chan ExitPlanRequest, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl, session_control_ch chan SessionControl, goal_control_ch chan GoalControl, undo_control_ch chan UndoControl, reload_control_ch chan ReloadControl) {
 	// The registry, skills, and MCP connections are already initialised
 	// by run_tui (which owns the Agent). Wire up hooks here.
 	mut hook_engine := new_hook_engine(cfg.cwd, agent.session_id)
@@ -451,8 +578,18 @@ fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, stat
 	// ExitPlanMode tool can forward the plan and read the user's decision.
 	agent.exit_plan_ch = exit_plan_ch
 	agent.exit_plan_result_ch = exit_plan_result_ch
+	// Goal-status flow: the agent loop and the Goal tools call
+	// emit_goal_status() at every goal state change; forward it to the TUI
+	// as a badge update. Non-blocking send (try_push via `or {}`) so a full
+	// status channel can never stall the agent loop.
+	agent.on_goal_change = fn [status_ch] (badge string, detail string) {
+		status_ch <- status_goal(badge, detail, false) or {}
+	}
 	mut sess := new_session(cfg.cwd)
 	agent.session_id = sess.id
+	// Fresh session: restore its (normally empty) cron table so the
+	// scheduler state matches the store from the start.
+	restore_cron_tasks(mut agent, sess)
 
 	// ── SessionStart hook (observation-only) ──
 	mut ss_input := map[string]string{}
@@ -511,10 +648,15 @@ fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, stat
 						.switch {
 							// Persist the current session before switching away
 							// so nothing is lost (best-effort — a failed save is
-							// only logged; the switch still proceeds).
+							// only logged; the switch still proceeds). The goal
+							// rides along in the session metadata.
+							stash_goal_metadata(mut sess, agent.goal)
 							save(sess) or {
 								eprintln('session switch: failed to save current session: ${err.msg()}')
 							}
+							// The cron table lives in its own per-session
+							// store; persist it before switching away.
+							save_cron_tasks(agent.session_id, agent.cron_tasks) or {}
 							sess = load(sc.session_id) or {
 								status_ch <- status_errored('session switch failed: ${err.msg()}')
 								continue
@@ -525,6 +667,12 @@ fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, stat
 							if agent.plan.is_active {
 								agent.exit_plan_mode()
 							}
+							// Restore the goal persisted with the new session
+							// (active goals come back paused).
+							restore_goal_from_metadata(mut agent, sess)
+							// Restore the new session's cron table (its own
+							// store, keyed by session id).
+							restore_cron_tasks(mut agent, sess)
 							// Rebuild the hook engine bound to the new session id
 							// (the previous engine captured the old session).
 							hook_engine = new_hook_engine(cfg.cwd, sess.id)
@@ -538,6 +686,9 @@ fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, stat
 							hook_engine.run_hook_for_event(.session_start, 'switch', switch_input)
 							status_ch <- status_session_switched(sess.id,
 								'switched to session ${sess.id} (${sess.messages.len} messages)')
+							// Refresh the goal badge for the switched-to session
+							// (the TUI cleared it on .session_switched).
+							agent.emit_goal_status()
 						}
 						.compact {
 							// Manual /compact: force compaction immediately (one
@@ -561,6 +712,83 @@ fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, stat
 							after_tok := estimate_tokens(sess.messages)
 							status_ch <- status_compacted('compacted: ${before} messages (${before_tok} est tokens) → ${after} messages (${after_tok} est tokens)')
 						}
+					}
+				}
+				1 * time.millisecond {
+					break
+				}
+			}
+		}
+
+		// Drain pending goal-control messages (/goal pause|resume|cancel)
+		// without blocking the submit loop. Same non-blocking 1ms-timeout
+		// pattern as the plan/session-control drains above — the runner
+		// stays responsive to the TUI even when idle.
+		for {
+			mut gc := GoalControl{}
+			select {
+				gc = <-goal_control_ch {
+					handle_goal_control(gc, mut agent, submit_ch, status_ch)
+				}
+				1 * time.millisecond {
+					break
+				}
+			}
+		}
+
+		// Drain pending undo-control messages (/undo, /undo list) without
+		// blocking the submit loop. Same non-blocking 1ms-timeout pattern
+		// as the drains above. The result is pushed back as a system block.
+		for {
+			mut uc := UndoControl{}
+			select {
+				uc = <-undo_control_ch {
+					match uc.kind {
+						'undo' {
+							desc := undo_last_checkpoint(mut agent) or {
+								status_ch <- status_errored('undo failed: ${err.msg()}')
+								continue
+							}
+							status_ch <- status_undone(desc)
+						}
+						'list' {
+							status_ch <- status_undone(format_checkpoint_list(list_checkpoints(agent)))
+						}
+						else {}
+					}
+				}
+				1 * time.millisecond {
+					break
+				}
+			}
+		}
+
+		// Drain pending reload-control messages (/reload) without blocking
+		// the submit loop. Same non-blocking pattern as the drains above.
+		// The runner hot-applies the runtime fields to the live Agent;
+		// provider / model / api_base / api_key are baked into the live
+		// provider and stay as-is (the TUI warns about that when it sends
+		// the request).
+		for {
+			mut rc := ReloadControl{}
+			select {
+				rc = <-reload_control_ch {
+					if rc.kind == 'reload' {
+						agent.risky_tools = rc.risky_tools
+						agent.permission_rules = rc.permission_rules
+						agent.max_turns = rc.max_turns
+						agent.max_retries_per_step = rc.max_retries_per_step
+						agent.compact_threshold = rc.compact_threshold
+						agent.context_window = rc.context_window
+						agent.approved_tools = rc.approved_tools
+						// Rebuild the hook engine with the new hooks (same
+						// rebuild pattern as the session switch above).
+						hook_engine = new_hook_engine(cfg.cwd, agent.session_id)
+						for h in rc.hooks {
+							hook_engine.add(h)
+						}
+						agent.set_hooks(hook_engine)
+						status_ch <- status_reloaded('config reloaded: risky_tools / permission rules / hooks / loop-control / approvals applied')
 					}
 				}
 				1 * time.millisecond {
@@ -666,6 +894,76 @@ fn agent_runner_loop(mut agent Agent, cfg Config, submit_ch chan SubmitMsg, stat
 	mut se_input := map[string]string{}
 	se_input['reason'] = 'exit'
 	hook_engine.run_hook_for_event(.session_end, 'exit', se_input)
+}
+
+// handle_goal_control applies a /goal pause|resume|cancel request to the
+// runner-owned agent and pushes a goal status update (badge refresh plus
+// an announced system block) back to the TUI. Runs while the runner is
+// idle (control channels are only drained between turns), so `resume`
+// kicks off the continuation turn by queueing a SubmitMsg the loop picks
+// up on its next iteration.
+fn handle_goal_control(gc GoalControl, mut agent Agent, submit_ch chan SubmitMsg, status_ch chan TuiStatus) {
+	now := time.now().unix_milli()
+	// push announces the outcome as a system block AND refreshes the badge.
+	push := fn [status_ch] (agent Agent, note string) {
+		mut badge := ''
+		mut detail := note
+		if g := agent.goal {
+			badge = goal_badge_summary(g, time.now().unix_milli())
+			if note.len > 0 {
+				detail = '${note}\n${goal_detail_text(g, time.now().unix_milli())}'
+			} else {
+				detail = goal_detail_text(g, time.now().unix_milli())
+			}
+		}
+		status_ch <- status_goal(badge, detail, true) or {}
+	}
+	match gc.kind {
+		'pause' {
+			g := agent.goal or {
+				push(agent, 'no goal to pause')
+				return
+			}
+			if g.status != .active {
+				push(agent, 'goal is not active (status: ${g.status.str()})')
+				return
+			}
+			mut g2 := pause(g, now)
+			g2.status = .paused
+			g2.terminal_reason = 'Paused by user'
+			agent.goal = g2
+			push(agent, 'goal paused')
+		}
+		'resume' {
+			g := agent.goal or {
+				push(agent, 'no goal to resume')
+				return
+			}
+			if g.status == .active {
+				push(agent, 'goal is already active')
+				return
+			}
+			mut g2 := resume(g, now)
+			g2.terminal_reason = ''
+			agent.goal = g2
+			// Inject a user message as a queued submit so the runner starts
+			// a fresh turn on its next iteration; the goal driver in run()
+			// then keeps the run going until the model adjudicates.
+			submit_ch <- SubmitMsg{
+				prompt: 'Resume the active goal.'
+			} or {}
+			push(agent, 'goal resumed')
+		}
+		'cancel' {
+			if agent.goal == none {
+				push(agent, 'no goal to cancel')
+				return
+			}
+			agent.goal = none
+			push(agent, 'goal cleared')
+		}
+		else {}
+	}
 }
 
 // handle_status updates TuiState based on a TuiStatus message.
@@ -783,9 +1081,42 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 			}
 			state.status = 'idle'
 		}
+		.goal {
+			// Goal state changed on the runner. Refresh the header badge
+			// and the /goal detail snapshot; announced updates (the result
+			// of /goal pause|resume|cancel) also land as a system block.
+			// state.status is left alone — periodic badge refreshes during
+			// a turn must not clobber the "running ..." line.
+			state.goal_summary = s.goal_summary
+			state.goal_detail = s.goal_detail
+			if s.goal_announce && s.goal_detail.len > 0 {
+				state.blocks << Block{
+					kind: .system
+					text: s.goal_detail
+				}
+			}
+		}
 		.compacted {
 			// A manual /compact completed on the runner side. Surface the
 			// before/after numbers as a system block.
+			state.blocks << Block{
+				kind: .system
+				text: s.err
+			}
+			state.status = 'idle'
+		}
+		.undone {
+			// A /undo (or /undo list) completed on the runner side.
+			// Surface the result as a system block.
+			state.blocks << Block{
+				kind: .system
+				text: s.err
+			}
+			state.status = 'idle'
+		}
+		.reloaded {
+			// A /reload completed on the runner side. Surface the applied
+			// field summary as a system block.
 			state.blocks << Block{
 				kind: .system
 				text: s.err
@@ -804,6 +1135,16 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 			state.input_tokens = 0
 			state.output_tokens = 0
 			state.plan_mode_active = false
+			// The goal belongs to the previous session's agent state; the
+			// runner pushes a fresh .goal status right after this one if
+			// the switched-to session carries a goal.
+			state.goal_summary = ''
+			state.goal_detail = ''
+			// Cron anchors/pending injections are per-session too: the
+			// runner restored the new session's table, so drop the old
+			// session's scheduler state.
+			state.cron_pending = none
+			state.cron_last_fired = map[string]i64{}
 			mut loaded := load(s.session_id) or {
 				state.blocks << Block{
 					kind: .system
@@ -822,10 +1163,18 @@ fn handle_status(s TuiStatus, mut state TuiState) {
 	}
 }
 
+// clear_pending_approval dismisses the approval modal (request + cached
+// diff preview) after the user answers. Keeping both in sync here means
+// the render loop can never show a stale preview.
+fn clear_pending_approval(mut state TuiState) {
+	state.pending_approval = none
+	state.pending_approval_diff = []DiffLine{}
+}
+
 // handle_key applies a KeyEvent to the input buffer or other state.
 // May push a SubmitMsg to submit_ch, run a shell command, or trigger
 // a slash command.
-fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision, steer_ch chan string, ask_result_ch chan AskResult, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl, session_control_ch chan SessionControl) {
+fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan SubmitMsg, mut cfg Config, decision_ch chan ApprovalDecision, steer_ch chan string, ask_result_ch chan AskResult, exit_plan_result_ch chan ExitPlanResult, plan_control_ch chan PlanControl, session_control_ch chan SessionControl, goal_control_ch chan GoalControl, undo_control_ch chan UndoControl, reload_control_ch chan ReloadControl) {
 	// Most keys mutate the visible state. Mark dirty so the loop repaints;
 	// paths that are no-ops (e.g. a key eaten while a modal is up) cause
 	// at most one redundant paint, which is harmless.
@@ -1002,7 +1351,7 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 					id:       req.id
 					approved: true
 				} or {}
-				state.pending_approval = none
+				clear_pending_approval(mut state)
 				state.status = 'running...'
 				return
 			}
@@ -1025,11 +1374,11 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 					cfg.approved_tools << req.tool_name
 				}
 				append_approved_tool(req.tool_name) or {
-					state.pending_approval = none
+					clear_pending_approval(mut state)
 					state.status = 'always-allow: ${req.tool_name} (persist failed: ${err.msg()})'
 					return
 				}
-				state.pending_approval = none
+				clear_pending_approval(mut state)
 				state.status = 'always-allow: ${req.tool_name}'
 				return
 			}
@@ -1039,7 +1388,7 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 					id:       req.id
 					approved: false
 				} or {}
-				state.pending_approval = none
+				clear_pending_approval(mut state)
 				state.status = 'denied'
 				return
 			}
@@ -1051,7 +1400,7 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 				id:       req.id
 				approved: false
 			} or {}
-			state.pending_approval = none
+			clear_pending_approval(mut state)
 			state.status = 'denied'
 			return
 		}
@@ -1150,7 +1499,7 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 	if ev.kind == .enter && ib.text.starts_with('/') {
 		cmd := ib.text.all_after('/').trim_space()
 		if handle_slash(cmd, mut state, mut ib, mut cfg, plan_control_ch, session_control_ch,
-			submit_ch)
+			goal_control_ch, undo_control_ch, reload_control_ch, submit_ch)
 		{
 			return
 		}
@@ -1166,14 +1515,14 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 			mut ok := false
 			mut att_name := ''
 			if candidate.starts_with('data:image/') {
-				if ib.attach_data_url(candidate) {
+				if ib.attach_data_url(candidate, cfg.model) {
 					ok = true
 					if ib.attachments.len > 0 {
 						att_name = ib.attachments[ib.attachments.len - 1].name
 					}
 				}
 			} else {
-				if ib.attach_file(cfg.cwd, candidate) {
+				if ib.attach_file(cfg.cwd, candidate, cfg.model) {
 					ok = true
 					if ib.attachments.len > 0 {
 						att_name = ib.attachments[ib.attachments.len - 1].name
@@ -1203,14 +1552,14 @@ fn handle_key(ev KeyEvent, mut state TuiState, mut ib InputBuf, submit_ch chan S
 			mut ok := false
 			mut att_name := ''
 			if text.starts_with('data:image/') {
-				if ib.attach_data_url(text) {
+				if ib.attach_data_url(text, cfg.model) {
 					ok = true
 					if ib.attachments.len > 0 {
 						att_name = ib.attachments[ib.attachments.len - 1].name
 					}
 				}
 			} else {
-				if ib.attach_file(cfg.cwd, text) {
+				if ib.attach_file(cfg.cwd, text, cfg.model) {
 					ok = true
 					if ib.attachments.len > 0 {
 						att_name = ib.attachments[ib.attachments.len - 1].name
@@ -1345,7 +1694,7 @@ fn tui_busy(state TuiState) bool {
 }
 
 // handle_slash processes slash commands. Returns true if handled.
-fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config, plan_control_ch chan PlanControl, session_control_ch chan SessionControl, submit_ch chan SubmitMsg) bool {
+fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config, plan_control_ch chan PlanControl, session_control_ch chan SessionControl, goal_control_ch chan GoalControl, undo_control_ch chan UndoControl, reload_control_ch chan ReloadControl, submit_ch chan SubmitMsg) bool {
 	parts := cmd.split(' ')
 	// `/skill:NAME [args]` — load a skill's instructions into context by
 	// submitting its expanded body as a user turn. Mirrors upstream
@@ -1394,7 +1743,7 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config,
 		'help' {
 			state.blocks << Block{
 				kind: .system
-				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /new         alias for /clear\n  /sessions    browse and switch persisted sessions\n  /login       store credentials (run `kimi login --oauth` in another shell)\n  /logout      remove OAuth credentials\n  /model NAME  switch model\n  /plan        enter plan mode (read-only planning)\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact [instruction]  compact context immediately\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /approvals [clear]  list / clear remembered "always allow" tools\n  /mcp         list connected MCP servers and their tools\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results\n  Ctrl-X       clear pending image attachments\n\napproval modal:\n  y            approve this one call\n  a            approve this call and remember the tool for this and future sessions\n  n            deny this call\n  Esc          deny this call\n\nplan review (when a plan is ready):\n  y            approve plan\n  1/2/3        approve a specific approach (when offered)\n  n            reject (stay in plan mode)\n  e            reject and exit plan mode\n  r            request revisions\n  Esc          dismiss\n\nattachments:\n  paste a path to a .png/.jpg/.jpeg/.gif/.webp/.bmp file\n  (absolute, or ~/... / ./... / ../... relative to cwd) to attach\n  paste a data:image/...;base64,... URL to attach\n  multi-line image input: paste a path on a new line, then type'
+				text: 'slash commands:\n  /help        show this\n  /clear       clear conversation\n  /new         alias for /clear\n  /sessions    browse and switch persisted sessions\n  /login       store credentials (run `kimi login --oauth` in another shell)\n  /logout      remove OAuth credentials\n  /model NAME  switch model\n  /plan        enter plan mode (read-only planning)\n  /goal [pause|resume|cancel]  show or control the session goal\n  /undo [list]  revert the last write_file/edit_file change (list shows recent checkpoints)\n  /reload      reload config.toml (runtime fields hot-applied; provider/model need restart)\n  /tokens      show usage tally\n  /usage       alias for /tokens\n  /compact [instruction]  compact context immediately\n  /yolo [on|off]  toggle YOLO mode (skip approvals)\n  /approvals [clear]  list / clear remembered "always allow" tools\n  /mcp         list connected MCP servers and their tools\n  /exit        leave TUI\n\nhotkeys:\n  Ctrl-C       cancel current turn\n  Ctrl-L       clear screen\n  Ctrl-S       steer — inject input mid-turn\n  Ctrl-O       toggle collapse of tool results\n  Ctrl-X       clear pending image attachments\n\napproval modal:\n  y            approve this one call\n  a            approve this call and remember the tool for this and future sessions\n  n            deny this call\n  Esc          deny this call\n\nplan review (when a plan is ready):\n  y            approve plan\n  1/2/3        approve a specific approach (when offered)\n  n            reject (stay in plan mode)\n  e            reject and exit plan mode\n  r            request revisions\n  Esc          dismiss\n\nattachments:\n  paste a path to a .png/.jpg/.jpeg/.gif/.webp/.bmp file\n  (absolute, or ~/... / ./... / ../... relative to cwd) to attach\n  paste a data:image/...;base64,... URL to attach\n  multi-line image input: paste a path on a new line, then type'
 			}
 		}
 		'clear', 'new' {
@@ -1606,6 +1955,125 @@ fn handle_slash(cmd string, mut state TuiState, mut ib InputBuf, mut cfg Config,
 			plan_control_ch <- PlanControl{
 				kind: 'enter'
 			} or {}
+		}
+		'goal' {
+			// `/goal` shows the current goal snapshot; `/goal pause|resume|
+			// cancel` forwards a control message to the agent runner, which
+			// owns the live agent goal state (same pattern as /plan). The
+			// runner drains control channels between turns, so these work
+			// while idle; resume queues a turn to restart the goal driver.
+			sub := if parts.len > 1 { parts[1] } else { '' }
+			match sub {
+				'' {
+					if state.goal_summary.len == 0 {
+						state.blocks << Block{
+							kind: .system
+							text: 'no goal set (the model creates one with the CreateGoal tool)'
+						}
+					} else {
+						state.blocks << Block{
+							kind: .system
+							text: state.goal_detail
+						}
+					}
+				}
+				'pause', 'resume', 'cancel' {
+					goal_control_ch <- GoalControl{
+						kind: sub
+					} or {}
+					state.status = 'goal ${sub} requested...'
+				}
+				else {
+					state.blocks << Block{
+						kind: .system
+						text: 'usage: /goal [pause|resume|cancel]'
+					}
+				}
+			}
+			ib.text = ''
+			ib.cursor = 0
+			return true
+		}
+		'reload' {
+			// `/reload` re-reads config.toml (with env overlays) and
+			// hot-applies the runtime fields to the live agent via
+			// reload_control_ch — the runner owns the Agent (same pattern
+			// as /goal and /undo). provider / model / api_base / api_key
+			// are baked into the live provider and only take effect after
+			// a restart or /new. On a load error the old config stays in
+			// force.
+			new_cfg := load_config(Config{}) or {
+				state.blocks << Block{
+					kind: .system
+					text: 'reload failed: ${err.msg()} (keeping current config)'
+				}
+				ib.text = ''
+				ib.cursor = 0
+				return true
+			}
+			provider_changed := new_cfg.provider != cfg.provider
+				|| new_cfg.model != cfg.model || new_cfg.api_base != cfg.api_base
+				|| new_cfg.api_key != cfg.api_key
+			reload_control_ch <- ReloadControl{
+				kind:                 'reload'
+				risky_tools:          new_cfg.risky_tools
+				permission_rules:     new_cfg.permission_rules
+				hooks:                new_cfg.hooks
+				max_turns:            new_cfg.max_turns
+				max_retries_per_step: new_cfg.max_retries_per_step
+				compact_threshold:    new_cfg.compact_threshold
+				context_window:       new_cfg.context_window
+				approved_tools:       load_approved_tools()
+			} or {}
+			// Keep the TUI's own cfg copy in sync for the hot-applied
+			// fields (handle_key passes mut cfg down for exactly this).
+			cfg.risky_tools = new_cfg.risky_tools
+			cfg.permission_rules = new_cfg.permission_rules
+			cfg.hooks = new_cfg.hooks
+			cfg.max_turns = new_cfg.max_turns
+			cfg.max_retries_per_step = new_cfg.max_retries_per_step
+			cfg.compact_threshold = new_cfg.compact_threshold
+			cfg.context_window = new_cfg.context_window
+			state.status = if provider_changed {
+				'reload requested; provider/model changes take effect after restart or /new'
+			} else {
+				'reload requested...'
+			}
+			ib.text = ''
+			ib.cursor = 0
+			return true
+		}
+		'undo' {
+			// `/undo` reverts the newest file checkpoint; `/undo list` shows
+			// recent ones. The actual work happens in the agent runner loop
+			// (via undo_control_ch) because the live Agent — and thus the
+			// session id keying the checkpoint store — lives there (same
+			// pattern as /goal). The runner drains control channels between
+			// turns, so a request sent mid-turn applies once the agent is
+			// idle again.
+			sub := if parts.len > 1 { parts[1] } else { '' }
+			match sub {
+				'' {
+					undo_control_ch <- UndoControl{
+						kind: 'undo'
+					} or {}
+					state.status = 'undo requested...'
+				}
+				'list' {
+					undo_control_ch <- UndoControl{
+						kind: 'list'
+					} or {}
+				}
+				else {
+					state.blocks << Block{
+						kind: .system
+						text: 'usage: /undo [list]'
+					}
+				}
+			}
+			ib.text = ''
+			ib.cursor = 0
+			return true
 		}
 		else {
 			state.blocks << Block{

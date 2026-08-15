@@ -6,7 +6,7 @@ import json2
 
 fn setup_plan_agent() Agent {
 	mut a := new_agent(OpenAICompatProvider{}, 'sys')
-	a.registry = default_registry(mut a, os.getwd(), [])
+	a.registry = default_registry(mut a, os.getwd(), [], WebSearchConfig{})
 	return a
 }
 

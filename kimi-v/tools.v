@@ -152,6 +152,13 @@ pub fn (t WriteFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 		}
 	}
 
+	// Snapshot the pre-write state for /undo (checkpoint.v). Best-effort:
+	// a checkpoint failure only logs a warning and never blocks the write.
+	// Skipped silently when ctx carries no agent (tests / no-session use).
+	if mut a := ctx.agent {
+		checkpoint_file(mut a, safe_path, 'write_file')
+	}
+
 	os.write_file(safe_path, content) or {
 		return ToolResult{
 			content:  'write failed: ${err.msg()}'
@@ -245,6 +252,13 @@ pub fn (t EditFileTool) execute(args ToolArgs, ctx ToolContext) !ToolResult {
 	}
 
 	new_content := content.replace(old_text, new_text)
+
+	// Snapshot the pre-edit state for /undo (same best-effort policy as
+	// write_file above: checkpoint failures never block the write).
+	if mut a := ctx.agent {
+		checkpoint_file(mut a, safe_path, 'edit_file')
+	}
+
 	os.write_file(safe_path, new_content) or {
 		return ToolResult{
 			content:  'write failed: ${err.msg()}'
@@ -778,7 +792,7 @@ fn search_dir_literal(mut hits []string, dir string, pattern string, include str
 // =============================================================================
 
 // default_registry creates a registry with all built-in tools and registers any configured MCP servers.
-pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig) ToolRegistry {
+pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig, ws_cfg WebSearchConfig) ToolRegistry {
 	mut r := new_registry()
 	r.register(ReadFileTool{ cwd: cwd })
 	r.register(WriteFileTool{ cwd: cwd })
@@ -787,7 +801,7 @@ pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig) 
 	r.register(GlobTool{ cwd: cwd })
 	r.register(GrepTool{ cwd: cwd })
 	r.register(WebFetchTool{})
-	r.register(WebSearchTool{})
+	r.register(WebSearchTool{ cfg: ws_cfg })
 	r.register(TodoWriteTool{})
 	r.register(TodoReadTool{})
 	r.register(AskUserQuestionTool{})
@@ -797,6 +811,13 @@ pub fn default_registry(mut a Agent, cwd string, mcp_servers []McpServerConfig) 
 	r.register(AgentSwarmTool{ agent: &a })
 	r.register(TaskListTool{ agent: &a })
 	r.register(SkillTool{ agent: &a })
+	r.register(CreateGoalTool{ agent: &a })
+	r.register(GetGoalTool{ agent: &a })
+	r.register(UpdateGoalTool{ agent: &a })
+	r.register(SetGoalBudgetTool{ agent: &a })
+	r.register(CronCreateTool{ agent: &a })
+	r.register(CronListTool{ agent: &a })
+	r.register(CronDeleteTool{ agent: &a })
 	// External MCP servers (config-driven). Failures are logged, not fatal,
 	// unless a server is explicitly marked required. Connections are stored
 	// on the Agent so McpTool.execute can reach the live mcp.Client.

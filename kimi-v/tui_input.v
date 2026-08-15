@@ -49,32 +49,31 @@
 module main
 
 import os
-import time
 import encoding.base64
 
 // ---------- Special key codes --------------------------------------------
 
-pub const key_enter     = 13
-pub const key_esc       = 27
+pub const key_enter = 13
+pub const key_esc = 27
 pub const key_backspace = 127
-pub const ctrl_a        = 1
-pub const ctrl_b        = 2
-pub const ctrl_c        = 3
-pub const ctrl_d        = 4
-pub const ctrl_e        = 5
-pub const ctrl_f        = 6
-pub const ctrl_h        = 8
-pub const ctrl_j        = 10
-pub const ctrl_k        = 11
-pub const ctrl_l        = 12
-pub const ctrl_n        = 14
-pub const ctrl_o        = 15
-pub const ctrl_p        = 16
-pub const ctrl_s        = 19
-pub const ctrl_u        = 21
-pub const ctrl_v        = 22
-pub const ctrl_w        = 23
-pub const ctrl_x        = 24
+pub const ctrl_a = 1
+pub const ctrl_b = 2
+pub const ctrl_c = 3
+pub const ctrl_d = 4
+pub const ctrl_e = 5
+pub const ctrl_f = 6
+pub const ctrl_h = 8
+pub const ctrl_j = 10
+pub const ctrl_k = 11
+pub const ctrl_l = 12
+pub const ctrl_n = 14
+pub const ctrl_o = 15
+pub const ctrl_p = 16
+pub const ctrl_s = 19
+pub const ctrl_u = 21
+pub const ctrl_v = 22
+pub const ctrl_w = 23
+pub const ctrl_x = 24
 
 // KeyEvent is what the input loop emits. `text` is non-empty only for
 // printable characters and pasted multi-byte sequences.
@@ -101,28 +100,28 @@ pub enum KeyKind {
 	kill_word
 	interrupt
 	clear_screen
-	insert_newline  // Shift+Enter / Alt+Enter — insert literal \n into the buffer
-	submit_other    // Ctrl-J — alternative submit (same as Enter)
+	insert_newline // Shift+Enter / Alt+Enter — insert literal \n into the buffer
+	submit_other   // Ctrl-J — alternative submit (same as Enter)
 	esc
-	steer           // Ctrl-S — inject the current input into a running turn
-	                // (the agent sees it at the next interruptible point,
-	                // without waiting for the current turn to finish)
-	collapse        // Ctrl-O — toggle collapse of all tool_result blocks
-	                // in the conversation scrollback. First press collapses
-	                // all to a one-line summary; second press expands.
+	steer // Ctrl-S — inject the current input into a running turn
+	// (the agent sees it at the next interruptible point,
+	// without waiting for the current turn to finish)
+	collapse // Ctrl-O — toggle collapse of all tool_result blocks
+	// in the conversation scrollback. First press collapses
+	// all to a one-line summary; second press expands.
 	clear_attachments // Ctrl-X — drop all pending image attachments from
-	                // the input buffer. A no-op (with a status hint) when
-	                // no attachments are pending.
-	paste           // Bracketed-paste content: a chunk of text pasted by
-	                // the terminal (wrapped in ESC[200~...ESC[201~). The
-	                // TUI handles it atomically instead of char-by-char.
-	focus_in        // Terminal focus-in report (ESC I): the TUI window
-	                // regained focus. Used to refresh clipboard hints.
-	focus_out       // Terminal focus-out report (ESC O): the TUI window
-	                // lost focus. Mostly ignored; hint state is reset.
-	stdin_eof       // sentinel pushed by the reader when stdin closes
-	                // (pipe broken, TTY disconnected, etc.). The TUI
-	                // main loop sees this and exits cleanly.
+	// the input buffer. A no-op (with a status hint) when
+	// no attachments are pending.
+	paste // Bracketed-paste content: a chunk of text pasted by
+	// the terminal (wrapped in ESC[200~...ESC[201~). The
+	// TUI handles it atomically instead of char-by-char.
+	focus_in // Terminal focus-in report (ESC I): the TUI window
+	// regained focus. Used to refresh clipboard hints.
+	focus_out // Terminal focus-out report (ESC O): the TUI window
+	// lost focus. Mostly ignored; hint state is reset.
+	stdin_eof // sentinel pushed by the reader when stdin closes
+	// (pipe broken, TTY disconnected, etc.). The TUI
+	// main loop sees this and exits cleanly.
 }
 
 // read_key reads one byte at a time from `r` and assembles a KeyEvent.
@@ -130,64 +129,102 @@ pub enum KeyKind {
 // KeyKind.stdin_eof on EOF / error so the caller can distinguish "stream
 // closed" from "we got an unrecognized byte" (KeyKind.none).
 pub fn (mut r StdinReader) read_key() KeyEvent {
-	b := r.read_byte() or { return KeyEvent{ kind: .stdin_eof } }
+	b := r.read_byte() or { return KeyEvent{
+		kind: .stdin_eof
+	} }
 	match b {
 		key_enter {
-			return KeyEvent{ kind: .enter }
+			return KeyEvent{
+				kind: .enter
+			}
 		}
 		ctrl_j {
-			return KeyEvent{ kind: .enter }
+			return KeyEvent{
+				kind: .enter
+			}
 		}
 		key_esc {
 			return r.read_esc_sequence()
 		}
 		key_backspace {
-			return KeyEvent{ kind: .backspace }
+			return KeyEvent{
+				kind: .backspace
+			}
 		}
 		ctrl_h {
-			return KeyEvent{ kind: .backspace }
+			return KeyEvent{
+				kind: .backspace
+			}
 		}
 		ctrl_a {
-			return KeyEvent{ kind: .home }
+			return KeyEvent{
+				kind: .home
+			}
 		}
 		ctrl_e {
-			return KeyEvent{ kind: .end }
+			return KeyEvent{
+				kind: .end
+			}
 		}
 		ctrl_b {
-			return KeyEvent{ kind: .left }
+			return KeyEvent{
+				kind: .left
+			}
 		}
 		ctrl_f {
-			return KeyEvent{ kind: .right }
+			return KeyEvent{
+				kind: .right
+			}
 		}
 		ctrl_p {
-			return KeyEvent{ kind: .up }
+			return KeyEvent{
+				kind: .up
+			}
 		}
 		ctrl_n {
-			return KeyEvent{ kind: .down }
+			return KeyEvent{
+				kind: .down
+			}
 		}
 		ctrl_k {
-			return KeyEvent{ kind: .kill_to_end }
+			return KeyEvent{
+				kind: .kill_to_end
+			}
 		}
 		ctrl_u {
-			return KeyEvent{ kind: .kill_to_start }
+			return KeyEvent{
+				kind: .kill_to_start
+			}
 		}
 		ctrl_w {
-			return KeyEvent{ kind: .kill_word }
+			return KeyEvent{
+				kind: .kill_word
+			}
 		}
 		ctrl_c {
-			return KeyEvent{ kind: .interrupt }
+			return KeyEvent{
+				kind: .interrupt
+			}
 		}
 		ctrl_l {
-			return KeyEvent{ kind: .clear_screen }
+			return KeyEvent{
+				kind: .clear_screen
+			}
 		}
 		ctrl_s {
-			return KeyEvent{ kind: .steer }
+			return KeyEvent{
+				kind: .steer
+			}
 		}
 		ctrl_o {
-			return KeyEvent{ kind: .collapse }
+			return KeyEvent{
+				kind: .collapse
+			}
 		}
 		ctrl_x {
-			return KeyEvent{ kind: .clear_attachments }
+			return KeyEvent{
+				kind: .clear_attachments
+			}
 		}
 		ctrl_v {
 			// Ctrl+V: read the system clipboard and treat the result as a
@@ -196,13 +233,20 @@ pub fn (mut r StdinReader) read_key() KeyEvent {
 			// not already converted into bracketed paste by the emulator.
 			content := read_clipboard()
 			if content.len > 0 {
-				return KeyEvent{ kind: .paste, text: content }
+				return KeyEvent{
+					kind: .paste
+					text: content
+				}
 			}
-			return KeyEvent{ kind: .none }
+			return KeyEvent{
+				kind: .none
+			}
 		}
 		ctrl_d {
 			// Ctrl-D on empty input = EOF; we treat it as interrupt to be safe.
-			return KeyEvent{ kind: .interrupt }
+			return KeyEvent{
+				kind: .interrupt
+			}
 		}
 		else {
 			if b >= 32 && b < 127 {
@@ -227,7 +271,9 @@ pub fn (mut r StdinReader) read_key() KeyEvent {
 					text: seq.bytestr()
 				}
 			}
-			return KeyEvent{ kind: .none }
+			return KeyEvent{
+				kind: .none
+			}
 		}
 	}
 }
@@ -243,7 +289,9 @@ pub mut:
 
 // new_stdin_reader creates an unbuffered stdin reader for raw-mode input.
 pub fn new_stdin_reader() StdinReader {
-	return StdinReader{ carry: []u8{} }
+	return StdinReader{
+		carry: []u8{}
+	}
 }
 
 // read_byte pulls one byte from the buffered input.
@@ -271,61 +319,119 @@ fn (mut r StdinReader) read_byte() !u8 {
 // read_esc_sequence handles ESC followed by `[` (CSI sequences) or single
 // letter ESC sequences. Returns KeyEvent based on the sequence.
 fn (mut r StdinReader) read_esc_sequence() KeyEvent {
-	b := r.read_byte() or { return KeyEvent{ kind: .esc } }
+	b := r.read_byte() or { return KeyEvent{
+		kind: .esc
+	} }
 	match b {
 		`[` {
 			// CSI: \e[X or \e[X~ or \e[X;Y~ (modified keys)
-			c := r.read_byte() or { return KeyEvent{ kind: .esc } }
+			c := r.read_byte() or { return KeyEvent{
+				kind: .esc
+			} }
 			match c {
-				`A` { return KeyEvent{ kind: .up } }
-				`B` { return KeyEvent{ kind: .down } }
-				`C` { return KeyEvent{ kind: .right } }
-				`D` { return KeyEvent{ kind: .left } }
-				`H` { return KeyEvent{ kind: .home } }
-				`F` { return KeyEvent{ kind: .end } }
+				`A` {
+					return KeyEvent{
+						kind: .up
+					}
+				}
+				`B` {
+					return KeyEvent{
+						kind: .down
+					}
+				}
+				`C` {
+					return KeyEvent{
+						kind: .right
+					}
+				}
+				`D` {
+					return KeyEvent{
+						kind: .left
+					}
+				}
+				`H` {
+					return KeyEvent{
+						kind: .home
+					}
+				}
+				`F` {
+					return KeyEvent{
+						kind: .end
+					}
+				}
 				`2` {
 					// Bracketed paste: ESC [ 2 0 0 ~ starts a paste,
 					// ESC [ 2 0 1 ~ ends it. We only handle the start
 					// here; the end is consumed by read_bracketed_paste.
-					d := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					d := r.read_byte() or { return KeyEvent{
+						kind: .esc
+					} }
 					if d == `0` {
-						e := r.read_byte() or { return KeyEvent{ kind: .esc } }
+						e := r.read_byte() or { return KeyEvent{
+							kind: .esc
+						} }
 						if e == `0` {
-							tilde := r.read_byte() or { return KeyEvent{ kind: .esc } }
+							tilde := r.read_byte() or {
+								return KeyEvent{
+									kind: .esc
+								}
+							}
 							if tilde == `~` {
 								return r.read_bracketed_paste()
 							}
 						}
 					}
-					return KeyEvent{ kind: .esc }
+					return KeyEvent{
+						kind: .esc
+					}
 				}
 				`3` {
 					// Delete key: ESC [ 3 ~
-					tilde := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					tilde := r.read_byte() or { return KeyEvent{
+						kind: .esc
+					} }
 					if tilde == `~` {
-						return KeyEvent{ kind: .delete }
+						return KeyEvent{
+							kind: .delete
+						}
 					}
-					return KeyEvent{ kind: .esc }
+					return KeyEvent{
+						kind: .esc
+					}
 				}
 				`1` {
 					// Modified Enter keys: ESC [ 13 ; <modifier> ~
 					// e.g. 13;2~ = Shift+Enter, 13;5~ = Ctrl+Enter.
 					// We only treat Shift+Enter (modifier 2) as a literal
 					// newline; Ctrl+Enter would clash with Ctrl-J submit.
-					semi := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					semi := r.read_byte() or { return KeyEvent{
+						kind: .esc
+					} }
 					if semi != `;` {
-						return KeyEvent{ kind: .esc }
+						return KeyEvent{
+							kind: .esc
+						}
 					}
 					// Read the modifier digit and trailing ~.
-					mod1 := r.read_byte() or { return KeyEvent{ kind: .esc } }
-					tilde := r.read_byte() or { return KeyEvent{ kind: .esc } }
+					mod1 := r.read_byte() or { return KeyEvent{
+						kind: .esc
+					} }
+					tilde := r.read_byte() or { return KeyEvent{
+						kind: .esc
+					} }
 					if tilde == `~` && mod1 == `2` {
-						return KeyEvent{ kind: .insert_newline }
+						return KeyEvent{
+							kind: .insert_newline
+						}
 					}
-					return KeyEvent{ kind: .esc }
+					return KeyEvent{
+						kind: .esc
+					}
 				}
 				else {
-					return KeyEvent{ kind: .esc }
+					return KeyEvent{
+						kind: .esc
+					}
 				}
 			}
 		}
@@ -333,20 +439,28 @@ fn (mut r StdinReader) read_esc_sequence() KeyEvent {
 			// ESC + Enter byte = Alt+Enter. Treat as literal newline so
 			// users on terminals that don't send CSI 13;2~ still have
 			// a way to break the line.
-			return KeyEvent{ kind: .insert_newline }
+			return KeyEvent{
+				kind: .insert_newline
+			}
 		}
 		`I` {
 			// Focus-in report: terminal window regained focus.
-			return KeyEvent{ kind: .focus_in }
+			return KeyEvent{
+				kind: .focus_in
+			}
 		}
 		`O` {
 			// Focus-out report: terminal window lost focus.
-			return KeyEvent{ kind: .focus_out }
+			return KeyEvent{
+				kind: .focus_out
+			}
 		}
 		else {
 			// Single ESC, or ESC + letter (Alt-key chord). We treat any
 			// unknown ESC sequence as just ESC for simplicity.
-			return KeyEvent{ kind: .esc }
+			return KeyEvent{
+				kind: .esc
+			}
 		}
 	}
 }
@@ -364,11 +478,17 @@ fn (mut r StdinReader) read_bracketed_paste() KeyEvent {
 		if buf.len >= end_seq.len {
 			if buf[buf.len - end_seq.len..].bytestr() == end_seq {
 				content := buf[..buf.len - end_seq.len].bytestr()
-				return KeyEvent{ kind: .paste, text: content }
+				return KeyEvent{
+					kind: .paste
+					text: content
+				}
 			}
 		}
 	}
-	return KeyEvent{ kind: .paste, text: buf.bytestr() }
+	return KeyEvent{
+		kind: .paste
+		text: buf.bytestr()
+	}
 }
 
 // read_clipboard returns the current system clipboard contents as text.
@@ -420,16 +540,16 @@ fn clipboard_has_image() bool {
 pub struct InputBuf {
 pub mut:
 	// Current line of text being edited.
-	text      string
+	text string
 	// Cursor position (byte offset, 0..text.len).
-	cursor    int
+	cursor int
 	// History (most recent last).
-	history   []string
+	history []string
 	// Index into history when navigating (-1 = current line).
-	hist_idx  int
+	hist_idx int
 	// Saved current text when navigating into history (so we can restore
 	// when navigating back).
-	saved     string
+	saved string
 	// Pending image attachments. Filled by the TUI when the user
 	// pastes a path to a recognized image file or a data: URL.
 	// Consumed (and cleared) at submit time. Not in the text buffer
@@ -441,7 +561,7 @@ pub mut:
 // new_input_buf creates an empty input buffer with an empty history.
 pub fn new_input_buf() InputBuf {
 	return InputBuf{
-		history: []string{}
+		history:  []string{}
 		hist_idx: -1
 	}
 }
@@ -653,6 +773,7 @@ fn (mut b InputBuf) history_next() {
 	}
 	b.cursor = b.text.len
 }
+
 // ---------- Attachments (P0.7) -------------------------------------------
 //
 // Image attachments are stored alongside the text buffer but not
@@ -684,59 +805,29 @@ pub const max_image_long_side = 2000
 // limit (base64 inflates ~33%, so 5 MB raw ≈ 6.7 MB on the wire).
 pub const max_attachment_bytes_after_compress = 5 * 1024 * 1024
 
-// compress_image returns a path to a downscaled copy of the image.
-// If the image is already within the size limit, the original path is
-// returned and the caller does not need to clean up. If a temporary
-// file is returned, the caller must delete it after reading.
-fn compress_image(path string) string {
-	$if macos {
-		// macOS ships `sips`. Use it to query dimensions and rescale.
-		info := os.execute('sips -g pixelWidth -g pixelHeight "${path}"')
-		if info.exit_code != 0 {
-			return path
-		}
-		mut w := 0
-		mut h := 0
-		for line in info.output.split('\n') {
-			if line.contains('pixelWidth:') {
-				w = line.all_after('pixelWidth:').trim_space().int()
-			} else if line.contains('pixelHeight:') {
-				h = line.all_after('pixelHeight:').trim_space().int()
-			}
-		}
-		if w <= 0 || h <= 0 {
-			return path
-		}
-		long_side := if w > h { w } else { h }
-		if long_side <= max_image_long_side {
-			return path
-		}
-		ext := attachment_ext(path)
-		suffix := if ext.len > 0 { ext } else { 'jpg' }
-		tmp := os.join_path(os.temp_dir(), 'kimi-v-compress-${time.now().unix_nano()}.${suffix}')
-		res := os.execute('sips -Z ${max_image_long_side} "${path}" --out "${tmp}" 2>/dev/null')
-		if res.exit_code == 0 && os.exists(tmp) {
-			// sips can produce files that are still large (uncompressed
-			// BMP-style output). If the result exceeds the cap, fall back
-			// to the original rather than sending an oversized payload.
-			size := os.file_size(tmp)
-			if size >= 0 && size <= max_attachment_bytes_after_compress {
-				return tmp
-			}
-			os.rm(tmp) or {}
-		}
-	}
-	return path
-}
+// compress_image now lives in image_compress.v (cross-platform stbi
+// implementation, with a macOS sips fallback for formats stb_image
+// cannot decode). Return semantics are unchanged: the original path
+// means the caller has nothing to clean up; a temp path means the
+// caller must delete the file after reading.
 
 // attach_file attempts to attach the file at `path` (resolved
 // against `cwd` when relative). Returns true on success — the file
 // was read, base64-encoded, and pushed onto the attachment list.
 // Returns false if the path doesn't exist, has an unrecognized
-// extension, or is too large. Callers should fall through to
-// inserting the text on false so the user doesn't lose what they
-// typed.
-pub fn (mut b InputBuf) attach_file(cwd string, path string) bool {
+// extension, is too large, or the active `model` cannot ingest
+// images. Callers should fall through to inserting the text on
+// false so the user doesn't lose what they typed.
+pub fn (mut b InputBuf) attach_file(cwd string, path string, model string) bool {
+	// Attachment capability gate: refuse image attachments when the active
+	// model cannot ingest images (per the capability registry). When the
+	// model is unknown (model == '') the registry returns its lenient
+	// default (image_in=true), so existing behavior is preserved. The caller
+	// falls through to inserting the path as plain text on false, which is
+	// the intended "rejected" signal for this provider constraint.
+	if !lookup_capability(model).image_in {
+		return false
+	}
 	resolved := resolve_attach_path(cwd, path)
 	if !os.exists(resolved) {
 		return false
@@ -773,7 +864,12 @@ pub fn (mut b InputBuf) attach_file(cwd string, path string) bool {
 // mime and base64 are extracted from the URL directly — we do not
 // re-encode (the data is already base64). Display name is
 // synthesized from the mime subtype (e.g. `pasted.png`).
-pub fn (mut b InputBuf) attach_data_url(data_url string) bool {
+pub fn (mut b InputBuf) attach_data_url(data_url string, model string) bool {
+	// Same capability gate as attach_file: block image data: URLs when the
+	// active model has no image input (see the note there).
+	if !lookup_capability(model).image_in {
+		return false
+	}
 	if !data_url.starts_with('data:image/') {
 		return false
 	}
@@ -781,12 +877,12 @@ pub fn (mut b InputBuf) attach_data_url(data_url string) bool {
 	if comma < 0 {
 		return false
 	}
-	header := data_url[..comma]  // e.g. "data:image/png;base64"
+	header := data_url[..comma] // e.g. "data:image/png;base64"
 	payload := data_url[comma + 1..]
 	if !header.ends_with(';base64') {
 		return false
 	}
-	mime := header[5..header.len - 7]  // strip "data:" prefix and ";base64" suffix
+	mime := header[5..header.len - 7] // strip "data:" prefix and ";base64" suffix
 	if mime.len == 0 {
 		return false
 	}

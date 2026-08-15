@@ -344,7 +344,7 @@ fn test_attach_file_success_reads_and_encodes() {
 		0x00, 0x0D, 0x49, 0x48, 0x44, 0x52]
 	os.write_file(tmp, payload.bytestr())!
 	mut b := new_input_buf()
-	ok := b.attach_file('/tmp', tmp)
+	ok := b.attach_file('/tmp', tmp, 'gpt-4o')
 	assert ok == true, 'attach_file should succeed for a valid png'
 	assert b.attachments.len == 1
 	att := b.attachments[0]
@@ -357,7 +357,7 @@ fn test_attach_file_success_reads_and_encodes() {
 fn test_attach_file_missing_path_returns_false() {
 	// Path that doesn't exist → false, no attachment added.
 	mut b := new_input_buf()
-	ok := b.attach_file('/tmp', '/this/path/should/not/exist/foo.png')
+	ok := b.attach_file('/tmp', '/this/path/should/not/exist/foo.png', 'gpt-4o')
 	assert ok == false
 	assert b.attachments.len == 0
 }
@@ -368,7 +368,7 @@ fn test_attach_file_wrong_extension_returns_false() {
 	tmp := os.join_path(os.temp_dir(), 'kimi-v-attach-test.txt')
 	os.write_file(tmp, 'hello')!
 	mut b := new_input_buf()
-	ok := b.attach_file('/tmp', tmp)
+	ok := b.attach_file('/tmp', tmp, 'gpt-4o')
 	assert ok == false
 	assert b.attachments.len == 0
 	os.rm(tmp) or {}
@@ -379,7 +379,7 @@ fn test_attach_data_url_valid_png() {
 	// which decodes to bytes 0x00 0x00 0x00 (3 bytes of zero). We just
 	// check the helper extracts mime + payload correctly.
 	mut b := new_input_buf()
-	ok := b.attach_data_url('data:image/png;base64,AAAA')
+	ok := b.attach_data_url('data:image/png;base64,AAAA', 'gpt-4o')
 	assert ok == true
 	assert b.attachments.len == 1
 	att := b.attachments[0]
@@ -393,7 +393,7 @@ fn test_attach_data_url_invalid_prefix_returns_false() {
 	// other mimes so we don't accidentally send non-image blobs to
 	// vision endpoints.
 	mut b := new_input_buf()
-	ok := b.attach_data_url('data:video/mp4;base64,AAAA')
+	ok := b.attach_data_url('data:video/mp4;base64,AAAA', 'gpt-4o')
 	assert ok == false
 	assert b.attachments.len == 0
 }
@@ -402,7 +402,7 @@ fn test_attach_data_url_non_base64_returns_false() {
 	// data:image/png;charset=utf-8,... — non-base64 payloads aren't
 	// supported in v1. The user can decode and re-paste.
 	mut b := new_input_buf()
-	ok := b.attach_data_url('data:image/png,hello')
+	ok := b.attach_data_url('data:image/png,hello', 'gpt-4o')
 	assert ok == false
 }
 

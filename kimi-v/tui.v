@@ -178,6 +178,11 @@ pub mut:
 	// overlay and the key loop routes y/n to the agent's decision
 	// channel instead of the input buffer.
 	pending_approval ?ApprovalRequest
+	// Precomputed diff preview for the pending approval (edit_file /
+	// write_file). Computed once when the request arrives and cleared
+	// when the modal closes — never touched from the render loop, which
+	// must not do file IO or diff computation.
+	pending_approval_diff []DiffLine
 	// Pending AskUserQuestion request. When set, the render loop draws a
 	// question modal and the key loop routes digit keys to a choice.
 	pending_ask ?AskRequest
@@ -190,6 +195,12 @@ pub mut:
 	// Whether plan mode is currently active (drives the banner). Set by
 	// the .plan_mode status handler and the exit-plan modal flow.
 	plan_mode_active bool
+	// Goal badge content for the header (e.g. "GOAL active · 3 turns · 12s";
+	// '' = no goal, badge hidden) and the multi-line snapshot shown by
+	// `/goal`. Both are pushed by the runner via .goal statuses whenever
+	// the goal state changes.
+	goal_summary string
+	goal_detail  string
 	// Transient clipboard hint shown when the system clipboard contains
 	// an image and the TUI window has focus (e.g. "Ctrl+V to paste image").
 	// Rendered as a footer row above the input box; cleared on user input.
@@ -198,6 +209,15 @@ pub mut:
 	// open; each entry is one selectable session (newest first, max 9).
 	// Rendered as an overlay; digit keys pick a session, Esc dismisses.
 	session_modal []SessionSummary
+	// Cron scheduler state (see cron.v / the tick in run_tui). The main
+	// loop polls the agent's cron_tasks once per second; cron_last_fired
+	// maps job id → last fire anchor (epoch ms) so a recurring job whose
+	// fire points were missed fires exactly once. cron_pending holds a due
+	// job waiting for the agent to go idle — re-assigned on each tick, so
+	// multiple due jobs coalesce into only the latest injection.
+	cron_last_fired    map[string]i64
+	cron_pending       ?CronTask
+	cron_last_check_ms i64
 	// dirty is set whenever the visible state changes (new block,
 	// streaming chunk, input edit, resize, modal). The render loop only
 	// repaints when dirty is true (or streaming is in progress), which

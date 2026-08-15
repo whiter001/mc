@@ -114,6 +114,6 @@ fn test_mcp_toml_doc_value_api() {
 fn test_mcp_default_registry_with_empty_servers() {
 	// No MCP servers configured → registry built cleanly, no crash.
 	mut a := new_agent(OpenAICompatProvider{}, 'sys')
-	a.registry = default_registry(mut a, os.getwd(), [])
+	a.registry = default_registry(mut a, os.getwd(), [], WebSearchConfig{})
 	assert 'read_file' in a.registry.names()
 }

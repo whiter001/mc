@@ -4,8 +4,9 @@
 // decision) is exercised manually via the TUI; V's test framework has
 // trouble with goroutines spawned from test functions (the test process
 // hangs on the spawned goroutine even after the test function returns).
-// The pure helpers (needs_approval, next_request_id) cover the policy
-// logic and are the bits most likely to break in a regression.
+// The pure helpers (needs_approval, should_skip_approval, evaluate_approval,
+// next_request_id) cover the policy logic and are the bits most likely to
+// break in a regression.
 module main
 
 // ---------- needs_approval ------------------------------------------------
@@ -132,4 +133,241 @@ fn test_skip_only_applies_to_approved_tool() {
 	approved := ['write_file']
 	assert !should_skip_approval('bash', 'ls -la', approved)
 	assert should_skip_approval('write_file', '{"path":"a","content":"b"}', approved)
+}
+
+// ---------- evaluate_approval: policy chain order --------------------------
+
+fn test_evaluate_approval_deny_rule_wins_over_everything() {
+	// A deny rule beats sensitive args, allow rules, yolo, session-approval
+	// and the built-in risky list — it's checked first and nothing bypasses it.
+	rules := [
+		PermissionRule{ decision: 'allow', pattern: 'Bash(*)' },
+		PermissionRule{ decision: 'deny', pattern: 'Bash(rm -rf *)', reason: 'no rm' },
+	]
+	ctx := ApprovalContext{
+		risky_tools:      ['bash']
+		approved_tools:   ['bash']
+		permission_rules: rules
+		yolo:             true
+		plan_active:      false
+		plan_file_path:   ''
+	}
+	v := evaluate_approval('bash', 'rm -rf /tmp/x', ctx)
+	assert v.action == .deny
+	assert v.reason.contains('no rm')
+}
+
+fn test_evaluate_approval_sensitive_overrides_allow_rule() {
+	// An allow rule normally short-circuits, but sensitive args re-prompt.
+	rules := [PermissionRule{ decision: 'allow', pattern: 'Bash(*)' }]
+	ctx := ApprovalContext{
+		risky_tools:      ['bash']
+		permission_rules: rules
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+	assert evaluate_approval('bash', 'rm -rf /tmp/x', ctx).action == .ask
+}
+
+fn test_evaluate_approval_sensitive_overrides_yolo() {
+	// yolo skips approval for clean args, but sensitive patterns still re-prompt.
+	ctx := ApprovalContext{
+		risky_tools: ['bash']
+		yolo:        true
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+	assert evaluate_approval('bash', 'rm -rf /tmp/x', ctx).action == .ask
+}
+
+fn test_evaluate_approval_sensitive_overrides_session_allow() {
+	// "always allow bash" still re-prompts for sensitive args.
+	ctx := ApprovalContext{
+		risky_tools:    ['bash']
+		approved_tools: ['bash']
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+	assert evaluate_approval('bash', 'rm -rf /tmp/x', ctx).action == .ask
+}
+
+fn test_evaluate_approval_plan_active_risky_session_allow_still_asks() {
+	// In plan mode the session always-allow list is disabled for risky tools:
+	// bash must re-prompt even though the user approved it earlier.
+	ctx := ApprovalContext{
+		risky_tools:    ['bash']
+		approved_tools: ['bash']
+		plan_active:    true
+		plan_file_path: '/tmp/plan.md'
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .ask
+}
+
+fn test_evaluate_approval_plan_active_yolo_runs() {
+	// yolo is exempt from the plan-mode re-ask.
+	ctx := ApprovalContext{
+		risky_tools:    ['bash']
+		yolo:           true
+		plan_active:    true
+		plan_file_path: '/tmp/plan.md'
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+}
+
+fn test_evaluate_approval_non_risky_defaults_to_run() {
+	// read_file / glob / grep are not risky → no modal, no deny.
+	ctx := ApprovalContext{
+		risky_tools: ['bash', 'write_file']
+	}
+	assert evaluate_approval('read_file', '{"path":"./a.v"}', ctx).action == .run
+	assert evaluate_approval('glob', '**/*.v', ctx).action == .run
+}
+
+fn test_evaluate_approval_ask_rule_forces_modal() {
+	// An ask rule forces the modal even for calls that wouldn't otherwise prompt.
+	rules := [PermissionRule{ decision: 'ask', pattern: 'Bash(ls *)' }]
+	ctx := ApprovalContext{
+		risky_tools:      ['bash']
+		permission_rules: rules
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .ask
+}
+
+fn test_evaluate_approval_allow_rule_runs() {
+	// An allow rule short-circuits the modal for a risky tool.
+	rules := [PermissionRule{ decision: 'allow', pattern: 'Bash(*)' }]
+	ctx := ApprovalContext{
+		risky_tools:      ['bash']
+		permission_rules: rules
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+}
+
+fn test_evaluate_approval_yolo_runs() {
+	ctx := ApprovalContext{
+		risky_tools: ['bash']
+		yolo:        true
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+}
+
+fn test_evaluate_approval_session_allow_runs() {
+	ctx := ApprovalContext{
+		risky_tools:    ['bash']
+		approved_tools: ['bash']
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .run
+}
+
+fn test_evaluate_approval_risky_asks_others_run() {
+	ctx := ApprovalContext{
+		risky_tools: ['bash']
+	}
+	assert evaluate_approval('bash', 'ls -la', ctx).action == .ask
+	assert evaluate_approval('read_file', '{"path":"./a.v"}', ctx).action == .run
+}
+
+// ---------- evaluate_approval: plan-mode guard -----------------------------
+
+fn test_evaluate_approval_plan_guard_write_to_non_plan_file_denies() {
+	ctx := ApprovalContext{
+		risky_tools:    ['bash', 'write_file']
+		plan_active:    true
+		plan_file_path: '/tmp/kimi_plan.md'
+	}
+	v := evaluate_approval('write_file', '{"path":"./src/main.v","content":"x"}', ctx)
+	assert v.action == .deny
+	// Reason matches the existing plan-mode prompt text.
+	assert v.reason.contains('Plan mode is active')
+	assert v.reason.contains('/tmp/kimi_plan.md')
+	assert v.reason.contains('ExitPlanMode')
+}
+
+fn test_evaluate_approval_plan_guard_write_to_plan_file_not_denied() {
+	ctx := ApprovalContext{
+		risky_tools:    ['bash', 'write_file']
+		plan_active:    true
+		plan_file_path: '/tmp/kimi_plan.md'
+	}
+	// The plan file itself is the one path plan mode permits: not a deny.
+	// write_file is risky, so the chain still asks (step 5).
+	v := evaluate_approval('write_file', '{"path":"/tmp/kimi_plan.md","content":"# plan"}', ctx)
+	assert v.action != .deny
+	assert v.action == .ask
+}
+
+fn test_evaluate_approval_plan_guard_write_without_plan_file_denies() {
+	ctx := ApprovalContext{
+		risky_tools:    ['bash', 'write_file']
+		plan_active:    true
+		plan_file_path: ''
+	}
+	v := evaluate_approval('write_file', '{"path":"./src/main.v","content":"x"}', ctx)
+	assert v.action == .deny
+	assert v.reason.contains('No plan file is available')
+}
+
+fn test_evaluate_approval_plan_guard_denies_cron_and_task_stop() {
+	ctx := ApprovalContext{
+		risky_tools:    ['bash', 'write_file']
+		plan_active:    true
+		plan_file_path: '/tmp/kimi_plan.md'
+	}
+	for tool in ['CronCreate', 'CronDelete', 'TaskStop'] {
+		v := evaluate_approval(tool, '{}', ctx)
+		assert v.action == .deny, '${tool} should be denied in plan mode'
+		assert v.reason.contains('Plan mode is active')
+		assert v.reason.contains(tool)
+	}
+	// Outside plan mode these tools are unrestricted.
+	ctx2 := ApprovalContext{
+		risky_tools: ['bash', 'write_file']
+	}
+	assert evaluate_approval('CronCreate', '{}', ctx2).action == .run
+	assert evaluate_approval('TaskStop', '{}', ctx2).action == .run
+}
+
+fn test_evaluate_approval_plan_guard_bash_asks_not_denies() {
+	ctx := ApprovalContext{
+		risky_tools:    ['bash']
+		plan_active:    true
+		plan_file_path: '/tmp/kimi_plan.md'
+	}
+	// bash is not blocked by the plan guard; it follows the normal path and
+	// asks for approval (it's risky, and plan mode disables session-approval).
+	v := evaluate_approval('bash', 'git status', ctx)
+	assert v.action != .deny
+	assert v.action == .ask
+}
+
+// ---------- is_sensitive: git write detection ------------------------------
+
+fn test_is_sensitive_bash_git_writes() {
+	// Git write operations trip the deny list even when bash is otherwise
+	// always-allowed / yolo — the policy chain re-prompts at step 3.
+	assert is_sensitive('bash', 'git commit -m "wip"')
+	assert is_sensitive('bash', 'git push origin main')
+	assert is_sensitive('bash', 'git reset --hard HEAD~1')
+	assert is_sensitive('bash', 'git rebase -i HEAD~3')
+	assert is_sensitive('bash', 'git merge feature/foo')
+	assert is_sensitive('bash', 'git pull origin main')
+	assert is_sensitive('bash', 'git checkout -- src/main.v')
+	assert is_sensitive('bash', 'git restore src/main.v')
+	assert is_sensitive('bash', 'git clean -fd')
+	assert is_sensitive('bash', 'git branch -D tmp')
+	assert is_sensitive('bash', 'git branch -d tmp')
+	assert is_sensitive('bash', 'git tag -d v1.0')
+	assert is_sensitive('bash', 'git stash drop')
+	assert is_sensitive('bash', 'git stash clear')
+	assert is_sensitive('bash', 'git cherry-pick abc123')
+	assert is_sensitive('bash', 'git revert HEAD')
+	assert is_sensitive('bash', 'git am 0001-fix.patch')
+	assert is_sensitive('bash', 'git update-ref refs/heads/main abc123')
+	assert is_sensitive('bash', 'git filter-branch --tree-filter rm')
+	assert is_sensitive('bash', 'git reflog expire --expire=now --all')
+}
+
+fn test_is_sensitive_bash_git_reads() {
+	// Read-only git commands must NOT trip the deny list.
+	assert !is_sensitive('bash', 'git status')
+	assert !is_sensitive('bash', 'git log --oneline')
+	assert !is_sensitive('bash', 'git diff')
+	assert !is_sensitive('bash', 'git clone https://github.com/x/y.git')
 }

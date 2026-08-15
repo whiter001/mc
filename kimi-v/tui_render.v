@@ -75,6 +75,11 @@ fn render(s TuiState, ib InputBuf) string {
 		buf.write_string('  [PLAN MODE]')
 		buf.write_string(esc_gray)
 	}
+	if s.goal_summary.len > 0 {
+		buf.write_string(esc_yellow)
+		buf.write_string('  [${s.goal_summary}]')
+		buf.write_string(esc_gray)
+	}
 	if s.input_tokens > 0 || s.output_tokens > 0 {
 		buf.write_string('  ─  tokens: ${s.input_tokens}↑ ${s.output_tokens}↓')
 	}
@@ -154,7 +159,7 @@ fn render(s TuiState, ib InputBuf) string {
 
 	// 8. Approval modal (drawn last so it sits on top of the input row).
 	if req := s.pending_approval {
-		render_approval_modal(mut buf, req, s.cols)
+		render_approval_modal(mut buf, req, s.pending_approval_diff, s.cols, s.rows)
 	}
 
 	// 9. AskUserQuestion modal (also drawn last / on top).
@@ -230,13 +235,70 @@ fn render_exit_plan_modal(mut buf strings.Builder, req ExitPlanRequest, cols int
 	buf.write_string(cursor_show())
 }
 
-// render_approval_modal draws a single-line "y/n" prompt anchored to the
-// bottom of the screen. We use a single bright row instead of a centered
-// box to keep the diff small; users on narrow terminals still see the
-// prompt and the tool name.
-fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, _ int) {
-	// Truncate the args display so a 4KB bash command doesn't flood the
-	// modal. 200 chars is enough to see what's about to run.
+// render_approval_modal draws the tool-approval overlay anchored to the
+// bottom of the screen. With a cached diff preview (edit_file /
+// write_file) it shows the changed lines: a blue header with the target
+// path, up to 12 colored diff rows (red - / green + / gray context), and
+// the y/a/n hint. Without a preview it falls back to a single-line prompt
+// with a truncated args preview. The diff is precomputed by the event
+// loop — this function never reads files or recomputes diffs.
+fn render_approval_modal(mut buf strings.Builder, req ApprovalRequest, diff []DiffLine, cols int, rows int) {
+	if diff.len == 0 {
+		render_approval_modal_single(mut buf, req)
+		return
+	}
+	// Multi-line modal: header (blue) + diff rows (red/green/gray) + hint.
+	mut height := 2 // header + hint
+	mut header := '⚠ approve ${req.tool_name}?'
+	path := approval_args_path(req.tool_name, req.args)
+	if path.len > 0 {
+		header += '  (${path})'
+	}
+	compacted := compact_diff(diff)
+	height += compacted.len
+	start_row := if rows > height { rows - height + 1 } else { 1 }
+
+	write_approval_row(mut buf, start_row, esc_bg_blue, esc + '[97m', header, cols)
+	mut r := 1
+	for dl in compacted {
+		color := match dl.op {
+			.del { esc_red }
+			.add { esc_green }
+			.eq { esc_gray }
+		}
+		prefix := match dl.op {
+			.del { '- ' }
+			.add { '+ ' }
+			.eq { '  ' }
+		}
+		write_approval_row(mut buf, start_row + r, esc + '[100m', color, prefix + dl.text, cols)
+		r++
+	}
+	write_approval_row(mut buf, start_row + r, esc + '[100m', esc_gray,
+		'[y]es  [a]lways  [n]o', cols)
+	buf.write_string(cursor_show())
+}
+
+// write_approval_row clears one row, applies a background + foreground
+// color, writes the text truncated to the terminal width, and resets.
+// Shared by the single- and multi-line approval modals.
+fn write_approval_row(mut buf strings.Builder, row int, bg string, fg string, text string, cols int) {
+	buf.write_string(esc + '[${row};1H')
+	buf.write_string(esc + '[2K')
+	buf.write_string(bg)
+	buf.write_string(fg)
+	buf.write_string('  ')
+	// Truncate to terminal width to avoid wrap.
+	disp := if text.len > cols - 3 { text[..cols - 4] + '…' } else { text }
+	buf.write_string(disp)
+	buf.write_string(esc_reset)
+}
+
+// render_approval_modal_single draws the compact single-line "y/n"
+// prompt used when there is no diff preview. The args display is
+// truncated so a 4KB bash command doesn't flood the modal. 200 chars is
+// enough to see what's about to run.
+fn render_approval_modal_single(mut buf strings.Builder, req ApprovalRequest) {
 	preview := if req.args.len > 200 { req.args[..200] + '...' } else { req.args }
 	// Move to the last line; clear it; write the prompt; show cursor.
 	buf.write_string(esc + '[${0};1H')

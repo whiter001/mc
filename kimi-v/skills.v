@@ -7,9 +7,12 @@
 // is activated (via the `Agent` model calling it, or the user's `/skill:NAME`
 // slash command).
 //
-// Skills are discovered from two roots:
+// Skills are discovered from three roots:
 //   - project:  <cwd>/.kimi/skills/<name>/SKILL.md
 //   - user:     <config-dir>/skills/<name>/SKILL.md
+//   - plugin:   <config-dir>/plugins/<name>/... (issue #13; the plugin's
+//     manifest lists skill directories, or the plugin root itself is a
+//     skill when it carries a SKILL.md — rootSkillFallback)
 //
 // The PARITY_PLAN locks the description language to YAML frontmatter (2026-
 // 07-11), matching upstream + the Claude Code ecosystem, so we parse the
@@ -24,6 +27,7 @@ import os
 pub enum SkillSource {
 	project
 	user
+	plugin
 }
 
 // SkillDefinition is a fully-parsed skill.
@@ -74,9 +78,10 @@ pub fn (c SkillCatalog) list_invokable() []SkillDefinition {
 	return out
 }
 
-// discover_skills scans the project + user skill roots and returns a catalog.
-// Errors reading individual skills are skipped (logged to stderr) so one bad
-// skill doesn't break the whole run.
+// discover_skills scans the project + user skill roots, then injects plugin
+// skills (issue #13), and returns a catalog. Errors reading individual
+// skills are skipped (logged to stderr) so one bad skill doesn't break the
+// whole run.
 pub fn discover_skills(cwd string) SkillCatalog {
 	mut catalog := SkillCatalog{ skills: []SkillDefinition{} }
 
@@ -87,6 +92,25 @@ pub fn discover_skills(cwd string) SkillCatalog {
 	// Project root (relative to cwd).
 	project_root := os.join_path(cwd, '.kimi', 'skills')
 	scan_skill_root(mut catalog, project_root, .project)
+
+	// Plugin roots. A plugin whose root carries a SKILL.md is itself a
+	// single skill (rootSkillFallback); other plugins list skill
+	// directories in their manifest. Broken plugins are skipped with a
+	// warning by discover_plugins.
+	for plugin in discover_plugins() {
+		if plugin.root_skill_fallback {
+			skill_path := os.join_path(plugin.root, 'SKILL.md')
+			def := parse_skill_file(skill_path, .plugin) or {
+				eprintln('[warn] failed to parse plugin skill ${skill_path}: ${err.msg()}')
+				continue
+			}
+			catalog.skills << def
+		} else {
+			for dir in plugin.skills_dirs {
+				scan_skill_root(mut catalog, dir, .plugin)
+			}
+		}
+	}
 
 	return catalog
 }

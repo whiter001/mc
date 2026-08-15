@@ -211,6 +211,148 @@ fn test_format_messages_includes_tool_calls() {
 	assert s.contains('"cmd":"ls"')
 }
 
+// ---------- micro_compact ------------------------------------------------
+
+// long_tool_message builds a tool result whose content is far above the
+// micro-compaction threshold.
+fn long_tool_message(id string) Message {
+	return Message{
+		role:         .tool
+		content:      'x'.repeat(500) // 500 bytes > micro_min_content_bytes (300)
+		tool_call_id: id
+		name:         'bash'
+	}
+}
+
+// short_tool_message builds a tool result whose content is below the
+// micro-compaction threshold.
+fn short_tool_message(id string) Message {
+	return Message{
+		role:         .tool
+		content:      'ok' // 2 bytes < micro_min_content_bytes (300)
+		tool_call_id: id
+		name:         'bash'
+	}
+}
+
+fn test_micro_compact_truncates_old_long_tool_messages() {
+	// 5 long tool results before the keep-recent cutoff, then 20 filler
+	// messages to fill out the untouched tail.
+	mut msgs := []Message{}
+	for i in 0 .. 5 {
+		msgs << long_tool_message('${i}')
+	}
+	for i in 0 .. 20 {
+		msgs << Message{ role: .user, content: 'user ${i}' }
+	}
+	assert msgs.len == 25
+	out, truncated := micro_compact(msgs)
+	assert truncated == 5, 'got ${truncated}'
+	assert out.len == 25
+	// Old tool contents are replaced by the marker, other fields preserved.
+	assert out[0].content == micro_truncated_marker
+	assert out[4].content == micro_truncated_marker
+	assert out[0].role == .tool
+	assert out[0].tool_call_id == '0'
+	assert out[0].name == 'bash'
+	// The recent tail is untouched.
+	assert out[5].content == 'user 0'
+	assert out[24].content == 'user 19'
+}
+
+fn test_micro_compact_keeps_recent_messages_untouched() {
+	// A long tool result inside the last 20 messages must NOT be truncated.
+	mut msgs := []Message{}
+	for i in 0 .. 19 {
+		msgs << Message{ role: .user, content: 'user ${i}' }
+	}
+	msgs << long_tool_message('recent') // index 19, within the last 20
+	assert msgs.len == 20
+	out, truncated := micro_compact(msgs)
+	assert truncated == 0, 'got ${truncated}'
+	assert out.len == 20
+	assert out[19].content == 'x'.repeat(500)
+}
+
+fn test_micro_compact_keeps_recent_tool_messages() {
+	// Long tool results that fall inside the keep-recent tail are kept
+	// verbatim, even when older ones ahead of them are cleared.
+	mut msgs := []Message{}
+	msgs << long_tool_message('old') // index 0, before the cutoff
+	for i in 0 .. 19 {
+		msgs << Message{ role: .user, content: 'user ${i}' }
+	}
+	msgs << long_tool_message('recent') // index 20, within the last 20
+	assert msgs.len == 21
+	out, truncated := micro_compact(msgs)
+	assert truncated == 1, 'got ${truncated}'
+	assert out[0].content == micro_truncated_marker
+	assert out[20].content == 'x'.repeat(500)
+	assert out[20].tool_call_id == 'recent'
+}
+
+fn test_micro_compact_ignores_non_tool_messages() {
+	// Long non-tool messages (user/assistant) are never truncated.
+	mut msgs := []Message{}
+	msgs << Message{ role: .user, content: 'u'.repeat(1000) }
+	msgs << Message{ role: .assistant, content: 'a'.repeat(1000) }
+	for i in 0 .. 19 {
+		msgs << Message{ role: .user, content: 'user ${i}' }
+	}
+	assert msgs.len == 21
+	out, truncated := micro_compact(msgs)
+	assert truncated == 0, 'got ${truncated}'
+	assert out.len == 21
+	assert out[0].content == 'u'.repeat(1000)
+	assert out[1].content == 'a'.repeat(1000)
+}
+
+fn test_micro_compact_keeps_short_tool_content() {
+	// Short tool results are left as-is even when they're old.
+	mut msgs := []Message{}
+	msgs << short_tool_message('1')
+	msgs << short_tool_message('2')
+	for i in 0 .. 19 {
+		msgs << Message{ role: .user, content: 'user ${i}' }
+	}
+	// cutoff = 21 - 20 = 1: index 0 is old, index 1 is recent.
+	out, truncated := micro_compact(msgs)
+	assert truncated == 0, 'got ${truncated}'
+	assert out[0].content == 'ok'
+	assert out[1].content == 'ok'
+}
+
+fn test_micro_compact_is_idempotent() {
+	// Running micro-compact twice yields the same result; the second run
+	// truncates nothing because the marker is far shorter than the
+	// threshold.
+	mut msgs := []Message{}
+	for i in 0 .. 5 {
+		msgs << long_tool_message('${i}')
+	}
+	for i in 0 .. 20 {
+		msgs << Message{ role: .user, content: 'user ${i}' }
+	}
+	first, truncated_first := micro_compact(msgs)
+	assert truncated_first == 5, 'got ${truncated_first}'
+	second, truncated_second := micro_compact(first)
+	assert truncated_second == 0, 'got ${truncated_second}'
+	assert second.len == first.len
+	for i, m in first {
+		assert second[i].content == m.content
+	}
+}
+
+fn test_micro_compact_noop_when_few_messages() {
+	// Sessions at or below the keep-recent bound are returned unchanged.
+	msgs := [long_tool_message('1'), long_tool_message('2')]
+	out, truncated := micro_compact(msgs)
+	assert truncated == 0
+	assert out.len == 2
+	assert out[0].content == 'x'.repeat(500)
+	assert out[1].content == 'x'.repeat(500)
+}
+
 // ---------- compact(): no-op cases ---------------------------------------
 
 fn test_compact_noop_when_under_threshold() {

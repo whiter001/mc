@@ -94,13 +94,16 @@ pub mut:
 	// Retries per step on transient provider errors (parity with
 	// kimi-code's [loop_control] max_retries_per_step). Wired from
 	// Config by the runner; cancellations are never retried.
-	max_retries_per_step int = 3
+	max_retries_per_step int = 10
 	registry  ToolRegistry
 	// When non-nil, the agent streams deltas as it receives them. Used by
 	// the TUI; P0 single-shot mode ignores it.
 	on_delta    ?fn (string) // regular content
 	on_thinking ?fn (string) // reasoning/thinking content
-	on_tool     ?fn (string, string) // (name, args)
+	on_tool     ?fn (string, string, string) // (id, name, args)
+	// Tool-result callback: invoked once per executed tool with its
+	// outcome. Args are (id, name, is_error).
+	on_tool_done ?fn (string, string, bool)
 	// Compaction callback: invoked when context is compacted. Args are
 	// (estimated_tokens_before, estimated_tokens_after). The TUI uses
 	// this to surface a system block.
@@ -208,6 +211,22 @@ pub mut:
 	// runner to enforce the subagent timeout; the check lives at the top of
 	// each loop iteration in run().
 	deadline_ms i64
+	// Session goal (parity with kimi-code's Goal system). Created by the
+	// CreateGoal tool; while a goal is `.active` the run() loop keeps the
+	// session going with a continuation prompt until the model adjudicates
+	// it via UpdateGoal or a budget set with SetGoalBudget is reached.
+	goal ?GoalState
+	// Goal-change callback: invoked with (badge, detail) whenever the goal
+	// state changes (create / resume / complete / blocked / budget-stop /
+	// per-goal-turn count). The TUI wires this to its status channel;
+	// '' badge means no goal.
+	on_goal_change ?fn (string, string)
+	// Session cron jobs (parity with kimi-code's cron tool). Managed by the
+	// CronCreate/CronList/CronDelete tools; persisted per session under
+	// <config-dir>/cron/<session-id>.json. The TUI scheduler polls this
+	// list and injects due jobs as user turns. Restored on session load
+	// via restore_cron_tasks.
+	cron_tasks []CronTask
 }
 
 // new_agent creates an Agent with default channels, thresholds, and an
@@ -491,7 +510,7 @@ pub fn (mut a Agent) step(mut sess Session) !StepResult {
 							arguments: ev.arguments
 						}
 						if cb := a.on_tool {
-							cb(ev.name, ev.arguments)
+							cb(ev.id, ev.name, ev.arguments)
 						}
 					}
 					.usage {

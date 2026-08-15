@@ -10,7 +10,11 @@
 
 # ---- Provider ----
 
-# Provider backend. Currently only "openai-compat" is supported.
+# Provider backend. One of:
+#   "openai-compat"    - OpenAI-compatible chat completions (default)
+#   "anthropic"        - Anthropic Messages API
+#   "openai-responses" - OpenAI Responses API (SSE streaming; reasoning +
+#                        function-call-output wire format)
 # Env: KIMI_PROVIDER
 provider = "openai-compat"
 
@@ -49,10 +53,10 @@ max_tokens = 4096
 # ---- Loop control ----
 
 # Max retries per agent step on transient provider errors (HTTP 429 / 5xx /
-# connection failures). Exponential backoff 1s/2s/4s... capped at 30s.
+# connection failures). Exponential backoff 0.5s/1s/2s... capped at 32s.
 # Env: KIMI_LOOP_MAX_RETRIES_PER_STEP
 # [loop_control]
-# max_retries_per_step = 3
+# max_retries_per_step = 10
 
 # ---- Permissions ----
 
@@ -123,6 +127,25 @@ output_format = "text"
 # matcher = "bash"
 # command = "python3 ~/.config/kimi/hooks/audit.py"
 # timeout = 10
+
+# ---- Web search ----
+
+# Backend provider for the web_search tool.
+#   "duckduckgo" (default) - key-free, scrapes DuckDuckGo's HTML endpoint
+#   "moonshot"             - Moonshot hosted search API (requires api_key)
+# Env: KIMI_WEB_SEARCH_PROVIDER
+# [web_search]
+# provider = "duckduckgo"
+
+# For the "moonshot" provider: hosted search endpoint (POST JSON body
+# {"text_query": query}, Bearer auth).
+# Env: KIMI_WEB_SEARCH_BASE_URL
+# base_url = "https://api.moonshot.cn/v1/search"
+
+# For the "moonshot" provider: API key sent as the Bearer token. When empty,
+# the tool falls back to the main provider api_key (KIMI_API_KEY).
+# Env: KIMI_WEB_SEARCH_API_KEY
+# api_key = "sk-..."
 
 # ---- MCP servers ----
 

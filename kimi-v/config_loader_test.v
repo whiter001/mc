@@ -72,7 +72,7 @@ fn test_apply_toml_loop_control_max_retries() {
 fn test_apply_toml_loop_control_missing_keeps_default() {
 	mut cfg := default_config()
 	apply_toml(mut cfg, 'provider = "openai-compat"')
-	assert cfg.max_retries_per_step == 3
+	assert cfg.max_retries_per_step == 10
 }
 
 fn test_apply_env_max_retries_override() {
@@ -88,7 +88,7 @@ fn test_apply_env_max_retries_invalid_keeps_default() {
 	defer { os.setenv('KIMI_LOOP_MAX_RETRIES_PER_STEP', '', true) }
 	mut cfg := default_config()
 	apply_env(mut cfg)
-	assert cfg.max_retries_per_step == 3
+	assert cfg.max_retries_per_step == 10
 }
 
 // ---------- [permission.rules] ----------------------------------------------
@@ -137,4 +137,59 @@ fn test_apply_toml_permission_rules_bad_entries_skipped() {
 	assert cfg.permission_rules.len == 1
 	assert cfg.permission_rules[0].decision == 'deny'
 	assert cfg.permission_rules[0].pattern == 'Bash(rm -rf *)'
+}
+
+// ---------- [web_search] ---------------------------------------------------
+
+fn test_apply_toml_web_search_table() {
+	mut cfg := default_config()
+	apply_toml(mut cfg, '[web_search]\n' +
+		'provider = "moonshot"\n' +
+		'base_url = "https://search.example/v1"\n' +
+		'api_key = "sk-test"\n')
+	assert cfg.web_search.provider == 'moonshot'
+	assert cfg.web_search.base_url == 'https://search.example/v1'
+	assert cfg.web_search.api_key == 'sk-test'
+}
+
+fn test_apply_toml_web_search_missing_keeps_defaults() {
+	// No [web_search] table → built-in defaults: key-free DDG, Moonshot
+	// base URL ready for when the user switches provider.
+	mut cfg := default_config()
+	apply_toml(mut cfg, 'provider = "openai-compat"')
+	assert cfg.web_search.provider == 'duckduckgo'
+	assert cfg.web_search.base_url == 'https://api.moonshot.cn/v1/search'
+	assert cfg.web_search.api_key.len == 0
+}
+
+fn test_apply_toml_web_search_invalid_provider_falls_back() {
+	// Unknown provider → warning + fallback to 'duckduckgo' (fail-open):
+	// a typo must never break the tool.
+	mut cfg := default_config()
+	apply_toml(mut cfg, '[web_search]\nprovider = "yahoo"\n')
+	assert cfg.web_search.provider == 'duckduckgo'
+}
+
+fn test_apply_env_web_search_overrides() {
+	os.setenv('KIMI_WEB_SEARCH_PROVIDER', 'moonshot', true)
+	os.setenv('KIMI_WEB_SEARCH_BASE_URL', 'https://search.example/v1', true)
+	os.setenv('KIMI_WEB_SEARCH_API_KEY', 'sk-env', true)
+	defer {
+		os.setenv('KIMI_WEB_SEARCH_PROVIDER', '', true)
+		os.setenv('KIMI_WEB_SEARCH_BASE_URL', '', true)
+		os.setenv('KIMI_WEB_SEARCH_API_KEY', '', true)
+	}
+	mut cfg := default_config()
+	apply_env(mut cfg)
+	assert cfg.web_search.provider == 'moonshot'
+	assert cfg.web_search.base_url == 'https://search.example/v1'
+	assert cfg.web_search.api_key == 'sk-env'
+}
+
+fn test_apply_env_web_search_invalid_provider_falls_back() {
+	os.setenv('KIMI_WEB_SEARCH_PROVIDER', 'bing', true)
+	defer { os.setenv('KIMI_WEB_SEARCH_PROVIDER', '', true) }
+	mut cfg := default_config()
+	apply_env(mut cfg)
+	assert cfg.web_search.provider == 'duckduckgo'
 }

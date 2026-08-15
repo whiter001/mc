@@ -11,8 +11,9 @@
 // the stdout protocol stream.
 //
 // P4 subset notes:
-//   - Only `text` content blocks are supported; thinking / tool-call
-//     streaming updates are not emitted (deltas are plain agent_message_chunk).
+//   - Streaming updates cover text (agent_message_chunk), thinking
+//     (agent_thought_chunk) and tool calls (tool_call / tool_call_update).
+//   - Only `text` content blocks are accepted in session/prompt input.
 //   - mcpServers in session/new / session/load are accepted and ignored
 //     (config-level MCP servers from config.toml are still connected).
 //   - session/close, session/list, session/delete and fs / terminal
@@ -449,7 +450,7 @@ fn (mut s AcpServer) run_prompt_turn(id int, sid string, text string, turn int) 
 	mut a := new_agent(provider, system)
 	a.max_turns = s.cfg.max_turns
 	a.max_retries_per_step = s.cfg.max_retries_per_step
-	a.registry = default_registry(mut a, cwd, s.cfg.mcp_servers)
+	a.registry = default_registry(mut a, cwd, s.cfg.mcp_servers, s.cfg.web_search)
 	defer {
 		close_all_mcp_servers(mut a.mcp_clients)
 	}
@@ -472,10 +473,28 @@ fn (mut s AcpServer) run_prompt_turn(id int, sid string, text string, turn int) 
 	a.on_delta = fn [mut s, sid, mid] (chunk string) {
 		s.send_update(sid, mid, chunk)
 	}
-	// on_thinking / on_tool are intentionally not wired: the P4 subset
-	// streams plain text deltas only.
+	// Stream thinking deltas as agent_thought_chunk updates and tool calls
+	// as tool_call / tool_call_update updates. These callbacks fire on the
+	// agent goroutine; they capture `mut s` / `sid` / `mid` (like on_delta)
+	// and serialize through the write mutex inside write_line, so concurrent
+	// turns on other sessions cannot interleave protocol lines.
+	a.on_thinking = fn [mut s, sid, mid] (chunk string) {
+		s.send_thought_update(sid, mid, chunk)
+	}
+	a.on_tool = fn [mut s, sid] (id string, name string, _ string) {
+		s.send_tool_call(sid, id, name)
+	}
+	a.on_tool_done = fn [mut s, sid] (id string, _ string, is_error bool) {
+		s.send_tool_done(sid, id, is_error)
+	}
 
 	mut sess := es.sess
+	// Restore a persisted goal onto this turn's agent (a fresh Agent is
+	// built per turn, so the goal must be re-attached each time).
+	restore_goal_from_metadata(mut a, sess)
+	// Restore the session's cron table so the Cron tools see existing
+	// jobs. ACP runs no scheduler (headless); mutations persist eagerly.
+	restore_cron_tasks(mut a, sess)
 	sess.append_user(text)
 	result := a.run(mut sess) or {
 		// `cancelled` is a normal (client-requested) end; everything else
@@ -487,10 +506,12 @@ fn (mut s AcpServer) run_prompt_turn(id int, sid string, text string, turn int) 
 			s.log.error('acp: turn ${mid} failed: ${err.msg()}')
 			s.send_error(id, -32603, err.msg())
 		}
+		stash_goal_metadata(mut sess, a.goal)
 		s.finish_turn(sid, sess)
 		return
 	}
 	s.send_result(id, '{"stopReason":"' + acp_stop_reason(result.outcome) + '"}')
+	stash_goal_metadata(mut sess, a.goal)
 	s.finish_turn(sid, sess)
 }
 
@@ -566,6 +587,56 @@ fn acp_chunk_update(sid string, mid string, text string) string {
 		'"messageId":"${mid}","content":{"type":"text","text":${json2.encode(text)}}}}'
 }
 
+// acp_thought_chunk_update builds the params object for a session/update
+// notification carrying one thinking chunk:
+//
+//	{"sessionId":"<sid>","update":{"sessionUpdate":"agent_thought_chunk",
+//	 "messageId":"<mid>","content":{"type":"text","text":"<text>"}}}
+fn acp_thought_chunk_update(sid string, mid string, text string) string {
+	return '{"sessionId":"${sid}","update":{"sessionUpdate":"agent_thought_chunk",' +
+		'"messageId":"${mid}","content":{"type":"text","text":${json2.encode(text)}}}}'
+}
+
+// acp_tool_call_update builds the params object for a session/update
+// notification creating a tool-call card:
+//
+//	{"sessionId":"<sid>","update":{"sessionUpdate":"tool_call",
+//	 "toolCallId":"<id>","title":"<name>","kind":"<kind>","status":"in_progress"}}
+fn acp_tool_call_update(sid string, id string, name string, kind string) string {
+	return '{"sessionId":"${sid}","update":{"sessionUpdate":"tool_call",' +
+		'"toolCallId":${json2.encode(id)},"title":${json2.encode(name)},' +
+		'"kind":${json2.encode(kind)},"status":"in_progress"}}'
+}
+
+// acp_tool_done_update builds the params object for a session/update
+// notification closing a tool-call card. `status` is 'completed' or 'failed'.
+//
+//	{"sessionId":"<sid>","update":{"sessionUpdate":"tool_call_update",
+//	 "toolCallId":"<id>","status":"completed"}}
+fn acp_tool_done_update(sid string, id string, status string) string {
+	return '{"sessionId":"${sid}","update":{"sessionUpdate":"tool_call_update",' +
+		'"toolCallId":${json2.encode(id)},"status":"${status}"}}'
+}
+
+// acp_tool_kind maps a tool name to an ACP ToolKind (P4 subset of the
+// protocol's ToolKind values). Unknown tools default to 'other'.
+fn acp_tool_kind(name string) string {
+	return match name {
+		'bash' { 'execute' }
+		'write_file', 'edit_file' { 'edit' }
+		'read_file' { 'read' }
+		'grep', 'glob' { 'search' }
+		'web_fetch', 'web_search' { 'fetch' }
+		else { 'other' }
+	}
+}
+
+// acp_tool_done_status maps a tool result's is_error flag to the ACP
+// tool_call_update status value.
+fn acp_tool_done_status(is_error bool) string {
+	return if is_error { 'failed' } else { 'completed' }
+}
+
 // acp_build_result wraps a pre-encoded result JSON object in a JSON-RPC
 // response envelope.
 fn acp_build_result(id int, result_json string) string {
@@ -598,6 +669,21 @@ fn (mut s AcpServer) send_error(id int, code int, msg string) {
 // send_update streams one agent_message_chunk update for a session.
 fn (mut s AcpServer) send_update(sid string, mid string, text string) {
 	s.write_line(acp_build_notification('session/update', acp_chunk_update(sid, mid, text)))
+}
+
+// send_thought_update streams one agent_thought_chunk update for a session.
+fn (mut s AcpServer) send_thought_update(sid string, mid string, text string) {
+	s.write_line(acp_build_notification('session/update', acp_thought_chunk_update(sid, mid, text)))
+}
+
+// send_tool_call streams one tool_call update creating a tool-call card.
+fn (mut s AcpServer) send_tool_call(sid string, id string, name string) {
+	s.write_line(acp_build_notification('session/update', acp_tool_call_update(sid, id, name, acp_tool_kind(name))))
+}
+
+// send_tool_done streams one tool_call_update closing a tool-call card.
+fn (mut s AcpServer) send_tool_done(sid string, id string, is_error bool) {
+	s.write_line(acp_build_notification('session/update', acp_tool_done_update(sid, id, acp_tool_done_status(is_error))))
 }
 
 // write_line emits one protocol line on stdout, mutex-protected and flushed

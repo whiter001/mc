@@ -5,18 +5,33 @@
 // path is verified manually.
 module main
 
-fn test_retry_backoff_ms_exponential() {
-	assert retry_backoff_ms(1) == 1000
-	assert retry_backoff_ms(2) == 2000
-	assert retry_backoff_ms(3) == 4000
-	assert retry_backoff_ms(4) == 8000
+fn test_retry_backoff_base_ms_exponential() {
+	// Deterministic base sequence: 500ms * 2^(attempt-1), no jitter.
+	assert retry_backoff_base_ms(1) == 500
+	assert retry_backoff_base_ms(2) == 1000
+	assert retry_backoff_base_ms(3) == 2000
+	assert retry_backoff_base_ms(4) == 4000
+	assert retry_backoff_base_ms(5) == 8000
+	assert retry_backoff_base_ms(6) == 16000
 }
 
-fn test_retry_backoff_ms_capped_at_30s() {
-	assert retry_backoff_ms(5) == 16000
-	assert retry_backoff_ms(6) == 30000
-	assert retry_backoff_ms(7) == 30000
-	assert retry_backoff_ms(100) == 30000
+fn test_retry_backoff_base_ms_capped_at_32s() {
+	assert retry_backoff_base_ms(7) == 32000
+	assert retry_backoff_base_ms(8) == 32000
+	assert retry_backoff_base_ms(100) == 32000
+}
+
+fn test_retry_backoff_ms_jitter_stays_in_range() {
+	// Jitter is +0..25% on top of the (capped) base, so every returned
+	// value must land in [base, base * 1.25].
+	for attempt in 1 .. 20 {
+		base := retry_backoff_base_ms(attempt)
+		for _ in 0 .. 50 {
+			got := retry_backoff_ms(attempt)
+			assert got >= base
+			assert got <= base * 125 / 100
+		}
+	}
 }
 
 fn test_is_retryable_status() {

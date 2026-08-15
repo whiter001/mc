@@ -29,11 +29,14 @@
 - ✅ **P2 权限规则引擎**：`[[permission.rules]]` 定义 deny / allow / ask 规则（`Tool(glob)` 模式），deny 无条件优先，allow 免弹窗、ask 强制弹窗
 - ✅ **P2 审批记忆**：审批模态按 `a` 记住「always allow」，持久化到 `<config-dir>/approved_tools`，重启自动加载；`/approvals` 查看、`/approvals clear` 清空
 - ✅ **AGENTS.md 指令加载**：启动时把 `<config-dir>/AGENTS.md`、`~/.agents/AGENTS.md`、`<cwd>/.kimi/AGENTS.md`、`<cwd>/AGENTS.md` 按序拼进 system prompt（用户 `--system` 之后；-p 与 TUI 均生效）
-- ✅ **瞬态错误自动重试**：`[loop_control] max_retries_per_step`（默认 3，env `KIMI_LOOP_MAX_RETRIES_PER_STEP` 可覆盖），429 / 5xx / 连接失败指数退避（1s/2s/4s…上限 30s）重试整个 step；Ctrl-C 可打断退避
+- ✅ **瞬态错误自动重试**：`[loop_control] max_retries_per_step`（默认 10，env `KIMI_LOOP_MAX_RETRIES_PER_STEP` 可覆盖），429 / 5xx / 连接失败指数退避（0.5s/1s/2s…上限 32s，+25% jitter）重试整个 step；Ctrl-C 可打断退避
 - ✅ **Bash 工具超时**：`timeout_ms` 参数生效（默认 60s，上限 5min），超时 kill 整个进程组并返回带「timed out after N ms」的错误结果，模型可调大重试
 - ✅ **P2 sandbox**：`write_file` / `edit_file` 拒绝 `..` 逃逸到 cwd 外
 - ✅ **Plan-mode**：`/plan` 进入只读规划态；`EnterPlanMode` / `ExitPlanMode` 工具；规划态下除 plan 文件外禁止写文件；`ExitPlanMode` 弹出 plan 审阅模态（y 批准 / n 拒绝 / e 拒绝并退出 / r 修订 / Esc 忽略；多方案可数字键选）
-- ✅ **Slash 命令**：`/help` `/clear` `/new` `/sessions` `/login` `/model` `/plan` `/tokens` `/usage` `/compact` `/exit`
+- ✅ **Slash 命令**：`/help` `/clear` `/new` `/sessions` `/login` `/model` `/plan` `/goal` `/tokens` `/usage` `/compact` `/exit`
+- ✅ **Goal 系统**：`CreateGoal` / `GetGoal` / `UpdateGoal` / `SetGoalBudget` 工具；goal active 时 loop 自动续跑直到模型裁决 complete/blocked 或触及 turns/tokens/wall-clock 预算；Ctrl-C 自动暂停；goal 随 session 持久化（metadata base64 JSON），恢复时 active 降级为 paused；TUI header 显示 `[GOAL <status> · N turns]` 徽章，`/goal [pause|resume|cancel]` 查看与控制
+- ✅ **Cron 定时任务**：`CronCreate` / `CronList` / `CronDelete` 工具（5 字段 cron 表达式：分 时 日 月 周，本地时间；每 session 上限 50）；TUI 调度器每秒检查到期任务，包成 `<cron-fire>` 消息注入为一个 turn（agent 忙时排队、多个到期合并为最新一条）；one-shot 触发即删，recurring 跨过多个 fire 点只补一次；任务按 session 持久化到 `<config-dir>/cron/<session-id>.json`；headless `-p` / ACP 可用工具但不跑调度器
+- ✅ **Checkpoint/Undo**：`write_file` / `edit_file` 写盘前自动快照到 `<config-dir>/checkpoints/<session-id>/`（manifest + `<seq>.bak`，每 session 上限 50、超出淘汰最旧）；TUI `/undo` 撤销最近一次文件修改（已有文件恢复原文、新建文件删除），`/undo list` 查看快照列表；checkpoint 失败只告警不阻断写入
 - ✅ **键盘**：字符输入 / Enter / Backspace / Ctrl-A / Ctrl-E / Ctrl-U / Ctrl-W / Esc Esc 退出
 - ✅ **OAuth 登录**：RFC 8628 device flow（`kimi login --oauth`，浏览器授权）；凭据存 `<config-dir>/credentials.json`（文件 0600、目录 0700）；access token 过期后自动用 refresh token 续期；`kimi logout` 删除凭据
 
@@ -84,7 +87,7 @@
   ```
   协议文档：<https://agentclientprotocol.com/protocol/v1/overview>
 - [x] P5 子 agent（coder/explore/plan）+ hooks + skills ✅
-  - **子 agent**：`/agent` 或 `Agent` 工具派发 `coder` / `explore` / `plan` 三种预设 profile，独立 Session 递归运行，结果回流父 agent
+  - **子 agent**：`Agent` 工具派发 `coder` / `explore` / `plan` 三种预设 profile，独立 Session 递归运行，结果回流父 agent
   - **后台子 agent**：`Agent` 工具 `run_in_background: true` 时丢进 goroutine 异步执行，主循环不阻塞、可继续干活；`TaskList` 工具随时查看运行中/已完成任务及结果，完成结果以 `<background-agent-result>` 消息自动注入会话
   - **resume**：`Agent` 工具传 `resume: <agent-id>` 从持久化 session（`<config-dir>/sessions/subagents/`）续跑超时/中断的子 agent；与 `subagent_type` 互斥
   - **AgentSwarm**：一次派发多个子 agent —— `prompt_template` + `items` 批量展开（也可 `resume_agent_ids` 批量续跑），展开重复/缺占位符/未知类型在启动前校验；前台串行、后台（`run_in_background`）goroutine 并行，结束后汇总逐条结果
@@ -98,14 +101,14 @@
 对齐 `kimi-code` 的 `builtin/*` 工具集，补了 4 块日常高频能力：
 
 - **`grep` 升级为正则**：优先调用 `rg`（ripgrep，与上游一致，跳过 VCS/隐藏文件、支持 glob、`-i` 大小写不敏感）；`rg` 不可用时回退到 V 自带 `regex` 模块逐行匹配，仍无效则退到字串匹配。schema 新增 `include` 与 `i` 参数。
-- **`web_search`**：通过 DuckDuckGo HTML 端点做免 key 联网搜索，复用 `web_fetch` 的 HTML→text 管线解析结果，返回带标题/URL/摘要的编号列表。
+- **`web_search`**：后端 provider 可配置 —— 默认走 DuckDuckGo HTML 端点免 key 联网搜索（复用 `web_fetch` 的 HTML→text 管线解析结果）；也可切到 Moonshot 托管搜索 API（`[web_search]` 表配置 provider/base_url/api_key，见 `config.example.toml`）。返回带标题/URL/摘要的编号列表。
 - **`TodoWrite` / `TodoRead`**：会话级任务清单，状态存在 `Agent.todos` 上（Agent 已是 per-session 单例），`TodoWrite` 整体覆盖、`TodoRead` 读取并以 Markdown 渲染。
 - **`AskUserQuestion`**：模型向用户提问（单选/多选）。TUI 里渲染底部模态、数字键选择、逗号多选、Esc 跳过；`-p` 非交互模式超时返回提示，不阻塞。
 
 #### 新文件
 
 ```
-tools_web_search.v   # DuckDuckGo 搜索
+tools_web_search.v   # 可配置搜索 provider（DDG 默认 / Moonshot 托管）
 tools_todo.v          # TodoWrite / TodoRead
 tools_ask_user.v      # AskUserQuestion
 ```
@@ -481,8 +484,7 @@ Provider.chat()
 - **Bash 不做 sandbox**：解析 shell 太复杂，靠审批 + 用户眼睛盯。`write_file` / `edit_file` 已做路径边界
 - **Permission 模式不含嵌套括号**：`Tool(glob)` 只认第一个 `(` 与末尾 `)`，glob 内不能有 `)`（如 `Bash(cd /a && rm -rf *)` 里的括号不解析，会 warning 跳过）；含 `)` 的路径模式建议用通配写法覆盖
 - **`/approvals clear` 下一 turn 生效**：agent 在每 turn 开头重载持久化列表，所以 clear 后正在进行的 turn 里已批准的调用仍放行
-- **Grep 是字串匹配**：没接正则（`name.matches(rx)` 在 V 0.5 里不可用，手写 glob 已经替换）
-- **Glob 手写**：`*` `?` 支持，复杂模式不支持
+- **Grep 回退链**：优先 `rg`，`rg` 不可用回退 V `regex` 模块逐行匹配，正则编译失败退到字串匹配；`glob` 工具仍是手写 `*` `?`，复杂模式不支持
 - **TLS 证书验证**：默认接受所有证书（自签名友好），生产用法需要传 `SSLConnectConfig{ verify: '/path/to/ca.pem' }`
 - **Agent 的 channel lifecycle**：provider goroutine 在写完所有事件后 close channel；Agent.step 读 `.end_of_stream` sentinel 后退出
 - **V test 框架对 spawn goroutine 不友好**：跑完测试后 spawned goroutine 不退出，整个 process 会 hang。channel-based 的端到端测试只能手动验；policy / helper 走单测。

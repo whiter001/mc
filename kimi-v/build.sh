@@ -25,6 +25,8 @@
 #   PREFIX=/path           # install 前缀（默认：/usr/local）
 #   JOBS=N                 # 并行编译（默认：nproc）
 #   DEBUG_FLAGS=...        # 附加到 v -debug 的 flag
+#   MEMLIMIT_MB=2048       # 编译进程树内存上限（MB），0 = 关闭
+#   TEST_MEMLIMIT_MB=4096  # v test 进程树内存上限（MB），MEMLIMIT_MB=0 时同样关闭
 
 set -euo pipefail
 
@@ -71,6 +73,81 @@ host_arch() {
     uname -m
 }
 
+# ---------- 内存看门狗 -----------------------------------------------------
+# V 工具链偶发内存失控（泄露 / 无限分配），会把整机拖死。
+# macOS 的 ulimit -v 不生效，所以这里用一个轮询看门狗：
+# 后台跑命令，每秒统计其进程树 RSS 总量，超过 MEMLIMIT_MB 就整树杀掉。
+# MEMLIMIT_MB=0 关闭限制。
+# 2026-08 实测峰值：dev 469MB / prod 881MB / v test 2161~3241MB（测试要并行
+# 编译全部 test target，峰值随并行度波动、远高于 build），所以 test 单独用
+# 更大的 TEST_MEMLIMIT_MB（默认 4096）。
+
+MEMLIMIT_MB="${MEMLIMIT_MB:-2048}"
+TEST_MEMLIMIT_MB="${TEST_MEMLIMIT_MB:-4096}"
+
+# 打印 root 进程及其所有后代的 RSS 总和（KB）
+_tree_rss_kb() {
+    local root="$1"
+    ps -axo pid=,ppid=,rss= | awk -v root="$root" '
+        { pid=$1+0; mem[pid]=$3+0; kids[$2+0] = kids[$2+0] " " pid }
+        END {
+            total = 0; n = 1; stack[1] = root
+            while (n > 0) {
+                p = stack[n]; n--
+                total += mem[p]
+                split(kids[p], arr, " ")
+                for (i in arr) if (arr[i] != "") { n++; stack[n] = arr[i]+0 }
+            }
+            printf "%d", total
+        }'
+}
+
+# 打印 root 进程树的所有 pid（含 root 自身）
+_tree_pids() {
+    local root="$1"
+    ps -axo pid=,ppid= | awk -v root="$root" '
+        { pid=$1+0; kids[$2+0] = kids[$2+0] " " pid }
+        END {
+            n = 1; stack[1] = root
+            while (n > 0) {
+                p = stack[n]; n--
+                print p
+                split(kids[p], arr, " ")
+                for (i in arr) if (arr[i] != "") { n++; stack[n] = arr[i]+0 }
+            }
+        }'
+}
+
+# 带内存上限地运行命令；超限时杀整棵进程树并以 1 退出
+run_with_memlimit() {
+    if [[ "$MEMLIMIT_MB" == "0" ]]; then
+        "$@"
+        return
+    fi
+    local limit_kb=$(( MEMLIMIT_MB * 1024 ))
+    "$@" &
+    local pid=$!
+    local rc=0 rss=""
+    while kill -0 "$pid" 2>/dev/null; do
+        rss=$(_tree_rss_kb "$pid")
+        if [[ "${rss:-0}" -gt "$limit_kb" ]]; then
+            warn "内存超限：进程树 RSS $(( rss / 1024 ))MB > MEMLIMIT_MB=${MEMLIMIT_MB}MB，终止整棵进程树（可调大 MEMLIMIT_MB，或设 0 关闭）"
+            local pids
+            pids=$(_tree_pids "$pid")
+            # shellcheck disable=SC2086
+            kill $pids 2>/dev/null || true
+            sleep 1
+            # shellcheck disable=SC2086
+            kill -9 $pids 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 1
+    done
+    wait "$pid" || rc=$?
+    return "$rc"
+}
+
 # ---------- Build 模式 ----------------------------------------------------
 
 # dev build：默认模式，最快编译，保留运行时检查
@@ -78,7 +155,7 @@ host_arch() {
 build_dev() {
     log "dev build"
     mkdir -p "$BIN_DIR"
-    "$V" -o "$BIN_DIR/$PROJECT_NAME" .
+    run_with_memlimit "$V" -o "$BIN_DIR/$PROJECT_NAME" .
     report_size "$BIN_DIR/$PROJECT_NAME"
 }
 
@@ -92,7 +169,7 @@ build_debug() {
         extra="$DEBUG_FLAGS"
     fi
     # shellcheck disable=SC2086
-    "$V" -debug $extra -o "$BIN_DIR/$PROJECT_NAME-debug" .
+    run_with_memlimit "$V" -debug $extra -o "$BIN_DIR/$PROJECT_NAME-debug" .
     report_size "$BIN_DIR/$PROJECT_NAME-debug"
     echo "  用法: lldb $BIN_DIR/$PROJECT_NAME-debug"
 }
@@ -102,7 +179,7 @@ build_debug() {
 build_prod() {
     log "prod build（-O3 + strip）"
     mkdir -p "$BIN_DIR"
-    "$V" -prod -o "$BIN_DIR/$PROJECT_NAME" .
+    run_with_memlimit "$V" -prod -o "$BIN_DIR/$PROJECT_NAME" .
     # 再次 strip 保险（V -prod 通常已经 strip，但显式更稳）
     if command -v strip >/dev/null 2>&1; then
         strip "$BIN_DIR/$PROJECT_NAME" 2>/dev/null || true
@@ -131,7 +208,7 @@ build_cross() {
         fi
         local out="$BIN_DIR/${PROJECT_NAME}-${os}-${arch}${ext}"
         echo -n "  → $out ... "
-        if "$V" -prod -os "$os" -o "$out" . 2>/dev/null; then
+        if run_with_memlimit "$V" -prod -os "$os" -o "$out" . 2>/dev/null; then
             echo "${C_GREEN}ok${C_RESET}"
         else
             echo "${C_YELLOW}skipped (target not supported on this host)${C_RESET}"
@@ -139,10 +216,13 @@ build_cross() {
     done
 }
 
-# 跑 vitest。
+# 跑 vitest。test 编译峰值远高于 build，单独用 TEST_MEMLIMIT_MB；
+# 显式 MEMLIMIT_MB=0 仍然整体关闭。
 run_tests() {
     log "tests"
-    "$V" test .
+    local limit="$TEST_MEMLIMIT_MB"
+    if [[ "$MEMLIMIT_MB" == "0" ]]; then limit=0; fi
+    MEMLIMIT_MB="$limit" run_with_memlimit "$V" test .
 }
 
 # v fmt -w .
@@ -222,6 +302,8 @@ Modes:
   V=path        v 编译器路径（默认：PATH 里的 v）
   PREFIX=path   install 前缀（默认：/usr/local）
   DEBUG_FLAGS   附加到 v -debug 的 flag，例如 DEBUG_FLAGS="-cflags -g"
+  MEMLIMIT_MB   编译进程树内存上限，MB（默认 2048，0 = 关闭）
+  TEST_MEMLIMIT_MB  v test 进程树内存上限，MB（默认 4096；MEMLIMIT_MB=0 时同样关闭）
 
 Examples:
   $0                    # 快速 dev build

@@ -42,6 +42,23 @@ pub const compact_keep_recent = 2
 // summarizing (and likely the model hasn't accumulated much context).
 pub const compact_min_messages = 4
 
+// micro_keep_recent is how many trailing messages micro-compaction leaves
+// untouched. The recent tail carries the model's live working context
+// (latest user turn, pending tool results); clearing those would break the
+// task in progress.
+pub const micro_keep_recent = 20
+
+// micro_min_content_bytes is the minimum content length (in bytes) above
+// which an old tool result is worth clearing. Roughly 100 tokens by the
+// bytes/3 estimator used in estimate_tokens. Short results are cheap to
+// keep in full; only long dumps pay off.
+pub const micro_min_content_bytes = 300
+
+// micro_truncated_marker replaces the content of an old tool result that
+// micro-compaction cleared. Short enough that re-running micro-compaction
+// is a no-op (keeps the pass idempotent).
+pub const micro_truncated_marker = '[Old tool result content cleared]'
+
 // estimate_tokens returns a rough token count for the message list.
 //
 // Algorithm: bytes / 3. This is a deliberate over-estimate for English
@@ -78,6 +95,45 @@ pub fn should_compact(estimated int, context_window int, threshold f32) bool {
 	}
 	cutoff := int(f32(context_window) * threshold)
 	return estimated > cutoff
+}
+
+// micro_compact is a cheap, local pre-compaction pass that runs before the
+// full LLM-based compact. It replaces the content of old, long tool-result
+// messages with a short placeholder marker — no LLM call, no hooks — so an
+// oversized session can often be brought back under the threshold without
+// paying for a summary.
+//
+// Only messages before the last micro_keep_recent are considered; the recent
+// tail is kept verbatim to preserve the model's working context. Only tool
+// messages whose content is longer than micro_min_content_bytes are cleared;
+// every other message passes through unchanged.
+//
+// Returns the new message list and the number of messages truncated. The
+// function is idempotent: the marker is far shorter than
+// micro_min_content_bytes, so a second pass truncates nothing.
+pub fn micro_compact(messages []Message) ([]Message, int) {
+	if messages.len <= micro_keep_recent {
+		return messages, 0
+	}
+	cutoff := messages.len - micro_keep_recent
+	mut out := []Message{cap: messages.len}
+	mut truncated := 0
+	for i, m in messages {
+		if i < cutoff && m.role == .tool && m.content.len > micro_min_content_bytes {
+			out << Message{
+				role:         .tool
+				content:      micro_truncated_marker
+				attachments:  m.attachments
+				tool_calls:   m.tool_calls
+				tool_call_id: m.tool_call_id
+				name:         m.name
+			}
+			truncated++
+			continue
+		}
+		out << m
+	}
+	return out, truncated
 }
 
 // format_messages_for_summary renders the messages as plain text suitable
