@@ -57,9 +57,10 @@ struct BuildMsg {
 }
 
 // do_build 在独立线程里执行一次 v 构建，把结果发回 channel。
+// 走 -no-memory-limit：vfrp 加上 vhost/http 后 V 编译器会超 2.3G 触发 SIGKILL。
 fn do_build(ch chan BuildMsg, bin string, src string) {
 	os.rm(bin) or {}
-	cmd := '${os.quoted_path(@VEXE)} -o ${os.quoted_path(bin)} ${os.quoted_path(src)}'
+	cmd := '${os.quoted_path(@VEXE)} -no-memory-limit -o ${os.quoted_path(bin)} ${os.quoted_path(src)}'
 	res := os.execute(cmd)
 	ch <- BuildMsg{
 		bin:    bin
@@ -609,4 +610,210 @@ fn test_udp_proxy_e2e() {
 		panic('udp roundtrip failed: ${err.msg()}\nvfrpc log:\n${cli_log}${extra_cli}\nvfrps log:\n${srv_log}${extra_srv}')
 	}
 	assert got == udp_echo_msg, 'udp echo: got "${got}", want "${udp_echo_msg}"'
+}
+
+// ---------------------------------------------------------------------------
+// HTTP vhost e2e
+// ---------------------------------------------------------------------------
+
+// HttpEchoServer 本地简易 HTTP 回显服务：把 path 拼到 body 里返回，让测试能区分
+// 多个本地 app（不同 path 走到不同本地端口）。
+struct HttpEchoServer {
+mut:
+	listener &net.TcpListener
+	port     int
+}
+
+fn start_http_echo_server(label string) !&HttpEchoServer {
+	mut l := net.listen_tcp(.ip, '127.0.0.1:0') or {
+		return error('http echo [${label}]: listen failed: ${err.msg()}')
+	}
+	port := (l.addr() or {
+		l.close() or {}
+		return error('http echo [${label}]: addr failed: ${err.msg()}')
+	}).str().all_after(':').int()
+	spawn http_echo_accept_loop(mut l, label)
+	return &HttpEchoServer{
+		listener: l
+		port:     port
+	}
+}
+
+fn stop_http_echo_server(s &HttpEchoServer) {
+	mut l := s.listener
+	l.close() or {}
+}
+
+fn http_echo_accept_loop(mut l &net.TcpListener, label string) {
+	for {
+		mut c := l.accept() or { return }
+		spawn http_echo_handler(mut c, label)
+	}
+}
+
+fn http_echo_handler(mut c &net.TcpConn, label string) {
+	// 读 request line + 全部 headers（到 \r\n\r\n），构造一个含 label 与 path 的回包
+	mut buf := []u8{}
+	mut tmp := []u8{len: 1}
+	mut got_end := false
+	for buf.len < 8192 {
+		n := c.read(mut tmp) or { break }
+		if n == 0 {
+			break
+		}
+		buf << tmp[0]
+		if buf.len >= 4 && buf[buf.len - 4] == `\r` && buf[buf.len - 3] == `\n`
+			&& buf[buf.len - 2] == `\r` && buf[buf.len - 1] == `\n` {
+			got_end = true
+			break
+		}
+	}
+	if !got_end {
+		c.close() or {}
+		return
+	}
+	req := buf.bytestr()
+	// 拿第一行（request line）
+	mut first_line := req.all_before('\n').trim_space()
+	path_part := first_line.all_after(' ').all_before(' ')
+	body := 'label=${label} path=${path_part}'
+	resp := 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.len}\r\nConnection: close\r\n\r\n${body}'
+	c.write_string(resp) or {}
+	c.close() or {}
+}
+
+// http_get_via_vhost 模拟用户向 vhost_http_port 发起 HTTP GET（带指定 Host 头），
+// 走完整 v1 frame 链路：vfrps 解析 Host → 查 vhost 路由 → work conn 转发到本地
+// echo → 收包 → 返回 response body。
+fn http_get_via_vhost(vhost_port int, host string) !string {
+	mut c := net.dial_tcp('127.0.0.1:${vhost_port}') or {
+		return error('dial vhost ${vhost_port}: ${err.msg()}')
+	}
+	defer {
+		c.close() or {}
+	}
+	c.set_read_deadline(time.now().add(5 * time.second))
+	req := 'GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n'
+	c.write_string(req)!
+	// 读 response
+	mut resp := []u8{}
+	mut tmp := []u8{len: 1}
+	for resp.len < 16384 {
+		n := c.read(mut tmp) or { break }
+		if n == 0 {
+			break
+		}
+		resp << tmp[0]
+	}
+	full := resp.bytestr()
+	body := full.all_after('\r\n\r\n')
+	return body
+}
+
+// test_http_vhost_e2e：vfrps 启用 vhost_http_port，单 vfrpc 注册 2 条 http 代理
+// （不同 custom_domain 指向不同本地 HTTP server）。用户分别用两个 Host 头请求，
+// 应分别落到对应本地 server，body 含对应 label。
+fn test_http_vhost_e2e() {
+	ports := probe_distinct_ports(3)!
+	server_port := ports[0]
+	vhost_port := ports[1]
+	// echo1_port / echo2_port 由 start_http_echo_server 自选（传 0 让内核挑）；
+	// 这里只用 vhost_port 的探测数 echo1_port 也行，但需要分配到 2 个；直接用现成
+	// 端口 + 1 个探测的端口即可
+	echo1_port := ports[2]
+	// 再探测一个供 echo2 用
+	extra_ports := probe_distinct_ports(1)!
+	echo2_port := extra_ports[0]
+
+	echo1 := start_http_echo_server('A')!
+	echo2 := start_http_echo_server('B')!
+	defer {
+		stop_http_echo_server(echo1)
+		stop_http_echo_server(echo2)
+		kill_all_procs()
+	}
+	_ = echo1_port // 占位避免 unused warning；下面 config 用真实 echo1.port
+
+	srv_cfg := os.join_path(g_tmp, 'http_vhost_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'http_vhost_vfrpc.toml')
+	write_vhost_server_config(srv_cfg, server_port, vhost_port, 'test-token')
+	write_client_http_config(cli_cfg, server_port, [
+		HttpProxySpec{
+			name:           'site_a'
+			local_port:     echo1.port
+			custom_domains: ['a.test']
+		},
+		HttpProxySpec{
+			name:           'site_b'
+			local_port:     echo2.port
+			custom_domains: ['b.test']
+		},
+	]!)
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'vhost HTTP listening on 127.0.0.1:${vhost_port}',
+		wait_total)
+	assert up, 'vfrps did not start vhost listener, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "site_b" registered', wait_total)
+	if !reg {
+		extra_srv := read_pending_stderr(mut psrv)
+		panic('proxy site_b not registered, client log:\n${cli_log}\nvfrps log:\n${srv_log}${extra_srv}')
+	}
+
+	body_a := http_get_via_vhost(vhost_port, 'a.test') or {
+		extra_srv := read_pending_stderr(mut psrv)
+		extra_cli := read_pending_stderr(mut pcli)
+		panic('http vhost request to a.test failed: ${err.msg()}\nvfrpc log:\n${cli_log}${extra_cli}\nvfrps log:\n${srv_log}${extra_srv}')
+	}
+	assert body_a.contains('label=A'), 'route to a.test wrong: body="${body_a}"'
+
+	body_b := http_get_via_vhost(vhost_port, 'b.test') or {
+		extra_srv := read_pending_stderr(mut psrv)
+		extra_cli := read_pending_stderr(mut pcli)
+		panic('http vhost request to b.test failed: ${err.msg()}\nvfrpc log:\n${cli_log}${extra_cli}\nvfrps log:\n${srv_log}${extra_srv}')
+	}
+	assert body_b.contains('label=B'), 'route to b.test wrong: body="${body_b}"'
+}
+
+// write_vhost_server_config 写带 vhost_http_port 的服务端配置。
+fn write_vhost_server_config(path string, bind_port int, vhost_port int, token string) {
+	content := 'bind_addr = "127.0.0.1"\nbind_port = ${bind_port}\nvhost_http_port = ${vhost_port}\nauth_token = "${token}"\n'
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
+}
+
+// HttpProxySpec 是 write_client_http_config 的代理参数。
+struct HttpProxySpec {
+	name           string
+	local_port     int
+	custom_domains []string
+	subdomain      string
+	subdomain_host string
+}
+
+// write_client_http_config 写多条 http 代理的 vfrpc 配置。
+fn write_client_http_config(path string, server_port int, proxies []HttpProxySpec) {
+	mut content := 'server_addr = "127.0.0.1"\nserver_port = ${server_port}\nauth_token = "test-token"\nheartbeat_interval = 1\n\n'
+	for p in proxies {
+		content += '[[proxies]]\nname = "${p.name}"\ntype = "http"\nlocal_ip = "127.0.0.1"\nlocal_port = ${p.local_port}\n'
+		if p.custom_domains.len > 0 {
+			content += 'custom_domains = ['
+			for i, d in p.custom_domains {
+				if i > 0 {
+					content += ', '
+				}
+				content += '"${d}"'
+			}
+			content += ']\n'
+		}
+		if p.subdomain != '' {
+			content += 'subdomain = "${p.subdomain}"\n'
+		}
+		if p.subdomain_host != '' {
+			content += 'subdomain_host = "${p.subdomain_host}"\n'
+		}
+		content += '\n'
+	}
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
 }

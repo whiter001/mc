@@ -97,6 +97,7 @@ pub:
 	// http 和 https 专用
 	custom_domains      []string          @[json: 'custom_domains']
 	subdomain           string            @[json: 'subdomain'; omitempty]
+	subdomain_host      string            @[json: 'subdomain_host'; omitempty]
 	locations           []string          @[json: 'locations']
 	http_user           string            @[json: 'http_user'; omitempty]
 	http_pwd            string            @[json: 'http_pwd'; omitempty]
@@ -125,6 +126,7 @@ struct NewProxyWire {
 	remote_port          int      @[json: 'remote_port'; omitempty]
 	custom_domains       []string @[json: 'custom_domains']
 	subdomain            string   @[json: 'subdomain'; omitempty]
+	subdomain_host       string   @[json: 'subdomain_host'; omitempty]
 	locations            []string @[json: 'locations']
 	http_user            string   @[json: 'http_user'; omitempty]
 	http_pwd             string   @[json: 'http_pwd'; omitempty]

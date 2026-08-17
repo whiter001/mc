@@ -88,9 +88,12 @@ pub fn (mut svc Service) run() {
 fn (mut svc Service) register_proxies(mut ctl Control) ! {
 	for p in svc.cfg.proxies {
 		ctl.write_msg(msg.NewProxy{
-			proxy_name:  p.name
-			proxy_type:  p.type
-			remote_port: p.remote_port
+			proxy_name:     p.name
+			proxy_type:     p.type
+			remote_port:    p.remote_port
+			custom_domains: p.custom_domains
+			subdomain:      p.subdomain
+			subdomain_host: p.subdomain_host
 		}) or { return error('register proxy "${p.name}" failed: ${err.msg()}') }
 		log.info('registering proxy "${p.name}" (${p.type}), remote port: ${p.remote_port}')
 	}

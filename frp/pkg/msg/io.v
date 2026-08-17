@@ -184,6 +184,7 @@ fn new_proxy_from_wire(w NewProxyWire) NewProxy {
 		remote_port:          w.remote_port
 		custom_domains:       w.custom_domains
 		subdomain:            w.subdomain
+		subdomain_host:       w.subdomain_host
 		locations:            w.locations
 		http_user:            w.http_user
 		http_pwd:             w.http_pwd

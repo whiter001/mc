@@ -67,10 +67,19 @@
 - [x] V 0.5.2 缺 `net.parse_addr(string)`；UDPPacket 加 `remote_addr_as_addr()` 方法，借 `net.resolve_addrs_fuzzy(addr, .udp)` 走 DNS 解析路径（接受本轮多一次解析的代价，换不用自己实现 sockaddr 解析）
 
 ## P7 HTTP vhost（M3）
-- [ ] vhost 路由表（域名/location → 代理）
-- [ ] server HTTP 代理：解析 Host 头分流
-- [ ] client HTTP 代理
-- [ ] e2e 域名分流测试
+- [x] vhost 路由表（域名/location → 代理）— server/service.v: `VhostRoute` struct + `vhost_routes map[string]VhostRoute`（host → control + proxy_name），`register_vhost_route` / `unregister_vhost_routes_for_control` / `lookup_vhost_route`
+- [x] server HTTP 代理：解析 Host 头分流 — `Service.vhost_listener`（独立 vhost_http_port）+ `vhost_accept_loop` + `handle_vhost_conn`（read_http_headers → parse_host_header → 查路由 → 走 work conn 链路 + netx.relay 转发）
+- [x] client HTTP 代理 — 复用 TCP work conn 链路（HTTP over TCP 字节透明转发，handle_work_conn 不用改）；register_proxies 补发 custom_domains / subdomain / subdomain_host
+- [x] e2e 域名分流测试 — `test_http_vhost_e2e`：2 个本地 HTTP echo server（label A/B），注册 2 个 http 代理用 custom_domains `a.test` / `b.test`，分别用对应 Host 头请求，断言 body 含对应 label
+
+## P7.x 实现期踩到的坑（已修）
+- [x] `vfrpc/client/service.v::register_proxies` 原本只发 `proxy_name/proxy_type/remote_port` 三个字段，**漏发 `custom_domains` / `subdomain` / `subdomain_host`**——服务端的 NewProxyWire 收到了空数组，返回 "needs at least one custom_domain" 报错。补发后通
+- [x] V 0.5.2 TOML parser 数组字段 `[]string` 缺省 nil；写 `custom_domains = ["a.test"]` 后正常填充，透传链路无问题（用 `v json2.decode` 单独测过 `[]string` 字段 roundtrip 是 OK 的，问题在字段没传，不在解析）
+- [x] `parse_host_header` 兼容大小写 + 去端口 + 跳过 request line；V 字符串 `index`、`starts_with`、`trim_space`、`to_lower` 组合用 OK
+- [x] `Control` 加 `svc &Service` 字段 + `new_control` 加 `svc` 参数（vhost 注册需要回到 Service 写路由表）。`handle_login_conn` 调用处补 `s` 实参
+- [x] `ProxyConfig` 增 `custom_domains []string` / `subdomain string` / `subdomain_host string` 字段；`validate` 按 type 分支（tcp/udp 需 remote_port，http 需 custom_domains 或 subdomain+host）
+- [x] `msg.NewProxy` / `NewProxyWire` / `new_proxy_from_wire` 三处都补 `subdomain_host` 字段（一开始忘了在 wire 拷贝里也加，会导致 json decode 后回填丢字段；已补）
+- [x] V 编译器在 vfrp 项目（含 vhost/http 后）触发 2.3G 内存上限；测试 build 加 `-no-memory-limit` 绕开
 
 ## P8 TLS（M4）
 - [ ] transport TLS（net.openssl 或 net.mbedtls 可行性验证先行）

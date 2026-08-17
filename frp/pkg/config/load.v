@@ -41,6 +41,10 @@ fn (cfg ServerConfig) validate() ! {
 	if cfg.bind_addr == '' {
 		return error('bind_addr must not be empty')
 	}
+	// vhost_http_port == 0 表示不开；非 0 时校验范围
+	if cfg.vhost_http_port != 0 {
+		check_port(cfg.vhost_http_port, 'vhost_http_port')!
+	}
 }
 
 fn (cfg ClientConfig) validate() ! {
@@ -53,8 +57,9 @@ fn (cfg ClientConfig) validate() ! {
 	}
 }
 
-// validate 校验单条代理规则：name/type/local_port/remote_port 必填，
-// type 只接受 tcp/udp，端口须在 1-65535。idx 用于错误信息定位。
+// validate 校验单条代理规则：name/type/local_port/remote_port 必填；
+// type 取 tcp/udp/http。tcp/udp 需 remote_port，http 需 custom_domains 与
+// subdomain 至少一个（subdomain 须配合 subdomain_host）。idx 用于错误信息定位。
 fn (p ProxyConfig) validate(idx int) ! {
 	where := 'proxies[${idx}]'
 	if p.name == '' {
@@ -63,15 +68,31 @@ fn (p ProxyConfig) validate(idx int) ! {
 	if p.type == '' {
 		return error('${where} "${p.name}": missing required field "type"')
 	}
-	if p.type != 'tcp' && p.type != 'udp' {
-		return error('${where} "${p.name}": unknown proxy type "${p.type}", want "tcp" or "udp"')
+	match p.type {
+		'tcp', 'udp' {
+			if p.local_port == 0 {
+				return error('${where} "${p.name}": missing required field "local_port"')
+			}
+			if p.remote_port == 0 {
+				return error('${where} "${p.name}": missing required field "remote_port"')
+			}
+			check_port(p.local_port, '${where} "${p.name}" local_port')!
+			check_port(p.remote_port, '${where} "${p.name}" remote_port')!
+		}
+		'http' {
+			if p.local_port == 0 {
+				return error('${where} "${p.name}": missing required field "local_port"')
+			}
+			if p.custom_domains.len == 0 && p.subdomain == '' {
+				return error('${where} "${p.name}" (http): need custom_domains or subdomain')
+			}
+			if p.subdomain != '' && p.subdomain_host == '' {
+				return error('${where} "${p.name}" (http): subdomain requires subdomain_host')
+			}
+			check_port(p.local_port, '${where} "${p.name}" local_port')!
+		}
+		else {
+			return error('${where} "${p.name}": unknown proxy type "${p.type}", want tcp/udp/http')
+		}
 	}
-	if p.local_port == 0 {
-		return error('${where} "${p.name}": missing required field "local_port"')
-	}
-	if p.remote_port == 0 {
-		return error('${where} "${p.name}": missing required field "remote_port"')
-	}
-	check_port(p.local_port, '${where} "${p.name}" local_port')!
-	check_port(p.remote_port, '${where} "${p.name}" remote_port')!
 }

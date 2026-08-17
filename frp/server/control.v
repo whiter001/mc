@@ -39,12 +39,13 @@ pub mut:
 	proxies_mu  sync.Mutex   // 保护代理表（tcp + udp 共享同一把锁）
 	bind_addr   string       // 代理监听地址（服务端 bind_addr）
 	pm          &PortManager // 端口管理器（NewProxy 分配 remote_port 用）
+	svc         &Service     // 所属 Service（http 代理用其注册 vhost 路由）
 }
 
 // new_control 创建控制会话。run_id 为空时由服务端生成随机 16 字符 hex；
 // 非空（客户端重连携带）时沿用客户端 run_id。
 pub fn new_control(conn &net.TcpConn, token string, bind_addr string, pm &PortManager,
-	run_id string) &Control {
+	svc &Service, run_id string) &Control {
 	rid := if run_id == '' { gen_run_id() } else { run_id }
 	return &Control{
 		run_id:      rid
@@ -58,6 +59,7 @@ pub fn new_control(conn &net.TcpConn, token string, bind_addr string, pm &PortMa
 		proxies_mu:  sync.new_mutex()
 		bind_addr:   bind_addr
 		pm:          pm
+		svc:         svc
 	}
 }
 
@@ -156,7 +158,8 @@ pub fn (mut c Control) run() {
 	}
 }
 
-// handle_new_proxy 处理 NewProxy：支持 tcp / udp；分配 remote_port、启动相应代理，
+// handle_new_proxy 处理 NewProxy：支持 tcp / udp / http；tcp/udp 分配 remote_port 并起监听器，
+// http 把 custom_domains 注册到 Service.vhost_routes（由 vhost_http_port 接收后路由）；
 // 回 NewProxyResp{proxy_name, remote_addr} 或带 error 的 NewProxyResp。
 fn (mut c Control) handle_new_proxy(m msg.NewProxy) {
 	match m.proxy_type {
@@ -166,13 +169,54 @@ fn (mut c Control) handle_new_proxy(m msg.NewProxy) {
 		'udp' {
 			c.start_udp_proxy(m)
 		}
+		'http' {
+			c.start_http_proxy(m)
+		}
 		else {
 			c.write_msg(msg.NewProxyResp{
 				proxy_name: m.proxy_name
-				error:      'unsupported proxy type "${m.proxy_type}", only "tcp" and "udp" supported'
+				error:      'unsupported proxy type "${m.proxy_type}", only tcp/udp/http supported'
 			}) or {}
 		}
 	}
+}
+
+// start_http_proxy 注册 http 代理的 vhost 路由。http 不分配 remote_port、不起监听器，
+// 所有 http 代理共用 Service.vhost_http_port；work conn 链路在 vhost 入口处按
+// Host 头路由后再走。
+// remote_addr 字段填 "vhost:<port>" 以便 client 端日志区分。
+fn (mut c Control) start_http_proxy(m msg.NewProxy) {
+	domains := http_vhost_domains(m)
+	if domains.len == 0 {
+		c.write_msg(msg.NewProxyResp{
+			proxy_name: m.proxy_name
+			error:      'http proxy needs at least one custom_domain or subdomain+subdomain_host'
+		}) or {}
+		return
+	}
+	for d in domains {
+		c.svc.register_vhost_route(d, c, m.proxy_name)
+	}
+	log.info('control ${c.run_id}: new proxy [${m.proxy_name}] type http, ${domains.len} domain(s)')
+	c.write_msg(msg.NewProxyResp{
+		proxy_name:  m.proxy_name
+		remote_addr: 'vhost:${c.svc.cfg.vhost_http_port}'
+	}) or {}
+}
+
+// http_vhost_domains 把 http 代理的 custom_domains + 拼好的 subdomain 展平成
+// 完整域名列表（subdomain 拼成 "<sub>.<subdomain_host>"）。
+fn http_vhost_domains(m msg.NewProxy) []string {
+	mut out := []string{}
+	for d in m.custom_domains {
+		if d != '' {
+			out << d.to_lower()
+		}
+	}
+	if m.subdomain != '' {
+		out << '${m.subdomain}.${m.subdomain_host}'.to_lower()
+	}
+	return out
 }
 
 // start_tcp_proxy 启动 TCP 代理（handle_new_proxy 的 tcp 分支）。
