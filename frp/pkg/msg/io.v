@@ -117,9 +117,10 @@ fn decode_message(type_byte u8, payload []u8) !Message {
 			}
 		}
 		type_new_work_conn {
-			return json2.decode[NewWorkConn](data) or {
+			w := json2.decode[NewWorkConnWire](data) or {
 				return error('read_msg: bad NewWorkConn payload: ${err}')
 			}
+			return new_work_conn_from_wire(w)
 		}
 		type_req_work_conn {
 			return json2.decode[ReqWorkConn](data) or {
@@ -191,5 +192,15 @@ fn new_proxy_from_wire(w NewProxyWire) NewProxy {
 		sk:                   w.sk
 		allow_users:          w.allow_users
 		multiplexer:          w.multiplexer
+	}
+}
+
+// new_work_conn_from_wire 把 NewWorkConnWire 转换为 NewWorkConn。
+// 字段一一对应（见 NewWorkConnWire 注释）。
+fn new_work_conn_from_wire(w NewWorkConnWire) NewWorkConn {
+	return NewWorkConn{
+		run_id:        w.run_id
+		privilege_key: w.privilege_key
+		timestamp:     w.timestamp
 	}
 }

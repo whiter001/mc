@@ -43,11 +43,14 @@
 - [x] token 错误时登录被拒绝的测试（双断言：remote_port 连不上 + 日志含 login failed）
 
 ## P5 健壮性
-- [ ] work conn 预建池（pool_count）
+- [x] work conn 预建池（pool_count）— client/service.v 注册代理后预 spawn N 条 handle_work_conn 蹲到 server 的 work_conns 队列；test/e2e/tcp_proxy_test.v::test_pool_count_e2e 覆盖：pool_count=2 预建生效、首条连接命中池、第二条走 ReqWorkConn 重新填充
 - [x] 断线自动重连 + 代理重新注册（client 冒烟：杀服务端后指数退避重连、重新注册、数据恢复）
 - [x] 优雅退出（SIGINT/SIGTERM 清理 listener；server/service.v）
-- [ ] 多代理并发
+- [x] 多代理并发 — client/service.v 的 register_proxies 早已支持多 [[proxies]]；test/e2e/tcp_proxy_test.v::test_multi_proxy_e2e 覆盖：单 vfrpc 同时挂 2 个代理，分别指向不同 local echo，remote_port 独立回显
 - [x] 竞态修复：spawn mut 引用悬垂（server/proxy.v、server/service.v、client/service.v），50 并发随机载荷压测 120/120 通过
+
+## P5.x 修复（实现 P5 时撞到的 V 0.5.2 json2 bug）
+- [x] NewWorkConn 解码 panic（array.get 越界）— 复用 Login/LoginWire 的 Wire 兼容路径：pkg/msg/msg.v 加 NewWorkConnWire（无 omitempty），pkg/msg/io.v 改走 decode[NewWorkConnWire] + new_work_conn_from_wire。NewWorkConn 自身去掉 omitempty（与 Wire 字段一一对应，编码端不再产生空字段歧义）
 
 ## P6 UDP 代理（M2）
 - [ ] msg: UDPPacket 二进制编码（参考 Go 版 udp_binary.go）

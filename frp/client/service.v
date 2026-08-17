@@ -62,6 +62,17 @@ pub fn (mut svc Service) run() {
 		// 心跳循环与读循环并发运行；心跳写走 write_mu，读循环独占读
 		interval := svc.cfg.heartbeat_interval
 		spawn heartbeat_loop(ctl, interval)
+		// P5: 预建 work conn 池。pool_count 条 work conn 预先 dial + 发 NewWorkConn，
+		// 蹲在 server 的 work_conns 队列里；用户连接时 server 立即从队列取，
+		// 省去 dial+auth 等待。handle_work_conn 内部已处理连接失败路径。
+		// 取 cfg by value（与 read_loop 的 ReqWorkConn 分支同型），spawn 不会捕获栈地址。
+		pool_count := svc.cfg.pool_count
+		if pool_count > 0 {
+			log.info('pre-warming work conn pool: ${pool_count} conns')
+			for _ in 0 .. pool_count {
+				spawn handle_work_conn(svc.cfg, run_id)
+			}
+		}
 		ctl.read_loop() or {
 			ctl.stop()
 			ctl.close()

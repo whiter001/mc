@@ -310,6 +310,27 @@ fn write_client_config(path string, server_port int, local_port int, remote_port
 	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
 }
 
+// write_multi_client_config 写多代理配置；pool_count<=0 时不写该字段（用默认 0）。
+// proxies 元素：(name, local_port, remote_port)。
+fn write_multi_client_config(path string, server_port int, token string, pool_count int, proxies []ProxySpec) {
+	mut content := 'server_addr = "127.0.0.1"\nserver_port = ${server_port}\nauth_token = "${token}"\nheartbeat_interval = 1\n'
+	if pool_count > 0 {
+		content += 'pool_count = ${pool_count}\n'
+	}
+	content += '\n'
+	for p in proxies {
+		content += '[[proxies]]\nname = "${p.name}"\ntype = "tcp"\nlocal_ip = "127.0.0.1"\nlocal_port = ${p.local_port}\nremote_port = ${p.remote_port}\n\n'
+	}
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
+}
+
+// ProxySpec 是 write_multi_client_config 的代理参数。
+struct ProxySpec {
+	name        string
+	local_port  int
+	remote_port int
+}
+
 // ---------------------------------------------------------------------------
 // 测试用例
 // ---------------------------------------------------------------------------
@@ -387,4 +408,105 @@ fn test_wrong_token_rejected() {
 	assert never_up, 'remote port ${remote_port} became reachable despite wrong token'
 	assert !dial_ok('127.0.0.1:${remote_port}'), 'remote port ${remote_port} connectable after wait'
 	assert err_log.contains('login failed'), 'vfrpc stderr did not report login failure, got:\n${err_log}'
+}
+
+// test_multi_proxy_e2e：单 vfrpc 同时跑 2 个 TCP 代理，分别指向两个本地 echo，
+// 两个 remote_port 都能独立回显；并发连接时两条 work conn 同时活跃不互相阻塞。
+fn test_multi_proxy_e2e() {
+	ports := probe_distinct_ports(5)!
+	server_port := ports[0]
+	proxy1_remote := ports[1]
+	proxy2_remote := ports[2]
+	echo1_port := ports[3]
+	echo2_port := ports[4]
+
+	echo1 := start_echo_server()!
+	echo2 := start_echo_server()!
+	defer {
+		stop_echo_server(echo1)
+		stop_echo_server(echo2)
+		kill_all_procs()
+	}
+
+	srv_cfg := os.join_path(g_tmp, 'multi_proxy_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'multi_proxy_vfrpc.toml')
+	write_server_config(srv_cfg, server_port, 'test-token')
+	write_multi_client_config(cli_cfg, server_port, 'test-token', 0, [
+		ProxySpec{
+			name:        'multi_a'
+			local_port:  echo1.port
+			remote_port: proxy1_remote
+		},
+		ProxySpec{
+			name:        'multi_b'
+			local_port:  echo2.port
+			remote_port: proxy2_remote
+		},
+	]!)
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	// 等两个代理都注册上（先后顺序由 client register_proxies 决定，但日志会各打一行）
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "multi_b" registered', wait_total)
+	assert reg, 'proxy multi_b not registered, client log:\n${cli_log}'
+
+	got1 := echo_roundtrip_with_retry('127.0.0.1:${proxy1_remote}', echo_msg_1, 5)!
+	assert got1 == echo_msg_1, 'proxy1: got "${got1}", want "${echo_msg_1}"'
+	got2 := echo_roundtrip_with_retry('127.0.0.1:${proxy2_remote}', echo_msg_2, 5)!
+	assert got2 == echo_msg_2, 'proxy2: got "${got2}", want "${echo_msg_2}"'
+}
+
+// test_pool_count_e2e：pool_count=2 预建 work conn 池，验证：用户连接仍正常回显，
+// 且 server 日志里能看到至少 N 条 work conn 在第一次用户连接前就已被注册（即预建生效）。
+// 用"先看 vfrpc 日志的 pre-warming 行、紧接着 dial remote_port 成功"做时序证据。
+fn test_pool_count_e2e() {
+	ports := probe_distinct_ports(2)!
+	server_port := ports[0]
+	remote_port := ports[1]
+
+	echo := start_echo_server()!
+	defer {
+		stop_echo_server(echo)
+		kill_all_procs()
+	}
+
+	pool_count := 2
+	srv_cfg := os.join_path(g_tmp, 'pool_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'pool_vfrpc.toml')
+	write_server_config(srv_cfg, server_port, 'test-token')
+	write_multi_client_config(cli_cfg, server_port, 'test-token', pool_count, [
+		ProxySpec{
+			name:        'pooled'
+			local_port:  echo.port
+			remote_port: remote_port
+		},
+	]!)
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	// 先等较晚事件 "proxy registered"（其发生时 pre-warming 已同步打过了），
+	// 再断言预建日志在累积的 stderr 里；分两次 wait 会让前一次把 OS 管道读空，
+	// 后一次拿不到数据。
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "pooled" registered', wait_total)
+	assert reg, 'proxy pooled not registered, client log:\n${cli_log}'
+	assert cli_log.contains('pre-warming work conn pool: ${pool_count}'), 'pre-warming log missing in vfrpc stderr, full log:\n${cli_log}'
+
+	addr := '127.0.0.1:${remote_port}'
+	got1 := echo_roundtrip_with_retry(addr, echo_msg_1, 5) or {
+		extra := read_pending_stderr(mut psrv)
+		panic('round 1 (pool hit) failed: ${err.msg()}\nvfrpc log:\n${cli_log}\nvfrps log:\n${srv_log}${extra}')
+	}
+	assert got1 == echo_msg_1, 'round 1 (pool hit): got "${got1}", want "${echo_msg_1}"'
+	// 第二条连接：池已被用掉一条，触发 ReqWorkConn 重新填充路径；也必须回显
+	got2 := echo_roundtrip_with_retry(addr, echo_msg_2, 5) or {
+		extra := read_pending_stderr(mut psrv)
+		panic('round 2 (pool refill) failed: ${err.msg()}\nvfrpc log:\n${cli_log}\nvfrps log:\n${srv_log}${extra}')
+	}
+	assert got2 == echo_msg_2, 'round 2 (pool refill): got "${got2}", want "${echo_msg_2}"'
 }

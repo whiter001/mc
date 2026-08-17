@@ -150,9 +150,19 @@ pub:
 // NewWorkConn 客户端新建 work 连接时发送。
 pub struct NewWorkConn {
 pub:
-	run_id        string @[json: 'run_id'; omitempty]
-	privilege_key string @[json: 'privilege_key'; omitempty]
-	timestamp     i64    @[json: 'timestamp'; omitempty]
+	run_id        string @[json: 'run_id']
+	privilege_key string @[json: 'privilege_key']
+	timestamp     i64    @[json: 'timestamp']
+}
+
+// NewWorkConnWire 是 NewWorkConn 的"解码专用"副本。
+// 背景：V 0.5.2 的 json2.decode 对 NewWorkConn 在特定时序下会 panic
+//（array.get 越界，与 Login/LoginWire 同源问题）。先解码到本结构再回填，
+// 与 Login/LoginWire 走相同的兼容路径。
+struct NewWorkConnWire {
+	run_id        string @[json: 'run_id']
+	privilege_key string @[json: 'privilege_key']
+	timestamp     i64    @[json: 'timestamp']
 }
 
 // ReqWorkConn 服务端向客户端请求一条 work 连接（无字段）。
