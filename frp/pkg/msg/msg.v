@@ -5,6 +5,8 @@
 // （V 0.5.2 不支持单字段 `pub x type @[attr]` 写法，只能用区块形式。）
 module msg
 
+import net
+
 // 消息类型字节常量（与 Go 版 pkg/msg/msg.go 一致）。
 // 注：V 常量名必须 snake_case（不允许大写），故用 type_xxx 命名，值不变。
 pub const type_login = `o`
@@ -201,6 +203,20 @@ pub:
 	content     []u8   @[json: 'c']
 	local_addr  string @[json: 'l'; omitempty]
 	remote_addr string @[json: 'r'; omitempty]
+}
+
+// remote_addr_as_addr 解析 remote_addr 字符串（"ip:port"）为 net.Addr；
+// 解析失败时返回 net.Addr{}（零值），调用方应自行处理。
+// V 0.5.2 没有为 Addr 暴露可直接构造的公共 API，只能借 resolve_addrs_fuzzy 走 DNS 解析路径。
+pub fn (p UDPPacket) remote_addr_as_addr() net.Addr {
+	if p.remote_addr == '' {
+		return net.Addr{}
+	}
+	addrs := net.resolve_addrs_fuzzy(p.remote_addr, .udp) or { return net.Addr{} }
+	if addrs.len == 0 {
+		return net.Addr{}
+	}
+	return addrs[0]
 }
 
 // Message 是所有消息的 sum type，read_msg 返回此类型。

@@ -510,3 +510,103 @@ fn test_pool_count_e2e() {
 	}
 	assert got2 == echo_msg_2, 'round 2 (pool refill): got "${got2}", want "${echo_msg_2}"'
 }
+
+// ---------------------------------------------------------------------------
+// UDP proxy e2e
+// ---------------------------------------------------------------------------
+
+struct UdpEchoServer {
+mut:
+	socket &net.UdpConn
+	port   int
+}
+
+fn start_udp_echo_server() !&UdpEchoServer {
+	mut s := net.listen_udp('127.0.0.1:0') or {
+		return error('udp echo: listen failed: ${err.msg()}')
+	}
+	// 同 server/client：走无限等待分支，让 echo 循环长期阻塞
+	s.set_read_timeout(time.infinite)
+	port_str := s.str()
+	port := port_str.all_after(':').int()
+	spawn udp_echo_loop(mut s)
+	return &UdpEchoServer{
+		socket: s
+		port:   port
+	}
+}
+
+fn stop_udp_echo_server(s &UdpEchoServer) {
+	mut sock := s.socket
+	sock.close() or {}
+}
+
+fn udp_echo_loop(mut s &net.UdpConn) {
+	mut buf := []u8{len: 4096}
+	for {
+		n, src := s.read(mut buf) or { return }
+		if n == 0 {
+			continue
+		}
+		s.write_to(src, buf[..n]) or { continue }
+	}
+}
+
+// dial_udp_and_echo 从 server_addr 发 msg、收完整回显。UDP 单包即结束，n==msg.len 即可。
+fn dial_udp_and_echo(server_addr string, msg string) !string {
+	mut c := net.dial_udp(server_addr) or { return error('dial_udp ${server_addr}: ${err.msg()}') }
+	defer {
+		c.close() or {}
+	}
+	c.write_string(msg) or { return error('udp write: ${err.msg()}') }
+	c.set_read_deadline(time.now().add(3 * time.second))
+	mut out := []u8{len: 256}
+	n, _ := c.read(mut out) or { return error('udp read: ${err.msg()}') }
+	if n == 0 {
+		return error('udp read: empty response')
+	}
+	return out[..n].bytestr()
+}
+
+const udp_echo_msg = 'hello-vfrp-udp-e2e'
+
+// write_client_udp_config 写一条 udp 代理的 vfrpc 配置。
+fn write_client_udp_config(path string, server_port int, local_port int, remote_port int, token string) {
+	content := 'server_addr = "127.0.0.1"\nserver_port = ${server_port}\nauth_token = "${token}"\nheartbeat_interval = 1\n\n[[proxies]]\nname = "udp_e2e"\ntype = "udp"\nlocal_ip = "127.0.0.1"\nlocal_port = ${local_port}\nremote_port = ${remote_port}\n'
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
+}
+
+// test_udp_proxy_e2e：起 vfrps + vfrpc + 本地 UDP echo server，注册一条 udp 代理，
+// 用户 → vfrps:remote_port → vfrpc → 本地 echo → 回环。
+fn test_udp_proxy_e2e() {
+	ports := probe_distinct_ports(3)!
+	server_port := ports[0]
+	remote_port := ports[1]
+	echo_port := ports[2]
+
+	udp_echo := start_udp_echo_server()!
+	defer {
+		stop_udp_echo_server(udp_echo)
+		kill_all_procs()
+	}
+
+	srv_cfg := os.join_path(g_tmp, 'udp_proxy_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'udp_proxy_vfrpc.toml')
+	write_server_config(srv_cfg, server_port, 'test-token')
+	write_client_udp_config(cli_cfg, server_port, echo_port, remote_port, 'test-token')
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "udp_e2e" registered', wait_total)
+	assert reg, 'proxy udp_e2e not registered, client log:\n${cli_log}'
+
+	got := dial_udp_and_echo('127.0.0.1:${remote_port}', udp_echo_msg) or {
+		extra_srv := read_pending_stderr(mut psrv)
+		extra_cli := read_pending_stderr(mut pcli)
+		panic('udp roundtrip failed: ${err.msg()}\nvfrpc log:\n${cli_log}${extra_cli}\nvfrps log:\n${srv_log}${extra_srv}')
+	}
+	assert got == udp_echo_msg, 'udp echo: got "${got}", want "${udp_echo_msg}"'
+}

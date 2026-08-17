@@ -53,10 +53,18 @@
 - [x] NewWorkConn 解码 panic（array.get 越界）— 复用 Login/LoginWire 的 Wire 兼容路径：pkg/msg/msg.v 加 NewWorkConnWire（无 omitempty），pkg/msg/io.v 改走 decode[NewWorkConnWire] + new_work_conn_from_wire。NewWorkConn 自身去掉 omitempty（与 Wire 字段一一对应，编码端不再产生空字段歧义）
 
 ## P6 UDP 代理（M2）
-- [ ] msg: UDPPacket 二进制编码（参考 Go 版 udp_binary.go）
-- [ ] server/proxy UDP 实现
-- [ ] client/proxy UDP 实现
-- [ ] e2e UDP 测试
+- [x] msg: UDPPacket 编码（v1 帧格式 JSON，content 为 []u8；Go 版的 v2 二进制编码 v0.5.2 上不实现，v1 已满足单会话 M2）
+- [x] server/proxy UDP 实现 — UdpProxy（server/proxy.v）：bind UDP socket、首包触发 ReqWorkConn 申请+发送 StartWorkConn、代理级单 work conn 长期复用、读循环转发
+- [x] client/proxy UDP 实现 — handle_udp_proxy（client/proxy.v）：监听 local UDP、与一对 spawned goroutine（local↔work）拼装 UDPPacket
+- [x] e2e UDP 测试 — test_udp_proxy_e2e：用户发 UDP 包到 vfrps:remote_port → 完整走 work conn → 本地 echo → 回环
+
+## P6.x 实现期踩到的 V 0.5.2 坑（已修）
+- [x] `net.UdpConn` 默认 100ms read_timeout（`udp_default_read_timeout = time.second / 10`）；代理须 `set_read_timeout(time.infinite)` 走"无限等待"分支，否则每次 read 都返"op timed out"导致 read_loop 提前退出
+- [x] `net.UdpConn` 不暴露绑定后的本地地址（`str()` 是 TODO）；UDP 随机端口探测改用 bind(:port) + 冲突重试 + `rand.intn` 在 40000-60000 范围内挑
+- [x] work conn 上的 StartWorkConn 不能被 server 侧 `work_read_loop` 抢先 read 走（否则 client 侧 read_msg 永远拿不到，handle_udp_proxy 不被调用）；work_read_loop 推迟到 `acquire_work_conn` 发完 StartWorkConn 之后才 spawn
+- [x] client 侧 handle_udp_proxy 不能 `defer { local_udp.close() }`：handle 函数返回瞬间 socket 就关了，子 goroutine 立刻 EBADF。改由 work conn 错误驱动退出，关闭沿 client/service.v 整体重连路径走
+- [x] 服务端代理表按协议拆成 `tcp_proxies` / `udp_proxies` 两张 map（共享一把 `proxies_mu`），close/handle_close_proxy 按代理类型走对应 `pm.release` / `pm.release_udp`
+- [x] V 0.5.2 缺 `net.parse_addr(string)`；UDPPacket 加 `remote_addr_as_addr()` 方法，借 `net.resolve_addrs_fuzzy(addr, .udp)` 走 DNS 解析路径（接受本轮多一次解析的代价，换不用自己实现 sockaddr 解析）
 
 ## P7 HTTP vhost（M3）
 - [ ] vhost 路由表（域名/location → 代理）
