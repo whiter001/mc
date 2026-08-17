@@ -1,0 +1,6 @@
+bin/
+# Stray V build/test outputs that V doesn't auto-clean in subdirs
+cmd/*/vfrps
+cmd/*/vfrpc
+pkg/**/*_test
+test/**/*_test
