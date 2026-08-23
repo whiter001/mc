@@ -1,10 +1,24 @@
 // v1 帧读写：write_msg / read_msg。
 // 帧格式（与 Go 版 frp 默认 v1 格式兼容）：
 //   [1 字节类型][JSON payload]['\n']
+@[has_globals]
 module msg
 
 import net
 import json2
+import sync
+
+// g_encode_mu / g_decode_mu 分别串行化 json2.encode / json2.decode：
+// V 0.5.2 的 json2 用 C static 做字段信息懒缓存（encode 的 cached_field_infos
+// 与 decode 的 cached_struct_field_infos，二者独立），多线程并发首次处理同一
+// 类型时数据竞争，会把缓存指针覆盖成空数组，encode 触发 array.get 越界 panic、
+// decode 则丢字段（服务端并发收多条 NewWorkConn 时 run_id 被解成空串，已在 e2e
+// 复现）。encode 与 decode 的缓存互不共享，故拆成两把锁以降低多 control 高并发
+// 下的互斥范围（原单把全局锁会串行化所有连接的编解码，成为吞吐瓶颈）。
+__global (
+	g_encode_mu sync.Mutex
+	g_decode_mu sync.Mutex
+)
 
 // 单条消息 JSON 载荷的最大字节数（64KB）。读取时逐字节累积，超过即报错，
 // 防止恶意对端发无限长的行耗尽内存。
@@ -49,7 +63,12 @@ fn msg_type_byte(msg Message) u8 {
 // encode_message 把消息编码为 JSON 字符串。
 // 注意：V 0.5.2 对 sum type 值直接 json.encode 会得到空串，
 // 必须先 match 收窄到具体类型再编码。
+// 全程持 g_encode_mu（见该变量注释：json2 懒缓存非线程安全）。
 fn encode_message(msg Message) string {
+	g_encode_mu.lock()
+	defer {
+		g_encode_mu.unlock()
+	}
 	return match msg {
 		Login { json2.encode(msg, escape_unicode: true) }
 		LoginResp { json2.encode(msg, escape_unicode: true) }
@@ -84,7 +103,12 @@ fn read_payload(mut conn net.TcpConn) ![]u8 {
 }
 
 // decode_message 按类型字节把 JSON 载荷解码为对应消息。
+// 全程持 g_decode_mu（见该变量注释：json2 懒缓存非线程安全，decode 也会丢字段）。
 fn decode_message(type_byte u8, payload []u8) !Message {
+	g_decode_mu.lock()
+	defer {
+		g_decode_mu.unlock()
+	}
 	data := payload.bytestr()
 	match type_byte {
 		type_login {

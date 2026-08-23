@@ -36,6 +36,61 @@ fn check_port(port int, field string) ! {
 	}
 }
 
+// is_digits 判断字符串是否全为十进制数字（allow_ports 解析用，
+// 避免 V 的 string.int() 对 "12abc" 这类串只解析前导数字导致误放行）。
+fn is_digits(s string) bool {
+	if s.len == 0 {
+		return false
+	}
+	for c in s {
+		if c < `0` || c > `9` {
+			return false
+		}
+	}
+	return true
+}
+
+// validate_auth_scopes 校验 auth_additional_scopes 取值，只能为 Go 版
+// v1.AuthScope 常量 "HeartBeats" / "NewWorkConns"（大小写敏感）。
+fn validate_auth_scopes(scopes []string, where string) ! {
+	for s in scopes {
+		if s != 'HeartBeats' && s != 'NewWorkConns' {
+			return error('${where}: invalid auth_additional_scopes value "${s}", want "HeartBeats" or "NewWorkConns"')
+		}
+	}
+}
+
+// validate_allow_ports 校验 allow_ports 每项格式：单端口或 start-end 区间，
+// 端口范围 1-65535 且 end >= start。
+// pub：server 模块的 new_port_manager 复用本校验，避免两套解析器行为漂移
+//（见 server/ports.v parse_allow_ports）。
+pub fn validate_allow_ports(ports []string) ! {
+	for p in ports {
+		entry := p.trim_space()
+		if entry == '' {
+			return error('allow_ports: empty entry')
+		}
+		if entry.contains('-') {
+			parts := entry.split('-')
+			if parts.len != 2 || !is_digits(parts[0].trim_space()) || !is_digits(parts[1].trim_space()) {
+				return error('allow_ports: invalid range "${p}", want single port or start-end')
+			}
+			start := parts[0].trim_space().int()
+			end := parts[1].trim_space().int()
+			check_port(start, 'allow_ports "${p}" start')!
+			check_port(end, 'allow_ports "${p}" end')!
+			if end < start {
+				return error('allow_ports: invalid range "${p}", end < start')
+			}
+		} else {
+			if !is_digits(entry) {
+				return error('allow_ports: invalid port "${p}", want 1-65535')
+			}
+			check_port(entry.int(), 'allow_ports "${p}"')!
+		}
+	}
+}
+
 fn (cfg ServerConfig) validate() ! {
 	check_port(cfg.bind_port, 'bind_port')!
 	if cfg.bind_addr == '' {
@@ -45,6 +100,8 @@ fn (cfg ServerConfig) validate() ! {
 	if cfg.vhost_http_port != 0 {
 		check_port(cfg.vhost_http_port, 'vhost_http_port')!
 	}
+	validate_auth_scopes(cfg.auth_additional_scopes, 'server')!
+	validate_allow_ports(cfg.allow_ports)!
 }
 
 fn (cfg ClientConfig) validate() ! {
@@ -52,6 +109,7 @@ fn (cfg ClientConfig) validate() ! {
 		return error('server_addr must not be empty')
 	}
 	check_port(cfg.server_port, 'server_port')!
+	validate_auth_scopes(cfg.auth_additional_scopes, 'client')!
 	for i, p in cfg.proxies {
 		p.validate(i)!
 	}

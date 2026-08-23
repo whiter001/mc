@@ -69,7 +69,7 @@ mc/frp/                       # 项目根
 │   ├── config/
 │   │   ├── types.v           # ServerConfig / ClientConfig / ProxyConfig
 │   │   └── load.v            # TOML 加载、校验、默认值
-│   ├── auth/token.v          # token → privilege_key（sha1(token+timestamp)）
+│   ├── auth/token.v          # token → privilege_key（md5_hex(token+timestamp)）
 │   └── util/
 │       ├── log/log.v         # 分级日志
 │       ├── version/version.v # 版本常量
@@ -128,10 +128,14 @@ remote_port = 6000
 
 ## 6. 认证（token）
 
-与 Go frp 一致：`privilege_key = sha1_hex(token + str(timestamp))`。
-- 客户端在 `Login` / `NewWorkConn` / `Ping` 中携带 timestamp + privilege_key
-- 服务端用同样的 token 重算比对；timestamp 与服务端时间差超过 15 分钟拒绝
-- M1 阶段允许 `auth_token` 为空（不校验）
+与 Go frp 一致：`privilege_key = md5_hex(token + str(timestamp))`（Go 版 `util.GetAuthKey` 用 MD5，小写 hex）。
+- `Login` 始终校验 privilege_key；`Ping` / `NewWorkConn` 默认不校验
+- `auth_additional_scopes = ["HeartBeats", "NewWorkConns"]`（两端配置一致时）才额外校验 Ping / NewWorkConn —— 对齐 Go 版 `AuthScope` 语义
+- 无时间戳新鲜度校验（Go 版 token 认证没有 ±15min 窗口；OIDC 才验过期，本实现不做 OIDC）
+- token 为空时仍按 `md5('' + ts)` 计算比对（两端 token 都为空时自然通过），不做恒真特判
+- key 比对用常量时间比较（`crypto.subtle.constant_time_compare`）
+- 服务端 `allow_ports` 白名单（单端口或 start-end 区间，空 = 不限制）：指定端口不在白名单 → 拒绝；随机分配只在白名单内挑 —— 对齐 Go 版 `ports.Manager.allowPorts`
+- Login 时校验 run_id：非空、≤64 字节、合法 UTF-8、全为可打印字符（Go 版 `validation.ValidateRunID`）
 
 ## 7. V 实现要点
 
@@ -140,7 +144,7 @@ remote_port = 6000
 - **网络**：vlib `net`（`net.listen_tcp` / `net.dial_tcp` / `net.listen_udp`）
 - **并发**：`spawn fn()` 起 OS 线程；注册表等共享状态用 `sync.Mutex`；连接对转发用两个线程双向 `read`/`write` 拷贝
 - **错误处理**：`!` 传播；网络读循环遇错即关闭并清理
-- **CLI 参数**：vlib `flag`（`-c` 指定配置文件）
+- **CLI 参数**：`-c` 指定配置文件；不用 vlib `flag` 模块（V 0.5.2 中 `import flag` 与 `import toml` 同现会导致产物运行时 toml 解析出错，已改手工解析）
 - **测试**：`*_test.v` + `v -stats test .`；e2e 用 `os.execute` 或 `spawn` 起进程
 
 ## 8. 实施阶段

@@ -33,9 +33,11 @@ pub fn new_service(cfg config.ClientConfig) Service {
 // run 主循环，持续运行直到进程退出（Ctrl-C / kill 终止）。
 pub fn (mut svc Service) run() {
 	mut backoff := 1
+	// 首次会话生成 run_id；登录成功后由 LoginResp 记录实际 run_id，
+	// 之后断线重连复用同一个 run_id（对齐 Go 版 svr.runID 语义：同一客户端
+	// 重连保持 run_id 不变，服务端 register_control 的"同 run_id 踢旧"才能生效）。
+	mut run_id := rand.hex(16)
 	for {
-		// 每次会话生成新的 run_id（16 位随机 hex）
-		run_id := rand.hex(16)
 		mut ctl := new_control(svc.cfg, run_id) or {
 			log.error('connect to server failed: ${err.msg()}, retry in ${backoff}s')
 			time.sleep(backoff * time.second)
@@ -49,6 +51,9 @@ pub fn (mut svc Service) run() {
 			backoff = next_backoff(backoff)
 			continue
 		}
+		// login() 内已用 LoginResp 回显的 run_id 覆盖 ctl.run_id；这里记录到
+		// run_id 变量，供下一次重连复用。
+		run_id = ctl.run_id
 		backoff = 1
 		log.info('login to server success, run id: ${run_id}')
 		svc.register_proxies(mut ctl) or {
@@ -117,9 +122,16 @@ fn login(mut ctl Control) ! {
 	if resp.error != '' {
 		return error('login rejected by server: ${resp.error}')
 	}
+	// 记录服务端回显/生成的 run_id：重连时复用（对齐 Go 版 login 后
+	// sessionCtx.RunID → svr.runID 的语义）。
+	if resp.run_id != '' {
+		ctl.run_id = resp.run_id
+	}
 }
 
-// heartbeat_loop 每隔 interval 秒发一次 Ping（带 token 派生 privilege_key）。
+// heartbeat_loop 每隔 interval 秒发一次 Ping。默认不携带认证字段；
+// 仅当配置 auth_additional_scopes 含 "HeartBeats" 时携带 token 派生 privilege_key
+// 与 timestamp（对齐 Go 版 TokenAuth.SetPing）。
 // 写控制连接走 write_mu（与注册等写操作互斥）；会话被 stop 后退出。
 // 参数不带 mut：spawn 传参 `mut x &T` 会捕获调用方栈地址（原因见 netx.copy_one_way 注释）。
 fn heartbeat_loop(ctl &Control, interval int) {
@@ -127,16 +139,19 @@ fn heartbeat_loop(ctl &Control, interval int) {
 		return
 	}
 	mut c := ctl
+	need_auth := auth.has_scope(c.cfg.auth_additional_scopes, 'HeartBeats')
 	for {
 		time.sleep(interval * time.second)
 		if c.is_stopped() {
 			return
 		}
-		ts := time.now().unix()
-		c.write_msg(msg.Ping{
-			privilege_key: auth.new_privilege_key(c.cfg.auth_token, ts)
-			timestamp:     ts
-		}) or {
+		mut ping := msg.Ping{}
+		if need_auth {
+			ts := time.now().unix()
+			ping.privilege_key = auth.new_privilege_key(c.cfg.auth_token, ts)
+			ping.timestamp = ts
+		}
+		c.write_msg(ping) or {
 			log.warn('heartbeat: send ping failed: ${err.msg()}')
 			// 连接已坏，读循环会感知并触发重连；这里继续循环等 stop
 			continue

@@ -247,7 +247,7 @@ server_addr = "127.0.0.1"
 
 [[proxies]]
 name = "web"
-type = "http"
+type = "sctp"
 local_port = 80
 remote_port = 8080
 ')
@@ -255,7 +255,7 @@ remote_port = 8080
 		os.rm(path) or {}
 	}
 	err := client_err(path)
-	assert err.contains('unknown proxy type "http"'), 'got: ${err}'
+	assert err.contains('unknown proxy type "sctp"'), 'got: ${err}'
 	assert err.contains('proxies[0]'), 'expected position hint, got: ${err}'
 }
 
@@ -270,4 +270,83 @@ server_port = 7000
 	cfg := load_client_config(path) or { panic(err.msg()) }
 	assert cfg.server_addr == '127.0.0.1'
 	assert cfg.proxies.len == 0
+}
+
+fn test_server_config_valid_scopes() {
+	path := write_tmp('server_scopes', '
+auth_additional_scopes = ["HeartBeats", "NewWorkConns"]
+')
+	defer {
+		os.rm(path) or {}
+	}
+	cfg := load_server_config(path) or { panic(err.msg()) }
+	assert cfg.auth_additional_scopes.len == 2
+	assert cfg.auth_additional_scopes[0] == 'HeartBeats'
+	assert cfg.auth_additional_scopes[1] == 'NewWorkConns'
+}
+
+fn test_server_config_invalid_scope() {
+	for scope in ['Heartbeat', 'heartbeats', 'Ping', ''] {
+		path := write_tmp('server_scope_${scope}', 'auth_additional_scopes = ["${scope}"]')
+		defer {
+			os.rm(path) or {}
+		}
+		err := server_err(path)
+		assert err.contains('auth_additional_scopes'), 'expected scope error for "${scope}", got: ${err}'
+		assert err.contains('HeartBeats'), 'expected hint in error for "${scope}", got: ${err}'
+	}
+}
+
+fn test_client_config_invalid_scope() {
+	path := write_tmp('client_scope_bad', '
+server_addr = "127.0.0.1"
+auth_additional_scopes = ["NewWorkConn"]
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('auth_additional_scopes'), 'got: ${err}'
+	assert err.contains('NewWorkConns'), 'got: ${err}'
+}
+
+fn test_server_config_valid_allow_ports() {
+	path := write_tmp('server_allow_ports', 'allow_ports = ["2000-3000", "3001"]')
+	defer {
+		os.rm(path) or {}
+	}
+	cfg := load_server_config(path) or { panic(err.msg()) }
+	assert cfg.allow_ports.len == 2
+	assert cfg.allow_ports[0] == '2000-3000'
+	assert cfg.allow_ports[1] == '3001'
+}
+
+fn test_server_config_invalid_allow_ports() {
+	// end < start
+	for entry in ['3000-2000', '1-0', '0-1'] {
+		path := write_tmp('allow_ports_bad_${entry}', 'allow_ports = ["${entry}"]')
+		defer {
+			os.rm(path) or {}
+		}
+		err := server_err(path)
+		assert err.contains('allow_ports'), 'expected allow_ports error for "${entry}", got: ${err}'
+	}
+	// 越界
+	for entry in ['65536', '0', '-1'] {
+		path := write_tmp('allow_ports_out_${entry}', 'allow_ports = ["${entry}"]')
+		defer {
+			os.rm(path) or {}
+		}
+		err := server_err(path)
+		assert err.contains('allow_ports'), 'expected allow_ports error for "${entry}", got: ${err}'
+	}
+	// 非数字 / 多段
+	for entry in ['abc', '1-2-3', '2000-3000,4000'] {
+		path := write_tmp('allow_ports_weird_${entry}', 'allow_ports = ["${entry}"]')
+		defer {
+			os.rm(path) or {}
+		}
+		err := server_err(path)
+		assert err.contains('allow_ports'), 'expected allow_ports error for "${entry}", got: ${err}'
+	}
 }
