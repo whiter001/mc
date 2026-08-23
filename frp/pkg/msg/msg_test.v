@@ -258,6 +258,30 @@ fn test_json_roundtrip_basic_messages() {
 	assert json.encode(UDPPacket{ content: [u8(1), 2] }) == '{"c":[1,2]}'
 }
 
+// NewWorkConn 带空认证字段（auth_additional_scopes 不含 NewWorkConns 时）也能编码，
+// 不会触发 V 0.5.2 json2 对无 omitempty 空字符串字段的 panic（bug 回归测试）。
+// 注意：按生产路径（io.v encode_message / decode_message，走 json2）验证——
+// 不用 vlib 废弃的 json.encode，否则 json2 侧回归本测试捕获不到。
+fn test_new_work_conn_empty_auth_fields_encode() {
+	raw := encode_message(NewWorkConn{ run_id: 'r' })
+	assert raw == '{"run_id":"r"}', 'got: ${raw}'
+	// 解码回读字段齐全（omitempty 只影响编码，不影响解码）
+	m := decode_message(type_new_work_conn, raw.bytes()) or {
+		assert false
+		return
+	}
+	match m {
+		NewWorkConn {
+			assert m.run_id == 'r'
+			assert m.privilege_key == ''
+			assert m.timestamp == 0
+		}
+		else {
+			assert false, 'decode returned ${typeof(m).name}'
+		}
+	}
+}
+
 // 客户端连发两条消息、连读两条消息；服务端对应连读、连写 —— 验证帧不粘连。
 fn test_write_read_tcp_roundtrip() {
 	mut lst := net.listen_tcp(.ip, '127.0.0.1:0') or {
@@ -456,4 +480,42 @@ fn test_read_msg_conn_closed() {
 	}
 	assert false
 	sconn.close() or {}
+}
+
+// 并发编解码压测：多线程同时 encode/decode 同一消息类型，验证 json2 懒缓存
+// 数据竞争防护（g_encode_mu / g_decode_mu）不 panic、不丢字段、不死锁。
+fn test_concurrent_encode_decode() {
+	mut fails := chan int{cap: 8}
+	for _ in 0 .. 8 {
+		spawn fn [mut fails] () {
+			mut bad := 0
+			for j in 0 .. 200 {
+				raw := encode_message(NewWorkConn{ run_id: 'r${j}' })
+				if raw != '{"run_id":"r${j}"}' {
+					bad++
+					continue
+				}
+				m := decode_message(type_new_work_conn, raw.bytes()) or {
+					bad++
+					continue
+				}
+				match m {
+					NewWorkConn {
+						if m.run_id != 'r${j}' {
+							bad++
+						}
+					}
+					else {
+						bad++
+					}
+				}
+			}
+			fails <- bad
+		}()
+	}
+	mut total_bad := 0
+	for _ in 0 .. 8 {
+		total_bad += <-fails
+	}
+	assert total_bad == 0, 'concurrent encode/decode produced ${total_bad} mismatches'
 }

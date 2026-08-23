@@ -30,11 +30,16 @@ fn handle_work_conn(cfg config.ClientConfig, run_id string) {
 		return
 	}
 	ts := time.now().unix()
-	msg.write_msg(mut work_conn, msg.NewWorkConn{
-		run_id:        run_id
-		privilege_key: auth.new_privilege_key(cfg.auth_token, ts)
-		timestamp:     ts
-	}) or {
+	mut nwc := msg.NewWorkConn{
+		run_id: run_id
+	}
+	// 默认不携带认证字段；仅当配置 auth_additional_scopes 含 "NewWorkConns" 时
+	// 携带 token 派生 privilege_key 与 timestamp（对齐 Go 版 TokenAuth.SetNewWorkConn）。
+	if auth.has_scope(cfg.auth_additional_scopes, 'NewWorkConns') {
+		nwc.privilege_key = auth.new_privilege_key(cfg.auth_token, ts)
+		nwc.timestamp = ts
+	}
+	msg.write_msg(mut work_conn, nwc) or {
 		log.warn('work conn: write NewWorkConn failed: ${err.msg()}')
 		work_conn.close() or {}
 		return
@@ -73,7 +78,7 @@ fn handle_work_conn(cfg config.ClientConfig, run_id string) {
 	if local.type == 'udp' {
 		// UDP 代理：work conn 长期复用，不做 TCP 风格的 per-connection relay。
 		// 详见 handle_udp_proxy。
-		handle_udp_proxy(local, mut work_conn)
+		handle_udp_proxy(local, work_conn)
 		return
 	}
 	local_addr := netx.join_host_port(local.local_ip, local.local_port)
@@ -95,7 +100,10 @@ fn handle_work_conn(cfg config.ClientConfig, run_id string) {
 // **不能** defer close（否则函数返回瞬间 socket 就关了，子 goroutine 立刻 EBADF）。
 // socket 关闭由 work conn 读错误触发：work conn 断 → udp_work_to_local 退出 → 之后
 // 由 Service 的 read_loop 出错触发整体重连（参见 client/service.v）。
-fn handle_udp_proxy(local config.ProxyConfig, mut work_conn &net.TcpConn) {
+// 注意：参数均不带 mut（work_conn / local_udp）——V 0.5.2 的 `mut x &T` 参数对
+// 非 main 模块生成 T**（调用方变量地址），spawn 出去的线程持有 T** 在函数返回后
+// 悬垂，访问即段错误；函数内用 `mut wc`/`mut lu` 取可变引用。
+fn handle_udp_proxy(local config.ProxyConfig, work_conn &net.TcpConn) {
 	local_addr := netx.join_host_port(local.local_ip, local.local_port)
 	// V 0.5.2 缺 dial_udp(laddr, raddr) 形式；用 listen_udp(laddr) 监听同一个端口，
 	// 再 write_to(dialed) 发送（OS 会分配本地端口作为源）。
@@ -120,17 +128,22 @@ fn handle_udp_proxy(local config.ProxyConfig, mut work_conn &net.TcpConn) {
 	log.info('proxy "${local.name}": udp relay ready, local=${local_addr}')
 
 	// 本地 UDP → work conn
-	spawn udp_local_to_work(local.name, mut local_udp, dst, mut work_conn)
+	spawn udp_local_to_work(local.name, local_udp, dst, work_conn)
 	// work conn → 本地 UDP
-	spawn udp_work_to_local(local.name, mut work_conn, mut local_udp)
+	spawn udp_work_to_local(local.name, work_conn, local_udp)
 }
 
 // udp_local_to_work 持续从本地 UDP socket 读包，wrap 成 UDPPacket 写到 work conn。
 // 把本端 UDP 源（vfrpc→local app 的来源）记入 remote_addr，让 server 侧能正确回包。
-fn udp_local_to_work(proxy_name string, mut local_udp &net.UdpConn, dst net.Addr, mut work_conn &net.TcpConn) {
+fn udp_local_to_work(proxy_name string, local_udp &net.UdpConn, dst net.Addr, work_conn &net.TcpConn) {
+	// V 对非 main 模块函数参数 `&net.UdpConn` 不能直接赋给 mut 局部（无法证明堆分配），
+	// 用 unsafe 显式绕过；指针来自 net.listen_udp（堆对象），生命周期由 work conn
+	// 断开后整体重连兜底。
+	mut lu := unsafe { local_udp }
+	mut wc := work_conn
 	mut buf := []u8{len: udp_read_buf_size}
 	for {
-		n, src_addr := local_udp.read(mut buf) or {
+		n, src_addr := lu.read(mut buf) or {
 			log.warn('proxy "${proxy_name}": udp local read error: ${err.msg()}')
 			return
 		}
@@ -139,7 +152,7 @@ fn udp_local_to_work(proxy_name string, mut local_udp &net.UdpConn, dst net.Addr
 		}
 		mut pkt_content := []u8{len: n, init: 0}
 		copy(mut pkt_content, buf[..n])
-		msg.write_msg(mut work_conn, msg.UDPPacket{
+		msg.write_msg(mut wc, msg.UDPPacket{
 			content:     pkt_content
 			remote_addr: '${dst}'
 			local_addr:  '${src_addr}'
@@ -152,15 +165,18 @@ fn udp_local_to_work(proxy_name string, mut local_udp &net.UdpConn, dst net.Addr
 
 // udp_work_to_local 持续从 work conn 读 UDPPacket，write_to local UDP socket。
 // V P6 MVP：使用包里的 remote_addr 作为发送目标（多用户路由在 P6+ 加 session 表）。
-fn udp_work_to_local(proxy_name string, mut work_conn &net.TcpConn, mut local_udp &net.UdpConn) {
+fn udp_work_to_local(proxy_name string, work_conn &net.TcpConn, local_udp &net.UdpConn) {
+	mut wc := work_conn
+	// 同 udp_local_to_work：`&net.UdpConn` 函数参数赋给 mut 局部需 unsafe。
+	mut lu := unsafe { local_udp }
 	for {
-		m := msg.read_msg(mut work_conn) or {
+		m := msg.read_msg(mut wc) or {
 			log.warn('proxy "${proxy_name}": udp work read error: ${err.msg()}')
 			return
 		}
 		match m {
 			msg.UDPPacket {
-				local_udp.write_to(m.remote_addr_as_addr(), m.content) or {
+				lu.write_to(m.remote_addr_as_addr(), m.content) or {
 					log.warn('proxy "${proxy_name}": udp write_to ${m.remote_addr} failed: ${err.msg()}')
 				}
 			}

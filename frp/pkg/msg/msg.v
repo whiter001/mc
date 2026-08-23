@@ -152,11 +152,17 @@ pub:
 }
 
 // NewWorkConn 客户端新建 work 连接时发送。
+// 注意：privilege_key / timestamp 必须带 omitempty——当 auth_additional_scopes
+// 不含 "NewWorkConns" 时这两字段为空，V 0.5.2 的 json2.encode 对无 omitempty 的
+// 空字符串字段会 panic（array.get 越界）。
 pub struct NewWorkConn {
 pub:
-	run_id        string @[json: 'run_id']
-	privilege_key string @[json: 'privilege_key']
-	timestamp     i64    @[json: 'timestamp']
+	run_id string @[json: 'run_id']
+	// privilege_key / timestamp 由 client 按 auth_additional_scopes 决定是否填充，
+	// 故须为 pub mut（client/proxy.v handle_work_conn 构造后按条件赋值）。
+pub mut:
+	privilege_key string @[json: 'privilege_key'; omitempty]
+	timestamp     i64    @[json: 'timestamp'; omitempty]
 }
 
 // NewWorkConnWire 是 NewWorkConn 的"解码专用"副本。
@@ -165,8 +171,8 @@ pub:
 // 与 Login/LoginWire 走相同的兼容路径。
 struct NewWorkConnWire {
 	run_id        string @[json: 'run_id']
-	privilege_key string @[json: 'privilege_key']
-	timestamp     i64    @[json: 'timestamp']
+	privilege_key string @[json: 'privilege_key'; omitempty]
+	timestamp     i64    @[json: 'timestamp'; omitempty]
 }
 
 // ReqWorkConn 服务端向客户端请求一条 work 连接（无字段）。
@@ -184,8 +190,10 @@ pub:
 }
 
 // Ping 心跳。
+// privilege_key / timestamp 由 client 按 auth_additional_scopes 决定是否填充，
+// 故须为 pub mut（client/service.v heartbeat_loop 构造后按条件赋值）。
 pub struct Ping {
-pub:
+pub mut:
 	privilege_key string @[json: 'privilege_key'; omitempty]
 	timestamp     i64    @[json: 'timestamp'; omitempty]
 }

@@ -19,7 +19,7 @@
 - [x] `pkg/config/types.v`：ServerConfig / ClientConfig / ProxyConfig（tcp/udp/http 字段）
 - [x] `pkg/config/load.v`：TOML 解析（vlib toml）、默认值填充、校验（端口范围、必填字段）
 - [x] `pkg/config/config_test.v`：解析示例 toml、缺省值、非法配置报错
-- [x] `pkg/auth/token.v`：privilege_key = sha1_hex(token+timestamp)；校验函数（含 ±15min 时间窗）
+- [x] `pkg/auth/token.v`：privilege_key = md5_hex(token+timestamp)（对齐 Go 版 util.GetAuthKey）；校验函数（常量时间比较、无时间窗、空 token 也按 md5 计算比对）；has_scope 辅助（HeartBeats / NewWorkConns）
 - [x] `pkg/auth/token_test.v`
 
 ## P2 server 端
@@ -80,6 +80,20 @@
 - [x] `ProxyConfig` 增 `custom_domains []string` / `subdomain string` / `subdomain_host string` 字段；`validate` 按 type 分支（tcp/udp 需 remote_port，http 需 custom_domains 或 subdomain+host）
 - [x] `msg.NewProxy` / `NewProxyWire` / `new_proxy_from_wire` 三处都补 `subdomain_host` 字段（一开始忘了在 wire 拷贝里也加，会导致 json decode 后回填丢字段；已补）
 - [x] V 编译器在 vfrp 项目（含 vhost/http 后）触发 2.3G 内存上限；测试 build 加 `-no-memory-limit` 绕开
+
+## P7.x 验证功能对齐（对照 Go frp 逐项核查后补齐）
+- [x] 认证密钥算法：SHA1 → **MD5**（`md5_hex(token + str(timestamp))`），与 Go 版 `pkg/util/util/util.go::GetAuthKey` 一致；token_test 补 md5('0') 已知向量
+- [x] 校验语义对齐：**去掉 ±15min 时间窗**（Go 版 token 认证无此检查）；**去掉空 token 恒真特判**（空 token 也按 `md5('' + ts)` 比对）；key 比对改用 `crypto.subtle.constant_time_compare`（先判长度再比）
+- [x] `auth_additional_scopes`（ServerConfig / ClientConfig，值仅 `HeartBeats` / `NewWorkConns`）：默认只校验 Login；Ping / NewWorkConn 仅在对应 scope 开启时才携带并校验 —— 对齐 Go 版 `TokenAuth.SetPing/VerifyPing/SetNewWorkConn/VerifyNewWorkConn`
+- [x] `allow_ports` 端口白名单（ServerConfig，单端口 / start-end 区间，空 = 不限制）：指定端口不在白名单 → 拒绝注册；随机分配只在白名单内挑 —— 对齐 Go 版 `ports.Manager.allowPorts`（e2e：白名单内放行、白名单外拒绝）
+- [x] run_id 校验：Login 时非空、≤64 字节、合法 UTF-8、全为可打印字符 —— 对齐 Go 版 `validation.ValidateRunID`
+- [x] `msg.NewWorkConn` / `msg.Ping` 的 privilege_key / timestamp 改 `pub mut` + `omitempty`（scope 关闭时编码为空字段也不 panic；`NewWorkConnWire` 同步）
+
+## P7.x 修复的实现期坑（V 0.5.2，已修）
+- [x] **`mut x &T` → T** 代码生成 bug 损坏 chan 指针**：`handle_work_conn(mut conn &net.TcpConn)` 中转后调 `register_work_conn(mut conn)`，生成的 C 把 T* 值错塞给 T** 形参，chan 里读回的是 TcpConn 结构体首 8 字节（垃圾指针），代理侧 write StartWorkConn 即段错误（vfrps 收到用户连接就崩）。修复：server/service.v `handle_work_conn` 与 server/control.v `register_work_conn` 参数改非 mut `&net.TcpConn`，函数内 `mut cc := conn`（沿用 netx.copy_one_way 的既有规避模式）
+- [x] **UDP 代理 spawn 悬垂 T\*\***：client/proxy.v `handle_udp_proxy` 把 `mut work_conn` / `mut local_udp` 传给 spawned goroutine，函数返回后 T** 悬垂即段错误。修复：三个函数参数全部改非 mut（`&net.TcpConn` / `&net.UdpConn`），内部取 `mut`；`&net.UdpConn` 参数赋给 mut 局部需 `unsafe`（V 对非 main 模块函数参数无法证明堆分配）
+- [x] **json2 懒缓存数据竞争**：json2 encode 的 `cached_field_infos[T]` 与 decode 的 `cached_struct_field_infos[T]` 用 C static 懒初始化，多线程并发首次处理同一类型时缓存指针被覆盖成空数组 → encode 触发 `array.get` 越界 panic / decode 丢字段（run_id 被解成空串）。修复：pkg/msg/io.v 给 encode_message / decode_message 加包级 `__global sync.Mutex` 串行化（msg 模块标 `@[has_globals]`）
+- [x] `cmd/vfrps/main.v` / `cmd/vfrpc/main.v`：弃用 vlib `flag` 模块（V 0.5.2 中 `import flag` 与 `import toml` 同现导致产物运行时 toml 解析出错），改手工解析 `-c` / `--version` / `-h`
 
 ## P8 TLS（M4）
 - [ ] transport TLS（net.openssl 或 net.mbedtls 可行性验证先行）

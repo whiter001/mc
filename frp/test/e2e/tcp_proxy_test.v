@@ -301,13 +301,63 @@ fn echo_handler(mut c net.TcpConn) {
 // 配置写入
 // ---------------------------------------------------------------------------
 
+// write_server_config 写服务端基础配置。
 fn write_server_config(path string, bind_port int, token string) {
 	content := 'bind_addr = "127.0.0.1"\nbind_port = ${bind_port}\nauth_token = "${token}"\n'
 	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
 }
 
+// write_server_config_with_allow_ports 写带 allow_ports 白名单的服务端配置
+//（对齐 Go 版 allowPorts：单端口或 start-end 区间）。
+fn write_server_config_with_allow_ports(path string, bind_port int, token string, allow_ports []string) {
+	mut content := 'bind_addr = "127.0.0.1"\nbind_port = ${bind_port}\nauth_token = "${token}"\nallow_ports = ['
+	for i, p in allow_ports {
+		if i > 0 {
+			content += ', '
+		}
+		content += '"${p}"'
+	}
+	content += ']\n'
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
+}
+
 fn write_client_config(path string, server_port int, local_port int, remote_port int, token string) {
 	content := 'server_addr = "127.0.0.1"\nserver_port = ${server_port}\nauth_token = "${token}"\nheartbeat_interval = 1\n\n[[proxies]]\nname = "e2e"\ntype = "tcp"\nlocal_ip = "127.0.0.1"\nlocal_port = ${local_port}\nremote_port = ${remote_port}\n'
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
+}
+
+// write_server_config_with_scopes 写带 auth_additional_scopes 的服务端配置
+//（对齐 Go 版 auth.additionalAuthScopes：取 "HeartBeats" / "NewWorkConns"）。
+fn write_server_config_with_scopes(path string, bind_port int, token string, scopes []string) {
+	mut content := 'bind_addr = "127.0.0.1"\nbind_port = ${bind_port}\nauth_token = "${token}"\n'
+	if scopes.len > 0 {
+		content += 'auth_additional_scopes = ['
+		for i, s in scopes {
+			if i > 0 {
+				content += ', '
+			}
+			content += '"${s}"'
+		}
+		content += ']\n'
+	}
+	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
+}
+
+// write_client_config_with_scopes 写带 auth_additional_scopes 的客户端配置（单条 tcp 代理）。
+fn write_client_config_with_scopes(path string, server_port int, local_port int, remote_port int,
+	token string, scopes []string) {
+	mut content := 'server_addr = "127.0.0.1"\nserver_port = ${server_port}\nauth_token = "${token}"\nheartbeat_interval = 1\n'
+	if scopes.len > 0 {
+		content += 'auth_additional_scopes = ['
+		for i, s in scopes {
+			if i > 0 {
+				content += ', '
+			}
+			content += '"${s}"'
+		}
+		content += ']\n'
+	}
+	content += '\n[[proxies]]\nname = "e2e"\ntype = "tcp"\nlocal_ip = "127.0.0.1"\nlocal_port = ${local_port}\nremote_port = ${remote_port}\n'
 	os.write_file(path, content) or { panic('write ${path} failed: ${err}') }
 }
 
@@ -510,6 +560,148 @@ fn test_pool_count_e2e() {
 		panic('round 2 (pool refill) failed: ${err.msg()}\nvfrpc log:\n${cli_log}\nvfrps log:\n${srv_log}${extra}')
 	}
 	assert got2 == echo_msg_2, 'round 2 (pool refill): got "${got2}", want "${echo_msg_2}"'
+}
+
+// ---------------------------------------------------------------------------
+// allow_ports 白名单 e2e
+// ---------------------------------------------------------------------------
+
+// test_allow_ports_allowed_e2e：remote_port 在 allow_ports 白名单内 →
+// 代理正常注册、回显正常（对齐 Go 版 allowPorts 放行语义）。
+fn test_allow_ports_allowed_e2e() {
+	ports := probe_distinct_ports(3)!
+	server_port := ports[0]
+	remote_port := ports[1]
+
+	echo := start_echo_server()!
+	defer {
+		stop_echo_server(echo)
+		kill_all_procs()
+	}
+
+	srv_cfg := os.join_path(g_tmp, 'allow_allowed_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'allow_allowed_vfrpc.toml')
+	write_server_config_with_allow_ports(srv_cfg, server_port, 'test-token', ['${remote_port}'])
+	write_client_config(cli_cfg, server_port, echo.port, remote_port, 'test-token')
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "e2e" registered', wait_total)
+	assert reg, 'proxy not registered, client log:\n${cli_log}'
+
+	got := echo_roundtrip_with_retry('127.0.0.1:${remote_port}', echo_msg_1, 5)!
+	assert got == echo_msg_1, 'allow list echo: got "${got}", want "${echo_msg_1}"'
+}
+
+// test_allow_ports_denied_e2e：remote_port 不在 allow_ports 白名单内 →
+// 服务端拒绝分配，客户端日志出现 "start failed"，且该端口在观察期内始终不可达。
+fn test_allow_ports_denied_e2e() {
+	ports := probe_distinct_ports(3)!
+	server_port := ports[0]
+	remote_port := ports[1]
+	allowed_other := ports[2]
+
+	echo := start_echo_server()!
+	defer {
+		stop_echo_server(echo)
+		kill_all_procs()
+	}
+
+	srv_cfg := os.join_path(g_tmp, 'allow_denied_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'allow_denied_vfrpc.toml')
+	write_server_config_with_allow_ports(srv_cfg, server_port, 'test-token', ['${allowed_other}'])
+	write_client_config(cli_cfg, server_port, echo.port, remote_port, 'test-token')
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	start_failed, cli_log := wait_log_contains(mut pcli, 'proxy "e2e" start failed', wait_total)
+	assert start_failed, 'expected "start failed" in client log, got:\n${cli_log}'
+	assert !dial_ok('127.0.0.1:${remote_port}'), 'remote port ${remote_port} reachable though not allowed'
+}
+
+// ---------------------------------------------------------------------------
+// auth_additional_scopes e2e
+// ---------------------------------------------------------------------------
+
+// test_scope_both_sides_e2e：两端都配 ["HeartBeats", "NewWorkConns"] →
+// NewWorkConn 认证字段齐全、服务端校验通过，代理回显正常；心跳 Ping 带认证字段
+// 校验通过，服务端日志不应出现 invalid ping auth。
+fn test_scope_both_sides_e2e() {
+	ports := probe_distinct_ports(2)!
+	server_port := ports[0]
+	remote_port := ports[1]
+
+	echo := start_echo_server()!
+	defer {
+		stop_echo_server(echo)
+		kill_all_procs()
+	}
+
+	srv_cfg := os.join_path(g_tmp, 'scope_both_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'scope_both_vfrpc.toml')
+	write_server_config_with_scopes(srv_cfg, server_port, 'test-token', ['HeartBeats', 'NewWorkConns'])
+	write_client_config_with_scopes(cli_cfg, server_port, echo.port, remote_port, 'test-token',
+		['HeartBeats', 'NewWorkConns'])
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "e2e" registered', wait_total)
+	assert reg, 'proxy not registered, client log:\n${cli_log}'
+
+	// NewWorkConns scope 下 work conn 认证放行 → 回显正常
+	addr := '127.0.0.1:${remote_port}'
+	got := echo_roundtrip_with_retry(addr, echo_msg_1, 5) or {
+		extra := read_pending_stderr(mut psrv)
+		panic('scope echo failed: ${err.msg()}\nvfrpc log:\n${cli_log}\nvfrps log:\n${srv_log}${extra}')
+	}
+	assert got == echo_msg_1, 'scope echo: got "${got}", want "${echo_msg_1}"'
+
+	// HeartBeats scope 下心跳带认证字段：多等几个心跳周期，服务端不应报 ping auth 失败
+	time.sleep(3 * time.second)
+	extra_srv := read_pending_stderr(mut psrv)
+	assert !extra_srv.contains('invalid ping auth'), 'server reported ping auth failure:\n${extra_srv}'
+}
+
+// test_scope_server_only_rejects_work_conn_e2e：仅服务端配 ["NewWorkConns"]、
+// 客户端不配 → 客户端 NewWorkConn 不带认证字段，服务端校验失败回
+// StartWorkConn{error}，客户端日志出现 "server rejected work conn"。
+fn test_scope_server_only_rejects_work_conn_e2e() {
+	ports := probe_distinct_ports(3)!
+	server_port := ports[0]
+	remote_port := ports[1]
+
+	echo := start_echo_server()!
+	defer {
+		stop_echo_server(echo)
+		kill_all_procs()
+	}
+
+	srv_cfg := os.join_path(g_tmp, 'scope_srv_only_vfrps.toml')
+	cli_cfg := os.join_path(g_tmp, 'scope_srv_only_vfrpc.toml')
+	write_server_config_with_scopes(srv_cfg, server_port, 'test-token', ['NewWorkConns'])
+	write_client_config_with_scopes(cli_cfg, server_port, echo.port, remote_port, 'test-token', [])
+
+	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
+	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
+	assert up, 'vfrps did not start listening, log:\n${srv_log}'
+
+	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])
+	reg, cli_log := wait_log_contains(mut pcli, 'proxy "e2e" registered', wait_total)
+	assert reg, 'proxy not registered, client log:\n${cli_log}'
+
+	// 触发一条 work conn：用户连接 remote_port → 客户端 NewWorkConn 因缺认证字段被拒
+	_ = dial_ok('127.0.0.1:${remote_port}')
+	rej, cli_log2 := wait_log_contains(mut pcli, 'server rejected work conn', wait_total)
+	assert rej, 'expected work conn rejection in client log, got:\n${cli_log}${cli_log2}'
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ pub mut:
 	work_mu     sync.Mutex        // 保护 closed 标志（work conn 注册与排空）
 	closed      bool              // 本 control 是否已关闭
 	token       string            // 服务端 auth token（校验 privilege_key 用）
+	auth_scopes []string          // auth_additional_scopes：额外校验范围（HeartBeats / NewWorkConns）
 	tcp_proxies map[string]&TcpProxy
 	udp_proxies map[string]&UdpProxy
 	proxies_mu  sync.Mutex   // 保护代理表（tcp + udp 共享同一把锁）
@@ -43,9 +44,10 @@ pub mut:
 }
 
 // new_control 创建控制会话。run_id 为空时由服务端生成随机 16 字符 hex；
-// 非空（客户端重连携带）时沿用客户端 run_id。
+// 非空（客户端重连携带）时沿用客户端 run_id。auth_scopes 是服务端配置的
+// auth_additional_scopes（决定 Ping / NewWorkConn 是否额外校验）。
 pub fn new_control(conn &net.TcpConn, token string, bind_addr string, pm &PortManager,
-	svc &Service, run_id string) &Control {
+	svc &Service, run_id string, auth_scopes []string) &Control {
 	rid := if run_id == '' { gen_run_id() } else { run_id }
 	return &Control{
 		run_id:      rid
@@ -54,6 +56,7 @@ pub fn new_control(conn &net.TcpConn, token string, bind_addr string, pm &PortMa
 		work_conns:  chan &net.TcpConn{cap: work_conn_chan_cap}
 		work_mu:     sync.new_mutex()
 		token:       token
+		auth_scopes: auth_scopes
 		tcp_proxies: map[string]&TcpProxy{}
 		udp_proxies: map[string]&UdpProxy{}
 		proxies_mu:  sync.new_mutex()
@@ -103,30 +106,35 @@ pub fn (mut c Control) get_work_conn(timeout time.Duration) ?&net.TcpConn {
 
 // register_work_conn 注册一条客户端新连上来的 work conn（来自 NewWorkConn）。
 // control 已关闭时直接关闭该连接；否则入队（缓冲满时阻塞，等待代理取用）。
-pub fn (mut c Control) register_work_conn(mut conn &net.TcpConn) {
+// 注意：参数是 `conn &net.TcpConn`（不带 mut）——V 0.5.2 对非 main 模块的
+// `mut x &T` 参数会生成 T**（调用方变量地址），经 handle_work_conn 中转后再
+// 入 chan 会把 T* 值错塞给 T** 形参，读回的是 TcpConn 结构体首 8 字节（垃圾指针），
+// 代理侧 write_msg 时即段错误（已在冒烟复现）。函数内用 `mut cc := conn` 取可变引用。
+pub fn (mut c Control) register_work_conn(conn &net.TcpConn) {
+	mut cc := conn
 	c.work_mu.lock()
 	if c.closed {
 		c.work_mu.unlock()
-		conn.close() or {}
+		cc.close() or {}
 		return
 	}
 	c.work_mu.unlock()
-	c.work_conns <- conn
+	c.work_conns <- cc
 }
 
-// handle_login 校验登录（privilege_key + 时间窗），通过回 LoginResp{version, run_id}，
-// 失败回 LoginResp{error} 并关闭连接后返回错误。
-pub fn (mut c Control) handle_login(login msg.Login) ! {
-	if !auth.verify_privilege_key(c.token, login.timestamp, login.privilege_key, time.now().unix()) {
-		log.warn('control ${c.run_id}: login rejected: bad privilege_key or timestamp')
-		c.write_msg(msg.LoginResp{
-			version: version.version
-			error:   'authentication failed'
-		}) or {}
-		c.close()
+// verify_login 校验登录（privilege_key，Login 始终校验）。只做校验、不写连接；
+// LoginResp 的写入由调用方在 control 注册完成后进行（对齐 Go 参考顺序：
+// RegisterControl 注册成功后才写 LoginResp，避免客户端收到应答后立即预热
+// work conn 时命中 "no control for run_id"）。
+pub fn (mut c Control) verify_login(login msg.Login) ! {
+	if !auth.verify_privilege_key(c.token, login.timestamp, login.privilege_key) {
 		return error('login auth failed for run_id ${c.run_id}')
 	}
 	log.info('control ${c.run_id}: client login, version ${login.version}, hostname ${login.hostname}')
+}
+
+// send_login_success 在 control 注册成功后写 LoginResp 成功应答（version + run_id）。
+pub fn (mut c Control) send_login_success() ! {
 	c.write_msg(msg.LoginResp{
 		version: version.version
 		run_id:  c.run_id
@@ -277,9 +285,14 @@ fn (mut c Control) start_udp_proxy(m msg.NewProxy) {
 	}) or {}
 }
 
-// handle_ping 处理心跳：校验 privilege_key 后回 Pong；校验失败回带 error 的 Pong。
+// handle_ping 处理心跳：仅当配置 auth_additional_scopes 含 "HeartBeats" 时校验
+// privilege_key（对齐 Go 版 TokenAuth.VerifyPing），否则直接回 Pong。
 fn (mut c Control) handle_ping(m msg.Ping) {
-	if !auth.verify_privilege_key(c.token, m.timestamp, m.privilege_key, time.now().unix()) {
+	if !auth.has_scope(c.auth_scopes, 'HeartBeats') {
+		c.write_msg(msg.Pong{}) or {}
+		return
+	}
+	if !auth.verify_privilege_key(c.token, m.timestamp, m.privilege_key) {
 		log.warn('control ${c.run_id}: invalid ping auth')
 		c.write_msg(msg.Pong{
 			error: 'invalid ping auth'

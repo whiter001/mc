@@ -7,6 +7,7 @@ import net
 import os
 import sync
 import time
+import encoding.utf8
 import pkg.auth
 import pkg.config
 import pkg.msg
@@ -54,7 +55,7 @@ pub fn new_service(cfg config.ServerConfig) &Service {
 		cfg:             cfg
 		listener:        unsafe { nil }
 		vhost_listener:  unsafe { nil }
-		pm:              new_port_manager(cfg.bind_addr)
+		pm:              new_port_manager(cfg.bind_addr, cfg.allow_ports)
 		controls:        map[string]&Control{}
 		controls_mu:     sync.new_mutex()
 		vhost_routes:    map[string]VhostRoute{}
@@ -130,7 +131,7 @@ fn (mut s Service) handle_conn(conn &net.TcpConn) {
 			s.handle_login_conn(c, m)
 		}
 		msg.NewWorkConn {
-			s.handle_work_conn(mut c, m)
+			s.handle_work_conn(c, m)
 		}
 		else {
 			log.warn('service: unexpected first message ${typeof(m).name}, closing conn')
@@ -139,17 +140,144 @@ fn (mut s Service) handle_conn(conn &net.TcpConn) {
 	}
 }
 
-// handle_login_conn 处理登录连接：建 Control、校验并应答 LoginResp；
-// 成功后注册进控制表（同 run_id 冲突时踢掉旧 control）并跑控制循环。
+// validate_run_id 校验客户端提交的 run_id（对齐 Go 版 validation.ValidateRunID）：
+// 非空、不超过 64 字节、合法 UTF-8、逐码点全为可打印字符（对齐 Go unicode.IsPrint，
+// 见 is_print）。服务端生成的 run_id 恒为合法 hex，只影响客户端自带的 run_id。
+fn validate_run_id(run_id string) bool {
+	if run_id == '' {
+		return false
+	}
+	if run_id.len > 64 {
+		return false
+	}
+	if !utf8.validate_str(run_id) {
+		return false
+	}
+	for c in run_id.runes() {
+		if !is_print(int(c)) {
+			return false
+		}
+	}
+	return true
+}
+
+// is_print 判定码点是否可打印，逐码点对齐 Go 版 unicode.IsPrint 的语义：
+// 可打印 = 类别 L/M/N/P/S 及 ASCII 空格 U+0020；即拒绝：
+// - Cc 控制符（U+0000–U+001F、U+007F–U+009F，含 C1 控制符如 U+0085 NEL）；
+// - Cf 格式控制符（软连字符 U+00AD、零宽/双向/标签等，见 is_cf_control）；
+// - Zl/Zp 行/段分隔符（U+2028 / U+2029）；
+// - 除 U+0020 外的 Zs 空格分隔符（U+00A0、U+1680、U+2000–U+200A、U+202F、U+205F、U+3000）；
+// - Cs 代理区（U+D800–U+DFFF，非法 UTF-8，validate_str 已兜底）；
+// - Co 私有区（U+E000–U+F8FF、U+F0000–U+FFFFD、U+100000–U+10FFFD）；
+// - 非字符区（U+FDD0–U+FDEF，以及各平面 U+nFFFE / U+nFFFF）。
+// 注：V 0.5.2 无 encoding.unicode 类别查询模块，用显式拒绝集合实现。未赋值码点
+// （Cn，Go 也拒绝）未完整枚举——对 run_id 校验无实际影响（合法 run_id 为 hex），
+// 属对 Go 版 unicode.IsPrint 的近似，而非逐点一致。
+fn is_print(c int) bool {
+	// ASCII 可打印区间 U+0020–U+007E
+	if c >= 0x20 && c <= 0x7e {
+		return true
+	}
+	// C0/C1 控制符（Cc）与 DEL
+	if c < 0x20 || (c >= 0x7f && c <= 0x9f) {
+		return false
+	}
+	// Latin-1 补充区：U+00A0 (Zs NBSP) 与 U+00AD (Cf 软连字符) 不可打印，其余可打印
+	if c == 0xa0 || c == 0xad {
+		return false
+	}
+	if c >= 0xa1 && c <= 0xff {
+		return true
+	}
+	// Cf 格式控制符
+	if is_cf_control(c) {
+		return false
+	}
+	// 行/段分隔符 Zl/Zp 与除 U+0020 外的 Zs
+	if c == 0x2028 || c == 0x2029 {
+		return false
+	}
+	if c == 0x1680 || c == 0x202f || c == 0x205f || c == 0x3000 {
+		return false
+	}
+	if c >= 0x2000 && c <= 0x200a {
+		return false
+	}
+	// 代理区（非法 UTF-8，validate_str 已拒绝；双保险）
+	if c >= 0xd800 && c <= 0xdfff {
+		return false
+	}
+	// 私有区
+	if c >= 0xe000 && c <= 0xf8ff {
+		return false
+	}
+	if c >= 0xf0000 && c <= 0xffffd {
+		return false
+	}
+	if c >= 0x100000 && c <= 0x10fffd {
+		return false
+	}
+	// 非字符区（各平面末两位 0xFFFE/0xFFFF，以及 U+FDD0–U+FDEF）
+	if (c & 0xffff) == 0xfffe || (c & 0xffff) == 0xffff {
+		return false
+	}
+	if c >= 0xfdd0 && c <= 0xfdef {
+		return false
+	}
+	// 其余码点（L/M/N/P/S 主体）放行
+	return true
+}
+
+// is_cf_control 判定码点是否属于 Unicode Cf（格式控制）类别。
+// 区间覆盖 Go 版 unicode/tables.go 的 Cf 类别表（Unicode 15.0 及之前）。
+fn is_cf_control(c int) bool {
+	if (c >= 0x0600 && c <= 0x0605) || c == 0x061c || c == 0x06dd || c == 0x070f
+		|| (c >= 0x0890 && c <= 0x0891) || c == 0x08e2 || c == 0x180e
+		|| (c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e)
+		|| (c >= 0x2060 && c <= 0x2064) || (c >= 0x2066 && c <= 0x206f)
+		|| c == 0xfeff || (c >= 0xfff9 && c <= 0xfffb) || c == 0x110bd
+		|| c == 0x110cd || (c >= 0x13430 && c <= 0x13438)
+		|| (c >= 0x1bca0 && c <= 0x1bca3) || (c >= 0x1d173 && c <= 0x1d17a)
+		|| c == 0xe0001 || (c >= 0xe0020 && c <= 0xe007f) {
+		return true
+	}
+	return false
+}
+
+// handle_login_conn 处理登录连接：校验 run_id → 建 Control、校验认证 →
+// 先注册 control 再回 LoginResp（与 Go 参考顺序一致），成功后跑控制循环。
+// 注意：LoginResp 在 register_control 之后才写，避免客户端收到应答后立即
+// 预热 work conn 池时命中 "no control for run_id"（对齐 Go completeControlLogin）。
 fn (mut s Service) handle_login_conn(conn &net.TcpConn, login msg.Login) {
-	mut ctl := new_control(conn, s.cfg.auth_token, s.cfg.bind_addr, s.pm, s, login.run_id)
-	ctl.handle_login(login) or {
-		// handle_login 失败时已回 LoginResp{error} 并关闭连接
-		log.warn('service: client login rejected for run_id ${ctl.run_id}: ${err.msg()}')
+	mut c := conn
+	rid := if login.run_id == '' { gen_run_id() } else { login.run_id }
+	if !validate_run_id(rid) {
+		log.warn('service: invalid run_id "${rid}" (${rid.len} bytes), rejecting login')
+		msg.write_msg(mut c, msg.LoginResp{
+			error: 'invalid run_id'
+		}) or {}
+		c.close() or {}
+		return
+	}
+	mut ctl := new_control(c, s.cfg.auth_token, s.cfg.bind_addr, s.pm, s, rid,
+		s.cfg.auth_additional_scopes)
+	ctl.verify_login(login) or {
+		log.warn('control ${ctl.run_id}: login rejected: bad privilege_key')
+		msg.write_msg(mut c, msg.LoginResp{
+			version: version.version
+			error:   'authentication failed'
+		}) or {}
+		c.close() or {}
 		return
 	}
 	s.register_control(ctl) or {
 		log.warn('service: control ${ctl.run_id} was replaced')
+		ctl.close()
+		return
+	}
+	ctl.send_login_success() or {
+		log.warn('service: write LoginResp failed for run_id ${ctl.run_id}: ${err.msg()}')
+		s.unregister_control(ctl)
 		ctl.close()
 		return
 	}
@@ -159,30 +287,36 @@ fn (mut s Service) handle_login_conn(conn &net.TcpConn, login msg.Login) {
 	log.info('service: client [${ctl.run_id}] exited')
 }
 
-// handle_work_conn 处理 NewWorkConn：按 run_id 找到 control，校验 privilege_key
-// 后把连接塞入其 work 队列；找不到或校验失败则回 StartWorkConn{error} 并关闭。
-fn (mut s Service) handle_work_conn(mut conn &net.TcpConn, m msg.NewWorkConn) {
+// handle_work_conn 处理 NewWorkConn：按 run_id 找到 control；仅当配置
+// auth_additional_scopes 含 "NewWorkConns" 时校验 privilege_key（对齐 Go 版
+// TokenAuth.VerifyNewWorkConn），校验通过（或无需校验）后把连接塞入其 work 队列；
+// 找不到 control 或校验失败则回 StartWorkConn{error} 并关闭。
+// 注意：参数是 `conn &net.TcpConn`（不带 mut）——原因见 register_work_conn 注释
+// （V 0.5.2 的 `mut x &T` → T** 代码生成 bug，会损坏 chan 里的指针）。
+fn (mut s Service) handle_work_conn(conn &net.TcpConn, m msg.NewWorkConn) {
+	mut cc := conn
 	s.controls_mu.lock()
 	mut ctl := s.controls[m.run_id] or {
 		s.controls_mu.unlock()
 		log.warn('service: no control for run_id ${m.run_id}, rejecting work conn')
-		msg.write_msg(mut conn, msg.StartWorkConn{
+		msg.write_msg(mut cc, msg.StartWorkConn{
 			error: 'no control for run_id ${m.run_id}'
 		}) or {}
-		conn.close() or {}
+		cc.close() or {}
 		return
 	}
 	s.controls_mu.unlock()
 
-	if !auth.verify_privilege_key(ctl.token, m.timestamp, m.privilege_key, time.now().unix()) {
+	if auth.has_scope(ctl.auth_scopes, 'NewWorkConns')
+		&& !auth.verify_privilege_key(ctl.token, m.timestamp, m.privilege_key) {
 		log.warn('service: work conn auth failed for run_id ${m.run_id}')
-		msg.write_msg(mut conn, msg.StartWorkConn{
+		msg.write_msg(mut cc, msg.StartWorkConn{
 			error: 'work conn auth failed'
 		}) or {}
-		conn.close() or {}
+		cc.close() or {}
 		return
 	}
-	ctl.register_work_conn(mut conn)
+	ctl.register_work_conn(cc)
 }
 
 // register_control 把 control 注册进控制表；同 run_id 已有 control 时先关闭旧的控制
