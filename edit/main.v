@@ -9,6 +9,7 @@ module main
 // RestoreModes guard of the Rust original is replicated manually here.
 
 import os
+import time
 import encoding.base64
 
 // Terminal setup/teardown sequences, same as the Rust original (main.rs).
@@ -17,6 +18,11 @@ const term_exit_seq = '\x1b[0 q\x1b[?25h\x1b]0;\x07\x1b[?1002;1006;2004l\x1b[?10
 
 const kbmod_mask = u32(0xff000000)
 const vk_mask = u32(0x00ffffff)
+
+// scrollbar_width is the number of columns reserved on the right edge of the
+// text area for the scrollbar. Rust reserves the same space inside its
+// scrollarea widget, so the text never runs underneath the scrollbar.
+const scrollbar_width = CoordType(1)
 
 // PromptKind identifies what the status-line prompt is for.
 enum PromptKind {
@@ -30,6 +36,23 @@ enum PromptKind {
 enum EditMode {
 	edit
 	prompt
+}
+
+// StatusButtonKind identifies a clickable button on the status line.
+enum StatusButtonKind {
+	// Toggles CRLF/LF (Rust draw_statusbar "newline").
+	newline
+	// Opens the indentation picker (Rust "indentation").
+	indentation
+}
+
+// StatusButton is a clickable region on the status line. The columns are
+// rebuilt every frame while drawing, so hit-testing uses the same numbers
+// the user just saw.
+struct StatusButton {
+	kind  StatusButtonKind
+	left  CoordType
+	right CoordType
 }
 
 // Document is a single open file (or untitled buffer).
@@ -88,6 +111,23 @@ mut:
 	picker_sel       int
 	picker_scroll    int
 	picker_overwrite string
+	// Status-line buttons, rebuilt every frame (see draw_statusbar).
+	status_buttons   []StatusButton
+	// Mouse multi-click tracking (Rust tui.rs mouse_click_counter): counts
+	// consecutive presses at the same spot within 500ms to drive word/line/all
+	// selection on double/triple/quadruple click. drag_anchor_* is the screen
+	// position of the press that began the current drag (used by auto-scroll).
+	click_count      CoordType
+	last_click_x     CoordType
+	last_click_y     CoordType
+	last_click_ms    i64
+	drag_anchor_x    CoordType
+	drag_anchor_y    CoordType
+	// Whether the indentation picker popup above the status line is open
+	// (Rust state.wants_indentation_picker).
+	indent_picker    bool
+	// Left screen column of the indentation popup, recomputed each frame.
+	indent_popup_left CoordType
 }
 
 fn main() {
@@ -148,10 +188,16 @@ fn (mut ed Editor) add_document(path string) ! {
 	}
 	doc.buf.set_margin_enabled(true)
 	doc.buf.set_insert_final_newline(true)
-	doc.buf.set_width(ed.text_width())
+	doc.buf.set_line_highlight_enabled(true)
+	doc.buf.set_width(ed.width_for_margin(doc.buf.margin_width()))
 	if path != '' {
 		doc.buf.read_file(path) or { return err }
 		doc.buf.set_language(lsh_language_for_path(path))
+		// Git commit messages conventionally wrap at 72 columns
+		// (Rust documents.rs applies the same special case).
+		if os.base(path) == 'COMMIT_EDITMSG' {
+			doc.buf.set_ruler(72)
+		}
 	}
 	ed.docs << doc
 	ed.active = ed.docs.len - 1
@@ -174,12 +220,18 @@ fn (ed &Editor) cur() &Document {
 	return &ed.docs[ed.active]
 }
 
+// width_for_margin returns the width available for text, given a margin width.
+// Reserves scrollbar_width columns for the scrollbar.
+fn (ed &Editor) width_for_margin(margin_width CoordType) CoordType {
+	return coord_max(ed.size.width - margin_width - scrollbar_width, 1)
+}
+
 // text_width returns the width available for text (excluding the margin).
 fn (ed &Editor) text_width() CoordType {
 	if ed.docs.len == 0 {
-		return ed.size.width
+		return coord_max(ed.size.width - scrollbar_width, 1)
 	}
-	return ed.size.width - ed.cur().buf.margin_width()
+	return ed.width_for_margin(ed.cur().buf.margin_width())
 }
 
 // any_dirty reports whether any document has unsaved changes.
@@ -240,7 +292,7 @@ fn (mut ed Editor) handle_event(ev Input) {
 	if ev.kind == .resize {
 		ed.size = ev.size
 		for i in 0 .. ed.docs.len {
-			ed.docs[i].buf.set_width(ed.size.width - ed.docs[i].buf.margin_width())
+			ed.docs[i].buf.set_width(ed.width_for_margin(ed.docs[i].buf.margin_width()))
 		}
 		return
 	}
@@ -578,6 +630,10 @@ fn (mut ed Editor) handle_key(key InputKey) {
 			handled = true
 		}
 		vk_escape {
+			// Esc closes the indentation popup if it's open.
+			if ed.indent_picker {
+				ed.indent_picker = false
+			}
 			// Only keep the cursor visible if a selection was actually
 			// cleared (Rust tui.rs vk::ESCAPE).
 			make_visible = ed.docs[ed.active].buf.clear_selection()
@@ -867,21 +923,77 @@ fn (mut ed Editor) handle_left_right(vk u32, mods u32) {
 // behavior — with word wrap, the first press moves within the visual line and
 // the second press to the logical line start/end; likewise Home first stops
 // at the indentation. That is deliberately trimmed here (scope cut).
+//
+// Two-stage behavior (Rust tui.rs 2519-2588):
+//  - End (word-wrap): first → visual line end; second (if logical didn't
+//    change) → logical line end.
+//  - Home (indentation-aware): first → visual x=0; if already at logical line
+//    start and line has indent → indent_end; otherwise if at x=0 → indent_end.
 fn (mut ed Editor) handle_home_end(vk u32, mods u32) {
 	mut b := &ed.docs[ed.active].buf
-	mut destination := if vk == vk_home {
-		Point{ x: 0, y: b.cursor_visual_pos().y }
-	} else {
-		Point{ x: coord_type_max, y: b.cursor_visual_pos().y }
-	}
-	if mods == kbmod_ctrl || mods == kbmod_ctrl_shift {
-		destination = if vk == vk_home { Point{} } else { point_max() }
-	}
-
-	if mods == kbmod_shift || mods == kbmod_ctrl_shift {
-		b.selection_update_visual(destination)
-	} else {
-		b.cursor_move_to_visual(destination)
+	if vk == vk_home {
+		logical_before := b.cursor_logical_pos()
+		mut destination := Point{ x: 0, y: b.cursor_visual_pos().y }
+		if mods == kbmod_ctrl || mods == kbmod_ctrl_shift {
+			destination = Point{}
+		}
+		if mods == kbmod_shift || mods == kbmod_ctrl_shift {
+			b.selection_update_visual(destination)
+		} else {
+			b.cursor_move_to_visual(destination)
+		}
+		// Second stage: word-wrap two-stage + indentation-aware Home.
+		if mods != kbmod_ctrl && mods != kbmod_ctrl_shift {
+			mut logical_after := b.cursor_logical_pos()
+			// Word-wrap two-stage: if visual move didn't change logical pos,
+			// the cursor was at the logical line start — a second press goes
+			// to the true start of the logical line.
+			if b.is_word_wrap_enabled() && logical_after == logical_before {
+				if mods == kbmod_shift {
+					b.selection_update_logical(Point{ x: 0, y: logical_after.y })
+				} else {
+					b.cursor_move_to_logical(Point{ x: 0, y: logical_after.y })
+				}
+				logical_after = b.cursor_logical_pos()
+			}
+			// Indentation-aware: if now at x=0 and the line has meaningful
+			// indentation (or we started at x=0), Home → indent_end.
+			// This is the "first stop at indentation" behavior of Rust.
+			indent_end := b.indent_end_logical_pos()
+			if logical_after.x == 0
+				&& (logical_before.x == 0 || logical_before.y != logical_after.y
+					|| logical_before.x >= indent_end.x) {
+				if mods == kbmod_shift {
+					b.selection_update_logical(indent_end)
+				} else {
+					b.cursor_move_to_logical(indent_end)
+				}
+			}
+		}
+	} else { // vk_end
+		logical_before := b.cursor_logical_pos()
+		mut destination := Point{ x: coord_type_max, y: b.cursor_visual_pos().y }
+		if mods == kbmod_ctrl || mods == kbmod_ctrl_shift {
+			destination = point_max()
+		}
+		if mods == kbmod_shift || mods == kbmod_ctrl_shift {
+			b.selection_update_visual(destination)
+		} else {
+			b.cursor_move_to_visual(destination)
+		}
+		// Word-wrap two-stage: if visual move didn't change logical position,
+		// the cursor was at the logical line end — a second press goes to the
+		// true end of the logical line.
+		if mods != kbmod_ctrl && mods != kbmod_ctrl_shift {
+			mut logical_after := b.cursor_logical_pos()
+			if b.is_word_wrap_enabled() && logical_after == logical_before {
+				if mods == kbmod_shift {
+					b.selection_update_logical(Point{ x: coord_type_max, y: logical_after.y })
+				} else {
+					b.cursor_move_to_logical(Point{ x: coord_type_max, y: logical_after.y })
+				}
+			}
+		}
 	}
 }
 
@@ -918,6 +1030,22 @@ fn (mut ed Editor) handle_page(vk u32, mods u32) {
 fn (mut ed Editor) handle_mouse(mouse InputMouse) {
 	// Mouse input only applies to the text area, not to the status-line prompt.
 	if ed.mode != .edit {
+		return
+	}
+
+	// While the indentation picker is open, swallow all mouse input: clicks
+	// inside the popup act on it, everything else just closes it.
+	if ed.indent_picker {
+		if mouse.drag || mouse.state != .left {
+			ed.indent_picker = false
+			return
+		}
+		status_y := ed.size.height - 1
+		if mouse.position.y == status_y - 1 || mouse.position.y == status_y - 2 {
+			ed.handle_indent_popup_click(mouse.position.x, mouse.position.y - (status_y - 2))
+		} else {
+			ed.indent_picker = false
+		}
 		return
 	}
 	if mouse.state == .scroll {
@@ -977,28 +1105,126 @@ fn (mut ed Editor) handle_mouse(mouse InputMouse) {
 		ed.menu_focus = false
 	}
 
-	// Clicks on the status line are not handled.
-	if mouse.position.y >= ed.size.height - 1 {
+	// Clicks on the status line activate its buttons.
+	status_y := ed.size.height - 1
+	if mouse.position.y == status_y && !mouse.drag {
+		ed.handle_status_click(mouse.position.x)
+		return
+	}
+	if mouse.position.y >= status_y {
 		return
 	}
 
-	// Click into the text area: position the cursor. Row 0 is the menu bar,
-	// so the text area starts one row lower.
+	// Click into the text area. Row 0 is the menu bar, so the text area
+	// starts one row lower. The line-number gutter (left margin) is handled
+	// separately: a click there selects the whole line (Rust tui.rs selects
+	// the line when the down-position is outside the text rect).
 	mut b := &ed.docs[ed.active].buf
-	x := coord_max(mouse.position.x - b.margin_width() + ed.scroll.x, 0)
-	y := coord_max(mouse.position.y - 1 + ed.scroll.y, 0)
+	margin := b.margin_width()
+	if !mouse.drag && mouse.position.x < margin {
+		visual_y := coord_max(mouse.position.y - 1 + ed.scroll.y, 0)
+		// Resolve the clicked visual row to its logical line, then select it.
+		b.cursor_move_to_visual(Point{ x: 0, y: visual_y })
+		logical_y := b.cursor_logical_pos().y
+		b.cursor_move_to_logical(Point{ x: 0, y: logical_y })
+		b.select_line()
+		b.make_cursor_visible()
+		return
+	}
+
+	// Visual position under the cursor, in document coordinates.
+	pos := Point{
+		x: coord_max(mouse.position.x - margin + ed.scroll.x, 0)
+		y: coord_max(mouse.position.y - 1 + ed.scroll.y, 0)
+	}
+
 	if mouse.drag {
-		// Drag with the button held: anchor a selection at the click point
-		// (set by the preceding non-drag click) and extend it to here.
+		// Drag with the button held: anchor a selection at the press point
+		// and extend it to here, auto-scrolling if we reach the edge.
 		if !b.has_selection() {
 			b.start_selection()
 		}
-		b.selection_update_visual(Point{ x: x, y: y })
+		b.selection_update_visual(pos)
+		ed.autoscroll_drag(mouse, status_y)
 	} else {
-		b.clear_selection()
-		b.cursor_move_to_visual(Point{ x: x, y: y })
+		// Multi-click: consecutive presses at the same spot within 500ms
+		// escalate to word/line/all selection (Rust tui.rs click counter).
+		ed.update_click_count(mouse.position)
+		match ed.click_count {
+			2 {
+				b.cursor_move_to_visual(pos)
+				b.select_word()
+			}
+			3 {
+				b.cursor_move_to_visual(pos)
+				b.select_line()
+			}
+			4 {
+				b.cursor_move_to_visual(pos)
+				b.select_all()
+			}
+			else {
+				if mouse.modifiers & kbmod_shift != 0 {
+					// Shift+Click extends the selection to the cursor.
+					b.selection_update_visual(pos)
+				} else {
+					b.clear_selection()
+					b.cursor_move_to_visual(pos)
+				}
+			}
+		}
 	}
 	b.make_cursor_visible()
+}
+
+// update_click_count maintains the multi-click counter used for word/line/all
+// selection. A press within 500ms of, and at the same position as, the previous
+// one increments the counter; otherwise it resets to 1 (Rust tui.rs).
+fn (mut ed Editor) update_click_count(pos Point) {
+	now := time.now().unix_milli()
+	if pos.x == ed.last_click_x && pos.y == ed.last_click_y
+		&& now - ed.last_click_ms <= 500 {
+		ed.click_count++
+	} else {
+		ed.click_count = 1
+	}
+	ed.last_click_x = pos.x
+	ed.last_click_y = pos.y
+	ed.last_click_ms = now
+	ed.drag_anchor_x = pos.x
+	ed.drag_anchor_y = pos.y
+}
+
+// autoscroll_drag scrolls the view when a drag reaches the top/bottom edge of
+// the text area, extending the selection to the visible edge (Rust tui.rs
+// calc()/read_timeout auto-scroll). Mirrors the zone-based speed table.
+fn (mut ed Editor) autoscroll_drag(mouse InputMouse, status_y CoordType) {
+	mut b := &ed.docs[ed.active].buf
+	text_top := CoordType(1)
+	text_bottom := status_y - 1
+	height := text_bottom - text_top
+	if height < 2 {
+		return
+	}
+	zone := coord_min(height / 2, 3)
+	// Bound the scroll zones by the drag anchor, like Rust's down.min/max.
+	scroll_min := coord_min(ed.drag_anchor_y, text_top + zone)
+	scroll_max := coord_max(ed.drag_anchor_y, text_bottom - zone - 1)
+	delta_min := coord_clamp(mouse.position.y - scroll_min, -zone, 0)
+	delta_max := coord_clamp(mouse.position.y - scroll_max, 0, zone)
+	idx := coord_clamp(3 + delta_min + delta_max, 0, 6)
+	speeds := [CoordType(-9), -3, -1, 0, 1, 3, 9]
+	dy := speeds[idx]
+	if dy == 0 {
+		return
+	}
+	ed.scroll.y += dy
+	ed.clamp_scroll()
+	// Re-extend the selection to the visible edge so it grows with the scroll.
+	edge_y := coord_clamp(mouse.position.y - 1 + ed.scroll.y, ed.scroll.y,
+		ed.scroll.y + height - 1)
+	x := coord_max(mouse.position.x - b.margin_width() + ed.scroll.x, 0)
+	b.selection_update_visual(Point{ x: x, y: edge_y })
 }
 
 // ---- View ---------------------------------------------------------------------------
@@ -1055,16 +1281,26 @@ fn (mut ed Editor) draw() {
 
 	ed.fb.flip(ed.size)
 
-	// The text area covers everything but the menu bar (row 0) and the
-	// last (status) line.
+	// The text area covers everything but the menu bar (row 0), the
+	// last (status) line, and the scrollbar column on the right.
 	destination := Rect{
 		left:   0
 		top:    1
-		right:  ed.size.width
+		right:  ed.size.width - scrollbar_width
 		bottom: ed.size.height - 1
 	}
 	if res := b.render(ed.scroll, destination, true, mut ed.fb) {
 		ed.scroll_x_max = res.visual_pos_x_max
+	}
+
+	// Scrollbar along the right edge of the text area.
+	if ed.size.width > scrollbar_width {
+		ed.fb.draw_scrollbar(ed.size.as_rect(), Rect{
+			left:   ed.size.width - scrollbar_width
+			top:    destination.top
+			right:  ed.size.width
+			bottom: destination.bottom
+		}, ed.scroll.y, b.visual_line_count())
 	}
 
 	// Status line / prompt.
@@ -1090,21 +1326,7 @@ fn (mut ed Editor) draw() {
 		cursor_x := cfg.goto_visual(Point{ x: coord_type_max, y: 0 }).visual_pos.x
 		ed.fb.set_cursor(Point{ x: cursor_x, y: status_y }, false)
 	} else {
-		name := if ed.cur().path == '' { '[untitled]' } else { ed.cur().path }
-		dirty := if b.is_dirty() { ' [modified]' } else { '' }
-		pos := b.cursor_logical_pos()
-		mut status := ' [${ed.active + 1}/${ed.docs.len}] ${name}${dirty}  Ln ${pos.y + 1}, Col ${pos.x + 1}'
-		if ed.status != '' {
-			status += '  |  ${ed.status}'
-		}
-		status += '  |  ^S save ^O open ^F find ^Q quit'
-		ed.fb.replace_text(status_y, 0, ed.size.width, status)
-		ed.fb.reverse(mut Rect{
-			left:   0
-			top:    status_y
-			right:  ed.size.width
-			bottom: ed.size.height
-		})
+		ed.draw_statusbar(status_y)
 	}
 
 	// The menu bar sits on row 0; dropdown, file picker and About dialog
@@ -1119,7 +1341,190 @@ fn (mut ed Editor) draw() {
 	if ed.about_open {
 		ed.draw_about()
 	}
+	if ed.indent_picker {
+		ed.draw_indent_picker(status_y)
+	}
 
 	write_stdout(ed.fb.render())
 	ed.status = ''
+}
+
+// draw_statusbar renders the status line: clickable buttons on the left, the
+// file name on the right, and a status message or key hints in between. It
+// also records the button hit-rects (ed.status_buttons) for mouse handling,
+// mirroring the left button group of Rust's draw_statusbar.rs.
+fn (mut ed Editor) draw_statusbar(status_y CoordType) {
+	ed.status_buttons = ed.compute_status_buttons()
+	mut b := &ed.docs[ed.active].buf
+
+	mut text := ' [${ed.active + 1}/${ed.docs.len}] '
+	mut x := CoordType(text.len)
+
+	// Language name (Rust "language"). This port has no language picker, so
+	// it's a plain label rather than a clickable button.
+	lang := if b.language() < 0 { 'Plain Text' } else { lsh_languages[b.language()].name }
+	text += lang + '  '
+	x += CoordType(lang.len + 2)
+
+	// Newline button (Rust "newline"): click toggles CRLF/LF.
+	nl := if b.is_crlf() { 'CRLF' } else { 'LF' }
+	ed.status_buttons << StatusButton{ kind: .newline, left: x, right: x + CoordType(nl.len) }
+	text += nl + '  '
+	x += CoordType(nl.len + 2)
+
+	// Indentation button (Rust "indentation"): click opens the picker popup.
+	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
+	ed.status_buttons << StatusButton{ kind: .indentation, left: x, right: x + CoordType(ind.len) }
+	text += ind + '  '
+	x += CoordType(ind.len + 2)
+
+	pos := b.cursor_logical_pos()
+	pos_str := 'Ln ${pos.y + 1}, Col ${pos.x + 1}'
+	text += pos_str
+	x += CoordType(pos_str.len)
+	if b.is_overtype() {
+		text += '  OVR'
+		x += 6
+	}
+
+	name := if ed.cur().path == '' { '[untitled]' } else { ed.cur().path }
+	right := (if b.is_dirty() { '* ' } else { '' }) + name
+
+	// Middle: a status message when there is one, otherwise the key hints.
+	mut mid := ed.status
+	if mid == '' {
+		mid = '^S save ^O open ^F find ^Q quit'
+	}
+	mut avail := ed.size.width - x - CoordType(right.len) - 1
+	if avail < 0 {
+		avail = 0
+	}
+	if CoordType(mid.len) > avail {
+		if avail > 3 {
+			mid = mid[..int(avail) - 3] + '...'
+		} else {
+			mid = ''
+		}
+	}
+	mut pad := ed.size.width - x - CoordType(mid.len) - CoordType(right.len)
+	if pad < 1 {
+		pad = 1
+	}
+	text += ' '.repeat(int(pad)) + mid + ' ' + right
+
+	ed.fb.replace_text(status_y, 0, ed.size.width, text)
+	ed.fb.reverse(mut Rect{ left: 0, top: status_y, right: ed.size.width, bottom: status_y + 1 })
+	// Buttons are highlighted by reversing their own rect a second time
+	// (same trick as the menu bar), reading as raised against the inverted row.
+	for btn in ed.status_buttons {
+		ed.fb.reverse(mut Rect{ left: btn.left, top: status_y, right: btn.right, bottom: status_y + 1 })
+	}
+}
+
+// draw_indent_picker renders the indentation popup above the status line: a
+// Tabs/Spaces row and a width 1-8 row, with the current selection highlighted.
+fn (mut ed Editor) draw_indent_picker(status_y CoordType) {
+	b := &ed.docs[ed.active].buf
+	width := CoordType(20)
+	mut left := CoordType(0)
+	for btn in ed.compute_status_buttons() {
+		if btn.kind == .indentation {
+			left = btn.right - width
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	ed.indent_popup_left = left
+
+	mut top := status_y - 2
+	if top < 1 {
+		top = 1
+	}
+
+	// Reverse the whole block first so it reads as a floating panel.
+	ed.fb.reverse(mut Rect{ left: left, top: top, right: left + width, bottom: top + 2 })
+
+	r1 := ' Tabs        Spaces '
+	mid := left + width / 2
+	ed.fb.replace_text(top, left, left + width, r1)
+	if b.indent_with_tabs() {
+		ed.fb.reverse(mut Rect{ left: left, top: top, right: mid, bottom: top + 1 })
+	} else {
+		ed.fb.reverse(mut Rect{ left: mid, top: top, right: left + width, bottom: top + 1 })
+	}
+
+	mut r2 := ' '
+	for w in 1 .. 9 {
+		r2 += '${w} '
+	}
+	if r2.len < int(width) {
+		r2 += ' '.repeat(int(width) - r2.len)
+	}
+	ed.fb.replace_text(top + 1, left, left + width, r2)
+	for w in 1 .. 9 {
+		if b.tab_size() == w {
+			col := left + CoordType(2 * (w - 1)) + 1
+			ed.fb.reverse(mut Rect{ left: col, top: top + 1, right: col + 2, bottom: top + 2 })
+		}
+	}
+}
+
+// handle_status_click dispatches a click on the status line to its buttons.
+// compute_status_buttons returns the clickable status-line button rectangles
+// for the active document, computed live from the buffer state. This avoids
+// depending on ed.status_buttons (which is only filled during draw()), so a
+// click is always handled correctly even before the first redraw.
+fn (ed &Editor) compute_status_buttons() []StatusButton {
+	b := &ed.docs[ed.active].buf
+	mut x := CoordType(0)
+	mut res := []StatusButton{}
+
+	idx := ' [${ed.active + 1}/${ed.docs.len}] '
+	x += CoordType(idx.len)
+	lang := if b.language() < 0 { 'Plain Text' } else { lsh_languages[b.language()].name }
+	x += CoordType(lang.len + 2)
+
+	nl := if b.is_crlf() { 'CRLF' } else { 'LF' }
+	res << StatusButton{ kind: .newline, left: x, right: x + CoordType(nl.len) }
+	x += CoordType(nl.len + 2)
+
+	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
+	res << StatusButton{ kind: .indentation, left: x, right: x + CoordType(ind.len) }
+	return res
+}
+
+// handle_status_click dispatches a click on the status line to its buttons.
+fn (mut ed Editor) handle_status_click(x CoordType) {
+	for btn in ed.compute_status_buttons() {
+		if x >= btn.left && x < btn.right {
+			mut b := &ed.docs[ed.active].buf
+			match btn.kind {
+				.newline {
+					b.normalize_newlines(!b.is_crlf())
+				}
+				.indentation {
+					ed.indent_picker = true
+				}
+			}
+			return
+		}
+	}
+}
+
+// handle_indent_popup_click handles a click inside the indentation popup.
+// `row` is 0 for the Tabs/Spaces row and 1 for the width row.
+fn (mut ed Editor) handle_indent_popup_click(x CoordType, row CoordType) {
+	mut b := &ed.docs[ed.active].buf
+	left := ed.indent_popup_left
+	if row == 0 {
+		// Left half selects Tabs, right half selects Spaces.
+		b.set_indent_with_tabs(x < left + 10)
+	} else {
+		// Widths 1-8, each 2 columns wide starting at left+1.
+		col := x - (left + 1)
+		if col >= 0 && col < 16 {
+			b.set_tab_size(col / 2 + 1)
+		}
+	}
 }

@@ -44,7 +44,13 @@ def main():
 
     drain()  # initial frame
     for stage in stages:
-        os.write(master, stage)
+        try:
+            os.write(master, stage)
+        except OSError:
+            # The editor may have exited between stages (e.g. the last
+            # Ctrl+Q of a quit sequence), closing the pty before poll()
+            # reaps it. Treat a dead pty as "editor gone" and stop.
+            break
         drain()
         if proc.poll() is not None:
             break
