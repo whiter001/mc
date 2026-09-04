@@ -26,3 +26,11 @@ fn test_picker_join() {
 	assert picker_join('/tmp/a', '..') == '/tmp'
 	assert picker_join('/', 'etc') == '/etc'
 }
+
+fn test_picker_utf8_trim_and_truncate() {
+	assert picker_trim_last_utf8_char('a中') == 'a'
+	assert picker_trim_last_utf8_char('中') == ''
+	assert picker_truncate('ab中d', 4) == '...d'
+	assert picker_truncate('ab中d', 3) == '中d'
+	assert picker_fit_line('a中', 4) == 'a中 '
+}

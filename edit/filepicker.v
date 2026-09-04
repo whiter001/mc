@@ -13,6 +13,47 @@ module main
 
 import os
 
+// picker_display_width measures a string's terminal width using the same
+// grapheme-width tables as the rest of the editor.
+fn picker_display_width(text string) CoordType {
+	if text.len == 0 {
+		return 0
+	}
+	mut width := CoordType(0)
+	mut chars := new_utf8_chars(text.bytes(), 0)
+	for chars.has_next() {
+		ch := chars.next() or { break }
+		width += CoordType(ucd_grapheme_cluster_character_width(ucd_grapheme_cluster_lookup(ch), 1))
+	}
+	return width
+}
+
+// picker_trim_last_utf8_char drops the last UTF-8 codepoint from s.
+fn picker_trim_last_utf8_char(s string) string {
+	if s.len == 0 {
+		return s
+	}
+	mut off := s.len - 1
+	for off > 0 && (s[off] & 0xC0) == 0x80 {
+		off--
+	}
+	return s[..off]
+}
+
+// picker_fit_line trims text to fit within width columns and pads the rest
+// with spaces so old content in the framebuffer cannot show through.
+fn picker_fit_line(text string, width CoordType) string {
+	if width <= 0 {
+		return ''
+	}
+	mut line := picker_truncate(text, width)
+	line_width := picker_display_width(line)
+	if line_width < width {
+		line += ' '.repeat(int(width - line_width))
+	}
+	return line
+}
+
 // picker_normalize resolves '.' and '..' path components purely textually
 // (Rust path::normalize). Absolute paths stay absolute, '..' at the root
 // clamps to the root.
@@ -110,9 +151,9 @@ fn (ed &Editor) picker_rect() Rect {
 	left := (ed.size.width - w) / 2
 	top := (ed.size.height - h) / 2
 	return Rect{
-		left:   left
-		top:    top
-		right:  left + w
+		left: left
+		top: top
+		right: left + w
 		bottom: top + h
 	}
 }
@@ -176,12 +217,11 @@ fn (mut ed Editor) picker_activate() {
 
 // picker_do_save saves the active document to the given path.
 fn (mut ed Editor) picker_do_save(path string) {
-	ed.docs[ed.active].path = path
 	ed.docs[ed.active].buf.write_file(path) or {
 		ed.status = 'save failed: ${err}'
 		return
 	}
-	ed.docs[ed.active].buf.mark_as_clean()
+	ed.docs[ed.active].path = path
 	ed.status = 'saved ${path}'
 	ed.picker = false
 }
@@ -234,7 +274,7 @@ fn (mut ed Editor) handle_picker_key(key InputKey) {
 		vk_back {
 			if mods == kbmod_none || mods == kbmod_shift {
 				if ed.picker_name.len > 0 {
-					ed.picker_name = ed.picker_name[..ed.picker_name.len - 1]
+					ed.picker_name = picker_trim_last_utf8_char(ed.picker_name)
 				} else {
 					// Backspace on an empty name goes up one directory.
 					ed.picker_name = '..'
@@ -278,25 +318,25 @@ fn (mut ed Editor) draw_filepicker() {
 	width := r.right - r.left
 
 	mut row := Rect{
-		left:   r.left
-		top:    r.top
-		right:  r.right
+		left: r.left
+		top: r.top
+		right: r.right
 		bottom: r.top + 1
 	}
 
 	// Title, current directory, name editline.
 	title := if ed.picker_save_as { ' Save As ' } else { ' Open ' }
-	ed.fb.replace_text(r.top, r.left, r.right, title)
+	ed.fb.replace_text(r.top, r.left, r.right, picker_fit_line(title, width))
 	ed.fb.reverse(mut row)
 	row.top++
 	row.bottom++
 	path_line := picker_truncate('Path: ${ed.picker_dir}', width)
-	ed.fb.replace_text(row.top, r.left, r.right, path_line)
+	ed.fb.replace_text(row.top, r.left, r.right, picker_fit_line(path_line, width))
 	ed.fb.reverse(mut row)
 	row.top++
 	row.bottom++
 	name_text := 'Name: ${ed.picker_name}'
-	ed.fb.replace_text(row.top, r.left, r.right, name_text)
+	ed.fb.replace_text(row.top, r.left, r.right, picker_fit_line(name_text, width))
 	ed.fb.reverse(mut row)
 
 	// Directory listing.
@@ -306,11 +346,11 @@ fn (mut ed Editor) draw_filepicker() {
 		if y >= r.bottom {
 			break
 		}
-		ed.fb.replace_text(y, r.left, r.right, picker_truncate(ed.picker_entries[i], width))
+		ed.fb.replace_text(y, r.left, r.right, picker_fit_line(ed.picker_entries[i], width))
 		mut item_row := Rect{
-			left:   r.left
-			top:    y
-			right:  r.right
+			left: r.left
+			top: y
+			right: r.right
 			bottom: y + 1
 		}
 		ed.fb.reverse(mut item_row)
@@ -348,15 +388,11 @@ fn (mut ed Editor) draw_picker_overwrite() {
 	right := coord_min(left + box_w, ed.size.width)
 	for i, text in lines {
 		y := top + CoordType(i)
-		mut line := text
-		if line.len < int(box_w) {
-			line += ' '.repeat(int(box_w) - line.len)
-		}
-		ed.fb.replace_text(y, left, right, line)
+		ed.fb.replace_text(y, left, right, picker_fit_line(text, box_w))
 		mut row := Rect{
-			left:   left
-			top:    y
-			right:  right
+			left: left
+			top: y
+			right: right
 			bottom: y + 1
 		}
 		ed.fb.reverse(mut row)
@@ -366,11 +402,32 @@ fn (mut ed Editor) draw_picker_overwrite() {
 // picker_truncate keeps the tail of an over-wide path (the meaningful end),
 // like Overflow::TruncateMiddle in spirit.
 fn picker_truncate(s string, width CoordType) string {
-	if s.len <= int(width) {
+	if width <= 0 || s.len == 0 {
+		return ''
+	}
+	mut chars := new_utf8_chars(s.bytes(), 0)
+	mut starts := []int{cap: s.len + 1}
+	mut widths := []CoordType{cap: s.len + 1}
+	mut total := CoordType(0)
+	starts << 0
+	widths << 0
+	for chars.has_next() {
+		ch := chars.next() or { break }
+		total += CoordType(ucd_grapheme_cluster_character_width(ucd_grapheme_cluster_lookup(ch), 1))
+		starts << chars.offset
+		widths << total
+	}
+	if total <= width {
 		return s
 	}
-	if width <= 3 {
-		return s[s.len - int(width)..]
+	limit := if width > 3 { width - 3 } else { width }
+	mut idx := 0
+	for idx < widths.len && total - widths[idx] > limit {
+		idx++
 	}
-	return '...' + s[s.len - int(width) + 3..]
+	tail := s[starts[idx]..]
+	if width > 3 {
+		return '...' + tail
+	}
+	return tail
 }
