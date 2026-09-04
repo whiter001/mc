@@ -147,14 +147,47 @@ fn sigwinch_handler(sig int) {
 // (= piped input). Returns true if stdin was reopened.
 pub fn reopen_stdin_if_redirected() !bool {
 	if C.isatty(g_sys.stdin_fd) == 0 {
+		old_fd := g_sys.stdin_fd
 		fd := C.open(c'/dev/tty', C.O_RDONLY)
 		if fd < 0 {
 			return error('open(/dev/tty) failed')
 		}
+		if old_fd != fd {
+			C.close(old_fd)
+		}
 		g_sys.stdin_fd = fd
+		g_sys.stdin_eof = false
+		g_sys.utf8_len = 0
 		return true
 	}
 	return false
+}
+
+// stdin_is_redirected reports whether stdin is not attached to a tty.
+pub fn stdin_is_redirected() bool {
+	return C.isatty(g_sys.stdin_fd) == 0
+}
+
+// read_all_stdin drains redirected stdin into a UTF-8 string.
+pub fn read_all_stdin() !string {
+	mut buf := []u8{cap: 64 * kibi}
+	mut tmp := [64 * kibi]u8{}
+	for {
+		ret := C.read(g_sys.stdin_fd, &tmp[0], usize(tmp.len))
+		if ret > 0 {
+			buf << tmp[..int(ret)]
+			continue
+		}
+		if ret == 0 {
+			g_sys.stdin_eof = true
+			break
+		}
+		if errno_value() == C.EINTR {
+			continue
+		}
+		return error('read(stdin) failed')
+	}
+	return utf8_lossy(buf)
 }
 
 // switch_modes saves the current terminal modes and switches to raw mode.

@@ -222,6 +222,10 @@ fn (mut ed Editor) picker_do_save(path string) {
 		return
 	}
 	ed.docs[ed.active].path = path
+	if fid := file_id(path) {
+		ed.docs[ed.active].file_id = fid
+		ed.docs[ed.active].has_file_id = true
+	}
 	ed.status = 'saved ${path}'
 	ed.picker = false
 }

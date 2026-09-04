@@ -348,7 +348,7 @@ fn (mut ed Editor) activate_menu_item(action MenuAction) {
 			ed.docs[ed.active].buf.select_all()
 		}
 		.view_goto_file {
-			ed.next_document()
+			ed.open_goto_file()
 		}
 		.view_goto_line {
 			ed.start_prompt(.goto_line)

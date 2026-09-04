@@ -46,6 +46,13 @@ enum StatusButtonKind {
 	indentation
 }
 
+// SearchButtonKind identifies a clickable search option toggle.
+enum SearchButtonKind {
+	match_case
+	whole_word
+	use_regex
+}
+
 // StatusButton is a clickable region on the status line. The columns are
 // rebuilt every frame while drawing, so hit-testing uses the same numbers
 // the user just saw.
@@ -55,11 +62,20 @@ struct StatusButton {
 	right CoordType
 }
 
+// SearchButton is a clickable region on the search prompt options row.
+struct SearchButton {
+	kind  SearchButtonKind
+	left  CoordType
+	right CoordType
+}
+
 // Document is a single open file (or untitled buffer).
 struct Document {
 mut:
-	buf  TextBuffer
-	path string
+	buf         TextBuffer
+	path        string
+	file_id     FileId
+	has_file_id bool
 }
 
 struct Editor {
@@ -86,6 +102,8 @@ mut:
 	// state.search_replacement, so a repeat Enter repeats the same replace
 	// instead of deleting the match with an empty replacement.
 	last_replacement string
+	// Search options mirror the Rust search panel toggles.
+	search_options   SearchOptions
 	// The needle collected by the first Ctrl+R prompt, used by the second.
 	replace_needle   string
 	// Dirty-quit protection: the first Ctrl+W/Ctrl+Q on a dirty document
@@ -98,6 +116,10 @@ mut:
 	menu_open        bool
 	menu_idx         int
 	menu_item_idx    int
+	// Go to File modal (goto_file.v).
+	goto_file        bool
+	goto_file_sel    int
+	goto_file_scroll int
 	about_open       bool
 	// Set when the replace prompt pair collects a needle for
 	// find_and_replace_all (Edit > Replace All) instead of a single replace.
@@ -113,6 +135,8 @@ mut:
 	picker_overwrite string
 	// Status-line buttons, rebuilt every frame (see draw_statusbar).
 	status_buttons   []StatusButton
+	// Search prompt buttons, rebuilt every frame while the search panel is visible.
+	search_buttons   []SearchButton
 	// Mouse multi-click tracking (Rust tui.rs mouse_click_counter): counts
 	// consecutive presses at the same spot within 500ms to drive word/line/all
 	// selection on double/triple/quadruple click. drag_anchor_* is the screen
@@ -145,9 +169,6 @@ fn main() {
 		needs_redraw: true
 	}
 
-	if paths.len == 0 {
-		paths = ['']
-	}
 	for path in paths {
 		ed.add_document(path) or {
 			eprintln('edit: ${path}: ${err}')
@@ -155,10 +176,32 @@ fn main() {
 		}
 	}
 
-	// If stdin was redirected (e.g. `edit < file`), read keys from /dev/tty.
-	// Unlike Rust's handle_stdin, the piped stdin content is NOT read into a
-	// new document here (deliberate scope trim).
-	reopen_stdin_if_redirected() or {}
+	stdin_redirected := stdin_is_redirected()
+	if stdin_redirected {
+		stdin_text := read_all_stdin() or {
+			eprintln('edit: failed to read stdin: ${err}')
+			exit(1)
+		}
+		ed.add_document('') or {
+			eprintln('edit: cannot create stdin document: ${err}')
+			exit(1)
+		}
+		mut doc := &ed.docs[ed.active]
+		doc.buf.copy_from_str(StringDocument{ text: stdin_text })
+		doc.buf.mark_as_dirty()
+	} else if ed.docs.len == 0 {
+		ed.add_document('') or {
+			eprintln('edit: cannot create untitled document: ${err}')
+			exit(1)
+		}
+	}
+
+	if stdin_redirected {
+		reopen_stdin_if_redirected() or {
+			eprintln('edit: cannot reopen /dev/tty: ${err}')
+			exit(1)
+		}
+	}
 
 	switch_modes() or {
 		eprintln('edit: cannot switch terminal to raw mode: ${err}')
@@ -180,6 +223,81 @@ fn main() {
 	restore_terminal()
 }
 
+// draw_prompt_line renders the active status-line prompt.
+fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
+	label := match ed.prompt_kind {
+		.search { 'search: ' }
+		.replace { if ed.replace_all { 'replace all: ' } else { 'replace: ' } }
+		.replace_with { 'with: ' }
+		.goto_line { 'go to line: ' }
+	}
+	text := ' ${label}${ed.prompt_text}'
+	ed.fb.replace_text(status_y, 0, ed.size.width, text)
+	ed.fb.reverse(mut Rect{
+		left:   0
+		top:    status_y
+		right:  ed.size.width
+		bottom: status_y + 1
+	})
+	// text.len is bytes, not terminal columns (wide glyphs count double),
+	// so measure the display width via MeasurementConfig.
+	mut cfg := new_measurement_config(StringDocument{ text: text })
+	cursor_x := cfg.goto_visual(Point{ x: coord_type_max, y: 0 }).visual_pos.x
+	ed.fb.set_cursor(Point{ x: cursor_x, y: status_y }, false)
+}
+
+// draw_search_prompt_options renders the search option toggles above the prompt.
+fn (mut ed Editor) draw_search_prompt_options(options_y CoordType) {
+	ed.search_buttons = []SearchButton{}
+	if options_y < 0 {
+		return
+	}
+
+	mut text := ''
+	mut x := CoordType(0)
+	mut segment := ' ${if ed.search_options.match_case { '[x]' } else { '[ ]' }} Match case '
+	ed.search_buttons << SearchButton{
+		kind:  .match_case
+		left:  x
+		right: x + CoordType(segment.len)
+	}
+	text += segment + ' '
+	x += CoordType(segment.len + 1)
+
+	segment = ' ${if ed.search_options.whole_word { '[x]' } else { '[ ]' }} Whole word '
+	ed.search_buttons << SearchButton{
+		kind:  .whole_word
+		left:  x
+		right: x + CoordType(segment.len)
+	}
+	text += segment + ' '
+	x += CoordType(segment.len + 1)
+
+	segment = ' ${if ed.search_options.use_regex { '[x]' } else { '[ ]' }} Regex '
+	ed.search_buttons << SearchButton{
+		kind:  .use_regex
+		left:  x
+		right: x + CoordType(segment.len)
+	}
+	text += segment + ' '
+
+	ed.fb.replace_text(options_y, 0, ed.size.width, text)
+	ed.fb.reverse(mut Rect{
+		left:   0
+		top:    options_y
+		right:  ed.size.width
+		bottom: options_y + 1
+	})
+	for btn in ed.search_buttons {
+		ed.fb.reverse(mut Rect{
+			left:   btn.left
+			top:    options_y
+			right:  btn.right
+			bottom: options_y + 1
+		})
+	}
+}
+
 // add_document opens a file (or an untitled buffer for '') and makes it active.
 fn (mut ed Editor) add_document(path string) ! {
 	mut doc := Document{
@@ -191,12 +309,29 @@ fn (mut ed Editor) add_document(path string) ! {
 	doc.buf.set_line_highlight_enabled(true)
 	doc.buf.set_width(ed.width_for_margin(doc.buf.margin_width()))
 	if path != '' {
+		fid := file_id(path) or { return err }
+		for i in 0 .. ed.docs.len {
+			d := &ed.docs[i]
+			if (d.has_file_id && d.file_id == fid) || (!d.has_file_id && d.path == path) {
+				ed.active = i
+				ed.reset_view_state()
+				return
+			}
+		}
 		doc.buf.read_file(path) or { return err }
 		doc.buf.set_language(lsh_language_for_path(path))
+		doc.file_id = fid
+		doc.has_file_id = true
 		// Git commit messages conventionally wrap at 72 columns
 		// (Rust documents.rs applies the same special case).
 		if os.base(path) == 'COMMIT_EDITMSG' {
 			doc.buf.set_ruler(72)
+		}
+	}
+	if ed.docs.len > 0 {
+		last := ed.docs.len - 1
+		if ed.docs[last].path == '' && !ed.docs[last].buf.is_dirty() {
+			ed.docs.delete(last)
 		}
 	}
 	ed.docs << doc
@@ -338,6 +473,18 @@ fn (mut ed Editor) handle_event(ev Input) {
 		}
 		return
 	}
+	if ed.goto_file {
+		match ev.kind {
+			.keyboard {
+				ed.handle_goto_file_key(ev.key)
+			}
+			.mouse {
+				ed.handle_goto_file_mouse(ev.mouse)
+			}
+			else {}
+		}
+		return
+	}
 
 	match ev.kind {
 		.text, .paste {
@@ -402,6 +549,54 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 fn (mut ed Editor) cancel_prompt() {
 	ed.mode = .edit
 	ed.prompt_text = ''
+	ed.search_buttons = []
+}
+
+fn (ed &Editor) prompt_search_needle() string {
+	return match ed.prompt_kind {
+		.search, .replace { ed.prompt_text }
+		.replace_with { ed.replace_needle }
+		else { '' }
+	}
+}
+
+fn (mut ed Editor) run_prompt_search() {
+	needle := ed.prompt_search_needle()
+	if needle == '' {
+		return
+	}
+	mut b := &ed.docs[ed.active].buf
+	b.find_and_select(needle, ed.search_options)
+	b.make_cursor_visible()
+	if !b.has_selection() {
+		ed.status = 'not found: ${needle}'
+	}
+}
+
+fn (mut ed Editor) toggle_search_option(kind SearchButtonKind) {
+	match kind {
+		.match_case { ed.search_options.match_case = !ed.search_options.match_case }
+		.whole_word { ed.search_options.whole_word = !ed.search_options.whole_word }
+		.use_regex { ed.search_options.use_regex = !ed.search_options.use_regex }
+	}
+	ed.run_prompt_search()
+}
+
+fn (mut ed Editor) handle_search_prompt_mouse(mouse InputMouse) bool {
+	if mouse.drag || mouse.state != .left {
+		return false
+	}
+	status_y := ed.size.height - 1
+	if status_y == 0 || mouse.position.y != status_y - 1 {
+		return false
+	}
+	for btn in ed.search_buttons {
+		if mouse.position.x >= btn.left && mouse.position.x < btn.right {
+			ed.toggle_search_option(btn.kind)
+			return true
+		}
+	}
+	return true
 }
 
 fn (mut ed Editor) handle_prompt_key(key InputKey) {
@@ -426,6 +621,21 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 					n++
 				}
 				ed.prompt_text = ed.prompt_text[..ed.prompt_text.len - n]
+			}
+		}
+		vk_c {
+			if mods == kbmod_alt {
+				ed.toggle_search_option(.match_case)
+			}
+		}
+		vk_w {
+			if mods == kbmod_alt {
+				ed.toggle_search_option(.whole_word)
+			}
+		}
+		vk_r {
+			if mods == kbmod_alt {
+				ed.toggle_search_option(.use_regex)
 			}
 		}
 		else {}
@@ -466,7 +676,7 @@ fn (mut ed Editor) confirm_prompt() {
 				}
 				ed.last_search = needle
 				mut b := &ed.docs[ed.active].buf
-				count := b.find_and_replace_all(needle, SearchOptions{}, text.bytes())
+				count := b.find_and_replace_all(needle, ed.search_options, text.bytes())
 				b.make_cursor_visible()
 				ed.status = if count > 0 {
 					'replaced ${count} occurrences'
@@ -495,7 +705,7 @@ fn (mut ed Editor) find_next() {
 	mut b := &ed.docs[ed.active].buf
 	// find_and_select() already advances past the previous hit via its
 	// internal next_search_offset, as long as the selection is untouched.
-	b.find_and_select(ed.last_search, SearchOptions{})
+	b.find_and_select(ed.last_search, ed.search_options)
 	b.make_cursor_visible()
 	if !b.has_selection() {
 		ed.status = 'not found: ${ed.last_search}'
@@ -512,7 +722,7 @@ fn (mut ed Editor) replace_active(replacement string) {
 	}
 	ed.last_search = needle
 	mut b := &ed.docs[ed.active].buf
-	b.find_and_replace(needle, SearchOptions{}, replacement.bytes())
+	b.find_and_replace(needle, ed.search_options, replacement.bytes())
 	b.make_cursor_visible()
 	if !b.has_selection() {
 		ed.status = 'not found: ${needle}'
@@ -532,6 +742,10 @@ fn (mut ed Editor) save_active() {
 	ed.docs[ed.active].buf.write_file(path) or {
 		ed.status = 'save failed: ${err}'
 		return
+	}
+	if fid := file_id(path) {
+		ed.docs[ed.active].file_id = fid
+		ed.docs[ed.active].has_file_id = true
 	}
 	ed.docs[ed.active].buf.mark_as_clean()
 	ed.status = 'saved ${path}'
@@ -735,10 +949,7 @@ fn (mut ed Editor) handle_key(key InputKey) {
 		}
 		vk_p {
 			if mods == kbmod_ctrl {
-				// NOTE: in the Rust original Ctrl+P opens the go-to-file
-				// picker; using it for document switching here is a
-				// deliberate design difference of this minimal version.
-				ed.next_document()
+				ed.open_goto_file()
 				handled = true
 			}
 		}
@@ -1030,6 +1241,12 @@ fn (mut ed Editor) handle_page(vk u32, mods u32) {
 fn (mut ed Editor) handle_mouse(mouse InputMouse) {
 	// Mouse input only applies to the text area, not to the status-line prompt.
 	if ed.mode != .edit {
+		if ed.mode == .prompt && (ed.prompt_kind == .search || ed.prompt_kind == .replace
+			|| ed.prompt_kind == .replace_with) {
+			if ed.handle_search_prompt_mouse(mouse) {
+				return
+			}
+		}
 		return
 	}
 
@@ -1306,25 +1523,17 @@ fn (mut ed Editor) draw() {
 	// Status line / prompt.
 	status_y := ed.size.height - 1
 	if ed.mode == .prompt {
-		label := match ed.prompt_kind {
-			.search { 'search: ' }
-			.replace { if ed.replace_all { 'replace all: ' } else { 'replace: ' } }
-			.replace_with { 'with: ' }
-			.goto_line { 'go to line: ' }
+		match ed.prompt_kind {
+			.search, .replace, .replace_with {
+				if status_y > 0 {
+					ed.draw_search_prompt_options(status_y - 1)
+				}
+				ed.draw_prompt_line(status_y)
+			}
+			else {
+				ed.draw_prompt_line(status_y)
+			}
 		}
-		text := ' ${label}${ed.prompt_text}'
-		ed.fb.replace_text(status_y, 0, ed.size.width, text)
-		ed.fb.reverse(mut Rect{
-			left:   0
-			top:    status_y
-			right:  ed.size.width
-			bottom: ed.size.height
-		})
-		// text.len is bytes, not terminal columns (wide glyphs count double),
-		// so measure the display width via MeasurementConfig.
-		mut cfg := new_measurement_config(StringDocument{ text: text })
-		cursor_x := cfg.goto_visual(Point{ x: coord_type_max, y: 0 }).visual_pos.x
-		ed.fb.set_cursor(Point{ x: cursor_x, y: status_y }, false)
 	} else {
 		ed.draw_statusbar(status_y)
 	}
@@ -1337,6 +1546,9 @@ fn (mut ed Editor) draw() {
 	}
 	if ed.picker {
 		ed.draw_filepicker()
+	}
+	if ed.goto_file {
+		ed.draw_goto_file()
 	}
 	if ed.about_open {
 		ed.draw_about()
