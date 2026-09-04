@@ -44,6 +44,8 @@ enum StatusButtonKind {
 	newline
 	// Opens the indentation picker (Rust "indentation").
 	indentation
+	// Opens the language picker (Rust "language").
+	language
 }
 
 // SearchButtonKind identifies a clickable search option toggle.
@@ -152,6 +154,18 @@ mut:
 	indent_picker    bool
 	// Left screen column of the indentation popup, recomputed each frame.
 	indent_popup_left CoordType
+	// Language picker modal (Rust draw_dialog_language_change). Selection
+	// encoding: -2 = Auto Detect, -1 = Plain Text, >= 0 = lsh_languages index.
+	// Sticky override: while -2 the picker (and `set_language`) reflect the
+	// file-extension auto-detection; any other value is an explicit override.
+	language_picker        bool
+	language_picker_sel    int
+	language_picker_scroll int
+	language_picker_explicit int = -2 // -2 sentinel: auto-detect
+	// Large clipboard warning modal (Rust state.wants_large_clipboard_warning).
+	// Triggered by process_input() when the OSC 52 payload crosses the
+	// threshold; while set, all input is routed to the warning handler.
+	clipboard_large_pending bool
 }
 
 fn main() {
@@ -403,13 +417,21 @@ fn (mut ed Editor) process_input() {
 			break
 		}
 	}
-	// Sync the internal clipboard to the host terminal via OSC 52.
+	// Sync the internal clipboard to the host terminal via OSC 52. Large
+	// payloads (>= 128 KiB) get gated through a confirmation modal unless
+	// the user has previously opted in with "Always".
 	if ed.clipboard.wants_host_sync() {
-		data := ed.clipboard.read()
-		if data.len > 0 {
-			write_stdout('\x1b]52;c;' + base64.encode(data) + '\x1b\\')
+		if ed.clipboard.clipboard_wants_warning() {
+			// Pause the sync; the warning modal will resolve it.
+			ed.clipboard.large_pending = true
+			ed.needs_redraw = true
+		} else {
+			data := ed.clipboard.read()
+			if data.len > 0 {
+				write_stdout('\x1b]52;c;' + base64.encode(data) + '\x1b\\')
+			}
+			ed.clipboard.mark_as_synchronized()
 		}
-		ed.clipboard.mark_as_synchronized()
 	}
 }
 
@@ -432,9 +454,32 @@ fn (mut ed Editor) handle_event(ev Input) {
 		return
 	}
 
+	// The large clipboard warning is internal — it pops up while the user
+	// is doing something else, so it intercepts input ahead of every
+	// user-opened modal (About, file picker, etc.).
+	if ed.clipboard_large_pending {
+		match ev.kind {
+			.keyboard { ed.handle_clipboard_warning_key(ev.key) }
+			.text { ed.handle_clipboard_warning_text(ev.text) }
+			.mouse { ed.handle_clipboard_warning_mouse(ev.mouse) }
+			else {}
+		}
+		return
+	}
+
 	// Any event dismisses the About dialog.
 	if ed.about_open {
 		ed.about_open = false
+		return
+	}
+
+	// The language picker is modal: it swallows all input while open.
+	if ed.language_picker {
+		match ev.kind {
+			.keyboard { ed.handle_language_picker_key(ev.key) }
+			.mouse { ed.handle_language_picker_mouse(ev.mouse) }
+			else {}
+		}
 		return
 	}
 
@@ -1556,6 +1601,12 @@ fn (mut ed Editor) draw() {
 	if ed.indent_picker {
 		ed.draw_indent_picker(status_y)
 	}
+	if ed.language_picker {
+		ed.draw_language_picker(status_y)
+	}
+	if ed.clipboard_large_pending {
+		ed.draw_clipboard_warning()
+	}
 
 	write_stdout(ed.fb.render())
 	ed.status = ''
@@ -1572,9 +1623,11 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	mut text := ' [${ed.active + 1}/${ed.docs.len}] '
 	mut x := CoordType(text.len)
 
-	// Language name (Rust "language"). This port has no language picker, so
-	// it's a plain label rather than a clickable button.
-	lang := if b.language() < 0 { 'Plain Text' } else { lsh_languages[b.language()].name }
+	// Language name (Rust "language"): a clickable button that opens the
+	// language picker. The label is the resolved name — Auto Detect when the
+	// buffer has no explicit override, otherwise the chosen name.
+	lang := ed.statusbar_lang_label()
+	ed.status_buttons << StatusButton{ kind: .language, left: x, right: x + CoordType(lang.len) }
 	text += lang + '  '
 	x += CoordType(lang.len + 2)
 
@@ -1694,7 +1747,8 @@ fn (ed &Editor) compute_status_buttons() []StatusButton {
 
 	idx := ' [${ed.active + 1}/${ed.docs.len}] '
 	x += CoordType(idx.len)
-	lang := if b.language() < 0 { 'Plain Text' } else { lsh_languages[b.language()].name }
+	lang := ed.statusbar_lang_label()
+	res << StatusButton{ kind: .language, left: x, right: x + CoordType(lang.len) }
 	x += CoordType(lang.len + 2)
 
 	nl := if b.is_crlf() { 'CRLF' } else { 'LF' }
@@ -1704,6 +1758,21 @@ fn (ed &Editor) compute_status_buttons() []StatusButton {
 	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
 	res << StatusButton{ kind: .indentation, left: x, right: x + CoordType(ind.len) }
 	return res
+}
+
+// statusbar_lang_label returns the language label rendered on the status
+// line for the active buffer. With the explicit-override sentinel at -2 the
+// label shows "Auto Detect" (mirrors Rust draw_dialog_language_change).
+fn (ed &Editor) statusbar_lang_label() string {
+	if ed.language_picker_explicit == -2 {
+		return 'Auto Detect'
+	}
+	b := &ed.docs[ed.active].buf
+	lang := b.language()
+	if lang < 0 {
+		return 'Plain Text'
+	}
+	return lsh_languages[lang].name
 }
 
 // handle_status_click dispatches a click on the status line to its buttons.
@@ -1717,6 +1786,9 @@ fn (mut ed Editor) handle_status_click(x CoordType) {
 				}
 				.indentation {
 					ed.indent_picker = true
+				}
+				.language {
+					ed.open_language_picker()
 				}
 			}
 			return
@@ -1739,4 +1811,497 @@ fn (mut ed Editor) handle_indent_popup_click(x CoordType, row CoordType) {
 			b.set_tab_size(col / 2 + 1)
 		}
 	}
+}
+
+// ---- Language picker -------------------------------------------------------------
+//
+// Status-bar anchored modal listing "Auto Detect" / "Plain Text" / 25 lsh
+// languages. Internally the picker uses non-negative display positions
+// (0 = Auto, 1 = Plain, 2+ = lsh_languages[i-2]); translation to/from the
+// TextBuffer.language encoding (-2 = auto, -1 = plain, 0..N = language)
+// happens in language_picker_apply / language_picker_current.
+//
+// Geometry mirrors draw_indent_picker: anchored to the language button's
+// right edge, clamped above the menu bar, the whole panel reverse-videoed and
+// the selected row double-reversed to read as a highlight.
+
+const language_picker_width = CoordType(24)
+
+// Display-position indices used by the language picker itself. Position 0 is
+// the Auto Detect row, 1 is Plain Text, and 2+ map to lsh_languages[i-2].
+// The translation to/from TextBuffer.language encoding (-2 = auto, -1 = plain,
+// 0..N = language index) only happens at apply/current time, so the picker can
+// scroll, clamp and hit-test with non-negative integers.
+const language_picker_pos_auto = 0
+const language_picker_pos_plain = 1
+
+// language_picker_count returns the number of entries: Auto Detect, Plain Text,
+// and the 25 lsh_languages.
+fn (ed &Editor) language_picker_count() int {
+	return 2 + lsh_languages.len
+}
+
+// language_picker_label returns the display label for a display-position index.
+fn (ed &Editor) language_picker_label(pos int) string {
+	match pos {
+		language_picker_pos_auto { return 'Auto Detect' }
+		language_picker_pos_plain { return 'Plain Text' }
+		else {
+			lang_idx := pos - 2
+			if lang_idx < 0 || lang_idx >= lsh_languages.len {
+				return ''
+			}
+			return lsh_languages[lang_idx].name
+		}
+	}
+}
+
+// language_picker_current returns the display-position index that corresponds
+// to the buffer's current effective language, used to seed the picker.
+fn (ed &Editor) language_picker_current() int {
+	if ed.language_picker_explicit == -2 {
+		// Auto: seed with whatever the buffer actually shows right now.
+		lang := ed.docs[ed.active].buf.language()
+		if lang < 0 {
+			return language_picker_pos_plain
+		}
+		return lang + 2
+	}
+	if ed.language_picker_explicit == -1 {
+		return language_picker_pos_plain
+	}
+	lang_idx := ed.language_picker_explicit
+	if lang_idx < 0 || lang_idx >= lsh_languages.len {
+		return language_picker_pos_plain
+	}
+	return lang_idx + 2
+}
+
+// language_picker_rect returns the modal Rect, anchored to the language
+// button's right edge with width 24 columns.
+fn (ed &Editor) language_picker_rect() Rect {
+	width := language_picker_width
+	mut left := CoordType(0)
+	for btn in ed.compute_status_buttons() {
+		if btn.kind == .language {
+			left = btn.right - width
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	if left + width > ed.size.width {
+		left = ed.size.width - width
+	}
+	if left < 0 {
+		left = 0
+	}
+	return Rect{
+		left:   left
+		top:    0 // recomputed by draw_language_picker from status_y
+		right:  left + width
+		bottom: 0
+	}
+}
+
+// language_picker_list_height returns the number of entries that fit between
+// the menu bar (row 0) and the status bar, capped at the total entry count.
+fn (ed &Editor) language_picker_list_height(status_y CoordType) int {
+	// The block starts at status_y - height; clamp top >= 1 so it never
+	// overlaps the menu bar. The +1 on height reserves a one-row header strip
+	// (used here as the title row; visible entries are height - 1).
+	max_rows := status_y - 1
+	if max_rows < 1 {
+		return 1
+	}
+	total := ed.language_picker_count()
+	return int(coord_min(CoordType(total), max_rows))
+}
+
+// language_picker_clamp_scroll keeps the selection visible inside the list.
+fn (mut ed Editor) language_picker_clamp_scroll(list_h int) {
+	if list_h <= 0 {
+		ed.language_picker_scroll = 0
+		return
+	}
+	if ed.language_picker_sel < ed.language_picker_scroll {
+		ed.language_picker_scroll = ed.language_picker_sel
+	}
+	if ed.language_picker_sel >= ed.language_picker_scroll + list_h {
+		ed.language_picker_scroll = ed.language_picker_sel - list_h + 1
+	}
+}
+
+// open_language_picker opens the language picker modal and seeds the
+// selection with the buffer's current effective language.
+fn (mut ed Editor) open_language_picker() {
+	ed.language_picker = true
+	ed.language_picker_sel = ed.language_picker_current()
+	ed.language_picker_scroll = 0
+	ed.language_picker_clamp_scroll(ed.language_picker_list_height(ed.size
+		.height - 1))
+}
+
+// language_picker_apply applies a picked display-position index to the buffer.
+// Translates the position to the TextBuffer.language encoding (-2/-1/0..N) so
+// the rest of the editor keeps treating language as a single int.
+fn (mut ed Editor) language_picker_apply(pos int) {
+	mut b := &ed.docs[ed.active].buf
+	match pos {
+		language_picker_pos_auto {
+			ed.language_picker_explicit = -2
+			// Auto-detect from the active document's path; untitled buffers
+			// fall back to plain text (no extension to match).
+			path := ed.cur().path
+			detected := if path == '' { -1 } else { lsh_language_for_path(path) }
+			b.set_language(detected)
+		}
+		language_picker_pos_plain {
+			ed.language_picker_explicit = -1
+			b.set_language(-1)
+		}
+		else {
+			lang_idx := pos - 2
+			if lang_idx < 0 || lang_idx >= lsh_languages.len {
+				ed.language_picker_explicit = -1
+				b.set_language(-1)
+				return
+			}
+			ed.language_picker_explicit = lang_idx
+			b.set_language(lang_idx)
+		}
+	}
+}
+
+// handle_language_picker_key processes a keyboard event while the language
+// picker is open.
+fn (mut ed Editor) handle_language_picker_key(key InputKey) {
+	mods := u32(key) & kbmod_mask
+	vk := u32(key) & vk_mask
+	status_y := ed.size.height - 1
+	list_h := ed.language_picker_list_height(status_y)
+	total := ed.language_picker_count()
+	match vk {
+		vk_escape {
+			ed.language_picker = false
+		}
+		vk_up {
+			if mods == kbmod_none || mods == kbmod_shift {
+				if ed.language_picker_sel > 0 {
+					ed.language_picker_sel--
+				}
+				ed.language_picker_clamp_scroll(list_h)
+			}
+		}
+		vk_down {
+			if mods == kbmod_none || mods == kbmod_shift {
+				if ed.language_picker_sel + 1 < total {
+					ed.language_picker_sel++
+				}
+				ed.language_picker_clamp_scroll(list_h)
+			}
+		}
+		vk_home {
+			ed.language_picker_sel = 0
+			ed.language_picker_clamp_scroll(list_h)
+		}
+		vk_end {
+			ed.language_picker_sel = total - 1
+			ed.language_picker_clamp_scroll(list_h)
+		}
+		vk_prior {
+			if mods == kbmod_none {
+				mut step := list_h
+				if step <= 0 {
+					step = 1
+				}
+				ed.language_picker_sel -= step
+				if ed.language_picker_sel < 0 {
+					ed.language_picker_sel = 0
+				}
+				ed.language_picker_clamp_scroll(list_h)
+			}
+		}
+		vk_next {
+			if mods == kbmod_none {
+				mut step := list_h
+				if step <= 0 {
+					step = 1
+				}
+				ed.language_picker_sel += step
+				if ed.language_picker_sel >= total {
+					ed.language_picker_sel = total - 1
+				}
+				ed.language_picker_clamp_scroll(list_h)
+			}
+		}
+		vk_return {
+			if mods == kbmod_none {
+				sel := ed.language_picker_sel
+				ed.language_picker_apply(sel)
+				ed.language_picker = false
+			}
+		}
+		else {}
+	}
+}
+
+// handle_language_picker_mouse processes a click inside the language picker.
+// A click on a row activates it (mirrors Rust ListSelection::Activated and the
+// goto_file modal's click-to-activate behavior).
+fn (mut ed Editor) handle_language_picker_mouse(mouse InputMouse) {
+	if mouse.state != .left || mouse.drag {
+		return
+	}
+	status_y := ed.size.height - 1
+	width := language_picker_width
+	mut left := CoordType(0)
+	for btn in ed.compute_status_buttons() {
+		if btn.kind == .language {
+			left = btn.right - width
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	if left + width > ed.size.width {
+		left = ed.size.width - width
+	}
+	if left < 0 {
+		left = 0
+	}
+	height := ed.language_picker_list_height(status_y) + 1 // title row + list
+	mut top := status_y - height
+	if top < 1 {
+		top = 1
+	}
+	if mouse.position.x < left || mouse.position.x >= left + width {
+		return
+	}
+	if mouse.position.y < top + 1 || mouse.position.y >= top + height {
+		return
+	}
+	pos := ed.language_picker_scroll + int(mouse.position.y - (top + 1))
+	if pos < 0 || pos >= ed.language_picker_count() {
+		return
+	}
+	ed.language_picker_sel = pos
+	ed.language_picker_apply(pos)
+	ed.language_picker = false
+}
+
+// draw_language_picker renders the language picker anchored above the status
+// bar. The top row is the title " Language " (reverse), followed by up to
+// `list_h` entries with the selected row highlighted.
+fn (mut ed Editor) draw_language_picker(status_y CoordType) {
+	width := language_picker_width
+	mut left := CoordType(0)
+	for btn in ed.compute_status_buttons() {
+		if btn.kind == .language {
+			left = btn.right - width
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	if left + width > ed.size.width {
+		left = ed.size.width - width
+	}
+	if left < 0 {
+		left = 0
+	}
+	list_h := ed.language_picker_list_height(status_y)
+	height := list_h + 1
+	mut top := status_y - height
+	if top < 1 {
+		top = 1
+	}
+	ed.language_picker_clamp_scroll(list_h)
+
+	// Whole panel reverse-videoed.
+	ed.fb.reverse(mut Rect{
+		left:   left
+		top:    top
+		right:  left + width
+		bottom: top + height
+	})
+
+	// Title row.
+	mut title_row := Rect{
+		left:   left
+		top:    top
+		right:  left + width
+		bottom: top + 1
+	}
+	ed.fb.replace_text(top, left, left + width, picker_fit_line(' Language ', width))
+	ed.fb.reverse(mut title_row)
+
+	// Entries.
+	for i in 0 .. list_h {
+		idx := ed.language_picker_scroll + i
+		if idx >= ed.language_picker_count() {
+			break
+		}
+		y := top + 1 + CoordType(i)
+		label := ' ${ed.language_picker_label(idx)} '
+		ed.fb.replace_text(y, left, left + width, picker_fit_line(label, width))
+		mut item_row := Rect{
+			left:   left
+			top:    y
+			right:  left + width
+			bottom: y + 1
+		}
+		ed.fb.reverse(mut item_row)
+		if idx == ed.language_picker_sel {
+			// Double-reverse = normal colors, reads as a highlight.
+			ed.fb.reverse(mut item_row)
+		}
+	}
+}
+
+// ---- Large clipboard warning ------------------------------------------------------
+//
+// Centered modal that gates OSC 52 sync of payloads >= 128 KiB. Three actions:
+// Always (sets the sticky preference and sends), Yes (sends once), No (drops).
+
+// clipboard_size_label formats a byte count as a human-readable KiB/MiB string.
+fn clipboard_size_label(size int) string {
+	if size >= 1024 * 1024 {
+		mib := size / (1024 * 1024)
+		dec := (size % (1024 * 1024)) * 10 / (1024 * 1024)
+		if dec == 0 {
+			return '${mib} MiB'
+		}
+		return '${mib}.${dec} MiB'
+	}
+	kib := size / 1024
+	dec := (size % 1024) * 10 / 1024
+	if dec == 0 {
+		return '${kib} KiB'
+	}
+	return '${kib}.${dec} KiB'
+}
+
+// draw_clipboard_warning renders the centered "send to terminal?" modal.
+fn (mut ed Editor) draw_clipboard_warning() {
+	box_w := CoordType(56)
+	lines := [
+		'Large clipboard data (~${clipboard_size_label(ed.clipboard.clipboard_size())}) —',
+		'send to terminal?',
+		'',
+		'[ Always ]  [ Yes ]  [ No ]',
+	]
+	box_h := CoordType(lines.len)
+	left := coord_max((ed.size.width - box_w) / 2, 0)
+	top := coord_max((ed.size.height - box_h) / 2, 0)
+	right := coord_min(left + box_w, ed.size.width)
+	for i, text in lines {
+		y := top + CoordType(i)
+		ed.fb.replace_text(y, left, right, picker_fit_line(text, box_w))
+		mut row := Rect{
+			left:   left
+			top:    y
+			right:  right
+			bottom: y + 1
+		}
+		ed.fb.reverse(mut row)
+	}
+}
+
+// handle_clipboard_warning_key processes keyboard input for the warning.
+// y/Enter = Yes, n/Esc = No, a = Always (also sends).
+fn (mut ed Editor) handle_clipboard_warning_key(key InputKey) {
+	mods := u32(key) & kbmod_mask
+	vk := u32(key) & vk_mask
+	match vk {
+		vk_escape {
+			ed.resolve_clipboard_warning(false, false)
+		}
+		vk_return {
+			if mods == kbmod_none {
+				ed.resolve_clipboard_warning(true, false)
+			}
+		}
+		vk_y {
+			ed.resolve_clipboard_warning(true, false)
+		}
+		vk_n {
+			ed.resolve_clipboard_warning(false, false)
+		}
+		vk_a {
+			ed.resolve_clipboard_warning(true, true)
+		}
+		else {}
+	}
+}
+
+// handle_clipboard_warning_text accepts printable text (y/n/a/Enter arrive via
+// text events too in some terminal configurations).
+fn (mut ed Editor) handle_clipboard_warning_text(text string) {
+	for c in text {
+		match c {
+			`y`, `Y` { ed.resolve_clipboard_warning(true, false); return }
+			`n`, `N` { ed.resolve_clipboard_warning(false, false); return }
+			`a`, `A` { ed.resolve_clipboard_warning(true, true); return }
+			`\n`, `\r` { ed.resolve_clipboard_warning(true, false); return }
+			else {}
+		}
+	}
+}
+
+// handle_clipboard_warning_mouse dispatches a click on one of the three
+// inline buttons at the bottom of the warning modal.
+fn (mut ed Editor) handle_clipboard_warning_mouse(mouse InputMouse) {
+	if mouse.state != .left || mouse.drag {
+		return
+	}
+	box_w := CoordType(56)
+	left := coord_max((ed.size.width - box_w) / 2, 0)
+	top := coord_max((ed.size.height - 4) / 2, 0)
+	right := coord_min(left + box_w, ed.size.width)
+	// Buttons live on the 4th (last) row of the modal; the rect math mirrors
+	// the inline label '[ Always ]  [ Yes ]  [ No ]'.
+	if mouse.position.y != top + 3 {
+		return
+	}
+	if mouse.position.x < left || mouse.position.x >= right {
+		return
+	}
+	// Cell boundaries, computed live: each "[ Label ]" is 10 columns wide and
+	// separated from its neighbor by 2 columns.
+	cell_w := CoordType(10)
+	// Three cells at offsets 0, 12, 24 within the 56-column box.
+	cell_offsets := [CoordType(0), CoordType(12), CoordType(24)]
+	labels := [0, 1, 2]! // 0 = Always, 1 = Yes, 2 = No
+	for j, off in cell_offsets {
+		cell_left := left + off
+		if mouse.position.x >= cell_left && mouse.position.x < cell_left + cell_w {
+			match labels[j] {
+				0 { ed.resolve_clipboard_warning(true, true) }
+				1 { ed.resolve_clipboard_warning(true, false) }
+				2 { ed.resolve_clipboard_warning(false, false) }
+				else {}
+			}
+			return
+		}
+	}
+}
+
+// resolve_clipboard_warning closes the warning modal and either sends the
+// OSC 52 payload (`send=true`) or drops it. When `always=true` the sticky
+// preference is also flipped, so future large-clipboard syncs skip the prompt.
+fn (mut ed Editor) resolve_clipboard_warning(send bool, always bool) {
+	if always {
+		ed.clipboard.large_always_send = true
+	}
+	if send {
+		data := ed.clipboard.read()
+		if data.len > 0 {
+			write_stdout('\x1b]52;c;' + base64.encode(data) + '\x1b\\')
+		}
+		ed.clipboard.resolve_large_pending(true)
+	} else {
+		ed.clipboard.resolve_large_pending(false)
+	}
+	ed.clipboard_large_pending = false
 }
