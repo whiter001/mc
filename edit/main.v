@@ -168,6 +168,14 @@ mut:
 	// Triggered by process_input() when the OSC 52 payload crosses the
 	// threshold; while set, all input is routed to the warning handler.
 	clipboard_large_pending bool
+	// Error log: ring buffer of recent error messages.
+	error_log       []string
+	error_log_count int
+	error_log_index int
+	error_log_open  bool
+	// OSC 0 title cache: only emit when filename or dirty flag actually changes.
+	title_filename  string
+	title_dirty     bool
 }
 
 fn main() {
@@ -229,6 +237,7 @@ fn main() {
 
 	for !ed.quit {
 		if ed.needs_redraw {
+			ed.update_terminal_title()
 			ed.draw()
 			ed.needs_redraw = false
 		}
@@ -467,6 +476,14 @@ fn (mut ed Editor) handle_event(ev Input) {
 			else {}
 		}
 		return
+	}
+
+	// Error log modal: any key dismisses it.
+	if ed.error_log_count > 0 && ed.error_log_open {
+		if ev.kind == .keyboard || ev.kind == .text {
+			ed.error_log_close()
+			return
+		}
 	}
 
 	// Any event dismisses the About dialog.
@@ -791,7 +808,7 @@ fn (mut ed Editor) save_active() {
 	}
 	path := ed.docs[ed.active].path
 	ed.docs[ed.active].buf.write_file(path) or {
-		ed.status = 'save failed: ${err}'
+		ed.error_log_add('save failed: ${path}: ${err}')
 		return
 	}
 	if fid := file_id(path) {
@@ -1613,6 +1630,9 @@ fn (mut ed Editor) draw() {
 	if ed.clipboard_large_pending {
 		ed.draw_clipboard_warning()
 	}
+	if ed.error_log_count > 0 && ed.error_log_open {
+		ed.draw_error_log()
+	}
 
 	write_stdout(ed.fb.render())
 	ed.status = ''
@@ -2310,4 +2330,88 @@ fn (mut ed Editor) resolve_clipboard_warning(send bool, always bool) {
 		ed.clipboard.resolve_large_pending(false)
 	}
 	ed.clipboard_large_pending = false
+}
+
+// ---- Error log -----------------------------------------------------------------
+
+const error_log_capacity = 8
+
+fn (mut ed Editor) error_log_add(msg string) {
+	if msg == '' {
+		return
+	}
+	if ed.error_log.len < error_log_capacity {
+		for ed.error_log.len < error_log_capacity {
+			ed.error_log << ''
+		}
+	}
+	ed.error_log[ed.error_log_index] = msg
+	ed.error_log_index = (ed.error_log_index + 1) % error_log_capacity
+	if ed.error_log_count < error_log_capacity {
+		ed.error_log_count++
+	}
+	ed.error_log_open = true
+	ed.needs_redraw = true
+}
+
+fn (mut ed Editor) error_log_close() {
+	ed.error_log_open = false
+	ed.needs_redraw = true
+}
+
+fn (mut ed Editor) draw_error_log() {
+	mut lines := []string{}
+	lines << 'Error'
+	beg := (ed.error_log_index + error_log_capacity - ed.error_log_count) % error_log_capacity
+	for i in 0 .. ed.error_log_count {
+		idx := (beg + i) % error_log_capacity
+		lines << ed.error_log[idx]
+	}
+	lines << ''
+	lines << 'Press Enter or Esc to close'
+
+	box_w := CoordType(60)
+	box_h := CoordType(lines.len)
+	left := coord_max((ed.size.width - box_w) / 2, 0)
+	top := coord_max((ed.size.height - box_h) / 2, 0)
+	right := coord_min(left + box_w, ed.size.width)
+	for i, text in lines {
+		y := top + CoordType(i)
+		if y >= ed.size.height {
+			break
+		}
+		ed.fb.replace_text(y, left, right, picker_fit_line(text, box_w))
+		mut row := Rect{
+			left:   left
+			top:    y
+			right:  right
+			bottom: y + 1
+		}
+		ed.fb.reverse(mut row)
+	}
+}
+
+// ---- OSC 0 terminal title ------------------------------------------------------
+
+fn (mut ed Editor) update_terminal_title() {
+	filename := if ed.active < ed.docs.len && ed.docs[ed.active].path != '' {
+		os.file_name(ed.docs[ed.active].path)
+	} else {
+		''
+	}
+	dirty := ed.active < ed.docs.len && ed.docs[ed.active].buf.is_dirty()
+	if filename == ed.title_filename && dirty == ed.title_dirty {
+		return
+	}
+	mut payload := '\x1b]0;'
+	if dirty {
+		payload += '\u25cf '
+	}
+	if filename != '' {
+		payload += filename + ' - '
+	}
+	payload += 'edit\x1b\\'
+	write_stdout(payload)
+	ed.title_filename = filename
+	ed.title_dirty = dirty
 }

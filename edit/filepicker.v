@@ -210,7 +210,7 @@ fn (mut ed Editor) picker_activate() {
 		return
 	}
 	ed.add_document(path) or {
-		ed.status = 'open failed: ${err}'
+		ed.error_log_add('open failed: ${path}: ${err}')
 		return
 	}
 	ed.picker = false
@@ -219,7 +219,7 @@ fn (mut ed Editor) picker_activate() {
 // picker_do_save saves the active document to the given path.
 fn (mut ed Editor) picker_do_save(path string) {
 	ed.docs[ed.active].buf.write_file(path) or {
-		ed.status = 'save failed: ${err}'
+		ed.error_log_add('save failed: ${path}: ${err}')
 		return
 	}
 	ed.docs[ed.active].path = path
