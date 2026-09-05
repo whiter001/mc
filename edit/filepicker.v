@@ -141,6 +141,7 @@ fn (mut ed Editor) picker_refresh() {
 	if ed.picker_sel >= entries.len {
 		ed.picker_sel = entries.len - 1
 	}
+	ed.picker_autocomplete_update()
 }
 
 // picker_rect returns the centered modal Rect, sized like the Rust original
@@ -250,24 +251,45 @@ fn (mut ed Editor) handle_picker_key(key InputKey) {
 		vk_escape {
 			ed.picker = false
 		}
+		vk_tab {
+			if mods == kbmod_none {
+				ed.picker_autocomplete_apply()
+			}
+		}
 		vk_up {
 			if mods == kbmod_alt {
 				// Alt+Up goes to the parent directory (Rust original).
 				ed.picker_name = '..'
 				ed.picker_activate()
 			} else if mods == kbmod_none || mods == kbmod_shift {
-				if ed.picker_sel > 0 {
-					ed.picker_sel--
+				if ed.picker_autocomplete.len > 0 {
+					// Navigate within the suggestion strip first.
+					if ed.picker_autocomplete_sel > 0 {
+						ed.picker_autocomplete_sel--
+					}
+				} else {
+					// No suggestions: fall through to directory listing navigation.
+					if ed.picker_sel > 0 {
+						ed.picker_sel--
+					}
+					ed.picker_sync_name()
 				}
-				ed.picker_sync_name()
 			}
 		}
 		vk_down {
 			if mods == kbmod_none || mods == kbmod_shift {
-				if ed.picker_sel + 1 < ed.picker_entries.len {
-					ed.picker_sel++
+				if ed.picker_autocomplete.len > 0 {
+					// Navigate within the suggestion strip first.
+					if ed.picker_autocomplete_sel + 1 < ed.picker_autocomplete.len {
+						ed.picker_autocomplete_sel++
+					}
+				} else {
+					// No suggestions: fall through to directory listing navigation.
+					if ed.picker_sel + 1 < ed.picker_entries.len {
+						ed.picker_sel++
+					}
+					ed.picker_sync_name()
 				}
-				ed.picker_sync_name()
 			}
 		}
 		vk_return {
@@ -279,6 +301,7 @@ fn (mut ed Editor) handle_picker_key(key InputKey) {
 			if mods == kbmod_none || mods == kbmod_shift {
 				if ed.picker_name.len > 0 {
 					ed.picker_name = picker_trim_last_utf8_char(ed.picker_name)
+					ed.picker_autocomplete_update()
 				} else {
 					// Backspace on an empty name goes up one directory.
 					ed.picker_name = '..'
@@ -300,8 +323,18 @@ fn (mut ed Editor) handle_picker_mouse(mouse InputMouse) {
 		return
 	}
 	r := ed.picker_rect()
-	list_top := r.top + 3
+	suggestions_h := CoordType(ed.picker_autocomplete.len)
+	list_top := r.top + 3 + suggestions_h
 	if mouse.position.x < r.left || mouse.position.x >= r.right {
+		return
+	}
+	if mouse.position.y >= r.top + 3 && mouse.position.y < list_top {
+		// Clicked on a suggestion.
+		sel := int(mouse.position.y - (r.top + 3))
+		if sel >= 0 && sel < ed.picker_autocomplete.len {
+			ed.picker_autocomplete_sel = sel
+			ed.picker_autocomplete_apply()
+		}
 		return
 	}
 	if mouse.position.y < list_top || mouse.position.y >= r.bottom {
@@ -343,10 +376,31 @@ fn (mut ed Editor) draw_filepicker() {
 	ed.fb.replace_text(row.top, r.left, r.right, picker_fit_line(name_text, width))
 	ed.fb.reverse(mut row)
 
+	// Autocomplete suggestion strip, between the name row and directory listing.
+	for i, suggestion in ed.picker_autocomplete {
+		y := r.top + 3 + CoordType(i)
+		if y >= r.bottom {
+			break
+		}
+		text := ' > ${suggestion}'
+		ed.fb.replace_text(y, r.left, r.right, picker_fit_line(text, width))
+		mut strip_row := Rect{
+			left: r.left
+			top: y
+			right: r.right
+			bottom: y + 1
+		}
+		ed.fb.reverse(mut strip_row)
+		if i == ed.picker_autocomplete_sel {
+			// Double reverse = normal colors, reads as a highlight.
+			ed.fb.reverse(mut strip_row)
+		}
+	}
+
 	// Directory listing.
-	list_top := r.top + 3
+	actual_list_top := r.top + 3 + CoordType(ed.picker_autocomplete.len)
 	for i in ed.picker_scroll .. ed.picker_entries.len {
-		y := list_top + CoordType(i - ed.picker_scroll)
+		y := actual_list_top + CoordType(i - ed.picker_scroll)
 		if y >= r.bottom {
 			break
 		}
@@ -434,4 +488,58 @@ fn picker_truncate(s string, width CoordType) string {
 		return '...' + tail
 	}
 	return tail
+}
+
+// picker_autocomplete_match reports whether entry starts with needle.
+// For directory entries (trailing '/'), the trailing '/' is stripped before comparison.
+fn picker_autocomplete_match(entry string, needle string) bool {
+	if needle.len == 0 {
+		return false
+	}
+	name := entry.trim_right('/')
+	return name.starts_with(needle)
+}
+
+// picker_autocomplete_collect returns up to 5 entries that start with needle.
+// The synthetic '..' entry is always skipped. Empty needle yields empty result.
+fn picker_autocomplete_collect(entries []string, needle string) []string {
+	if needle.len == 0 {
+		return []
+	}
+	mut result := []string{cap: 5}
+	for entry in entries {
+		if entry == '..' {
+			continue
+		}
+		if picker_autocomplete_match(entry, needle) {
+			result << entry
+			if result.len >= 5 {
+				break
+			}
+		}
+	}
+	return result
+}
+
+// picker_autocomplete_update recomputes the suggestion list from picker_entries
+// filtered by picker_name. Sets picker_autocomplete_sel = 0 if any suggestions,
+// -1 otherwise.
+fn (mut ed Editor) picker_autocomplete_update() {
+	ed.picker_autocomplete = picker_autocomplete_collect(ed.picker_entries, ed.picker_name)
+	if ed.picker_autocomplete.len > 0 {
+		ed.picker_autocomplete_sel = 0
+	} else {
+		ed.picker_autocomplete_sel = -1
+	}
+}
+
+// picker_autocomplete_apply copies the focused suggestion into the name field
+// and clears the suggestions. No-op if no suggestion is focused.
+fn (mut ed Editor) picker_autocomplete_apply() {
+	if ed.picker_autocomplete_sel < 0 || ed.picker_autocomplete_sel >= ed.picker_autocomplete.len {
+		return
+	}
+	ed.picker_name = ed.picker_autocomplete[ed.picker_autocomplete_sel]
+	ed.picker_autocomplete = []
+	ed.picker_autocomplete_sel = -1
 }

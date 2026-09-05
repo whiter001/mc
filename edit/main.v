@@ -134,7 +134,9 @@ mut:
 	picker_entries   []string
 	picker_sel       int
 	picker_scroll    int
-	picker_overwrite string
+	picker_overwrite        string
+	picker_autocomplete     []string
+	picker_autocomplete_sel int
 	// Status-line buttons, rebuilt every frame (see draw_statusbar).
 	status_buttons   []StatusButton
 	// Search prompt buttons, rebuilt every frame while the search panel is visible.
@@ -491,13 +493,16 @@ fn (mut ed Editor) handle_event(ev Input) {
 			}
 			.text, .paste {
 				// The name field is single-line: strip everything from the
-				// first newline on.
+				// first newline on. Tab triggers autocomplete-apply.
 				mut s := if ev.kind == .text { ev.text } else { ev.data.bytestr() }
 				idx := s.index_any('\r\n')
 				if idx >= 0 {
 					s = s[..idx]
 				}
-				if ed.picker_overwrite != '' {
+				if s == '\t' {
+					// Tab in the picker applies the current autocomplete suggestion.
+					ed.picker_autocomplete_apply()
+				} else if ed.picker_overwrite != '' {
 					// Overwrite warning: y confirms, n cancels (Rust:
 					// consume_shortcut(vk::Y/N)); anything else is ignored.
 					if s == 'y' || s == 'Y' {
@@ -507,8 +512,9 @@ fn (mut ed Editor) handle_event(ev Input) {
 					} else if s == 'n' || s == 'N' {
 						ed.picker_overwrite = ''
 					}
-				} else {
+				} else if s.len > 0 {
 					ed.picker_name += s
+					ed.picker_autocomplete_update()
 				}
 			}
 			.mouse {
