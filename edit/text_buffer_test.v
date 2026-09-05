@@ -429,3 +429,15 @@ fn test_render_margin_line_numbers() {
 	assert frame.contains('2 │ ')
 	assert frame.contains('3 │ ')
 }
+
+fn test_copy_from_str_multiline() {
+	mut b := new_text_buffer(false)
+	b.copy_from_str(StringDocument{
+		text: 'Hello from redirected stdin\nLine 2\nLine 3\n'
+	})
+	assert b.logical_line_count() == 4
+	assert buf_text(mut b) == 'Hello from redirected stdin\nLine 2\nLine 3\n'
+	b.copy_from_str(StringDocument{ text: 'single' })
+	assert b.logical_line_count() == 1
+	assert buf_text(mut b) == 'single'
+}

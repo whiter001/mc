@@ -691,16 +691,13 @@ fn gap_buffer_copy_into(gb GapBuffer, mut dst WriteableDocument) {
 // ---- Content swapping & file I/O ---------------------------------------------
 
 // copy_from_str replaces the entire buffer contents with the given document.
-// Assumes that the line count doesn't change.
+// The source can have any number of lines; gap_buffer_copy_from() truncates
+// or extends the existing buffer to match the source exactly, so no
+// post-trim step is needed here (the earlier line-count assumption has been
+// removed — see `recalc_after_content_swap` for the new line-count update).
 pub fn (mut b TextBuffer) copy_from_str(text ReadableDocument) {
 	if gap_buffer_copy_from(mut b.buffer, text) {
 		b.recalc_after_content_swap()
-		b.cursor_move_to_logical(Point{ x: coord_type_max, y: 0 })
-
-		delete := b.buffer.len() - b.cursor.offset
-		if delete != 0 {
-			b.buffer.allocate_gap(b.cursor.offset, 0, true)
-		}
 	}
 }
 
@@ -712,6 +709,29 @@ fn (mut b TextBuffer) recalc_after_content_swap() {
 	b.cursor = Cursor{}
 	b.set_selection(OptSelection{})
 	b.mark_as_clean()
+
+	// Recount logical lines from the new content. Without this, copy_from_str
+	// (used for redirected-stdin loading) would leave stats.logical_lines at
+	// the empty-buffer default of 1 regardless of how many \n were inserted,
+	// and the gutter / cursor would render as if the document had only one
+	// line. logical_lines = (\n count) + 1, matching the file-load path
+	// (see read_initial) and Rust's split('\n') semantics: a trailing \n
+	// produces one extra empty line.
+	text := b.read_all()
+	mut newlines := CoordType(0)
+	for c in text {
+		if c == `\n` {
+			newlines++
+		}
+	}
+	if text.len == 0 {
+		b.stats.logical_lines = 1
+		b.stats.visual_lines = 1
+	} else {
+		b.stats.logical_lines = newlines + 1
+		b.stats.visual_lines = newlines + 1
+	}
+
 	b.reflow()
 	b.highlighter_cache.invalidate_from(0)
 }
