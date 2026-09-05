@@ -875,3 +875,77 @@ fn test_utf8_chars_broken_utf8() {
 	assert results == [rune(`a`), rune(0xFFFD), rune(0xFFFD), rune(0xFFFD), rune(`b`)]
 	assert offsets == [1, 2, 3, 4, 5]
 }
+
+// ---- Pure helpers (measurement.v) ---------------------------------------
+
+fn test_point_max_returns_coord_type_max_on_both_axes() {
+	// point_max() returns the same value on both x and y.
+	pm := point_max()
+	assert pm.x == coord_type_max
+	assert pm.y == coord_type_max
+}
+
+fn test_measurement_config_cursor_returns_constructor_state() {
+	// new_measurement_config() seeds the cursor at offset 0, logical (0, 0).
+	mut c := new_measurement_config(StringDocument{ text: 'hello' })
+	cur := c.cursor()
+	assert cur.offset == 0
+	assert cur.logical_pos == Point{ x: 0, y: 0 }
+	// After moving the cursor through goto_offset, cursor() reflects it.
+	c.goto_offset(3)
+	cur2 := c.cursor()
+	assert cur2.offset == 3
+	assert cur2.logical_pos == Point{ x: 3, y: 0 }
+}
+
+fn test_skip_newline_lf() {
+	// LF at the offset advances by 1.
+	assert skip_newline('hello\nworld'.bytes(), 5) == 6
+	// CRLF at the offset advances by 2.
+	assert skip_newline('hello\r\nworld'.bytes(), 5) == 7
+}
+
+fn test_skip_newline_past_end_returns_offset_unchanged() {
+	// offset at or past text.len leaves the offset alone.
+	assert skip_newline('hello'.bytes(), 5) == 5
+	assert skip_newline('hello'.bytes(), 100) == 100
+}
+
+fn test_skip_newline_non_newline_offset_returns_offset_unchanged() {
+	// Ordinary characters do not advance.
+	assert skip_newline('hello'.bytes(), 0) == 0
+	assert skip_newline('hello'.bytes(), 3) == 3
+}
+
+fn test_skip_newline_cr_at_end_consumes_cr_anyway() {
+	// skip_newline consumes a CR even if no LF follows; the LF check
+	// then bails because off == text.len. This is the implementation's
+	// current behavior — pin it so a future tightening is intentional.
+	assert skip_newline('hi\r'.bytes(), 2) == 3
+	assert skip_newline('\r'.bytes(), 0) == 1
+	// A bare LF at the end is also consumed.
+	assert skip_newline('hi\n'.bytes(), 2) == 3
+}
+
+fn test_strip_newline_lf_only() {
+	// Trailing LF stripped, rest preserved.
+	assert strip_newline('hello\n'.bytes()).bytestr() == 'hello'
+}
+
+fn test_strip_newline_crlf() {
+	// Trailing CRLF stripped (LF first, then CR).
+	assert strip_newline('hello\r\n'.bytes()).bytestr() == 'hello'
+}
+
+fn test_strip_newline_no_trailing_newline() {
+	// No trailing newline: pass-through unchanged.
+	assert strip_newline('hello'.bytes()).bytestr() == 'hello'
+}
+
+fn test_strip_newline_empty_and_only_newline() {
+	// Empty buffer stays empty.
+	assert strip_newline(''.bytes()).len == 0
+	// A bare newline is stripped fully.
+	assert strip_newline('\n'.bytes()).len == 0
+	assert strip_newline('\r\n'.bytes()).len == 0
+}

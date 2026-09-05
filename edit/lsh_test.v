@@ -162,3 +162,77 @@ fn test_lsh_eq_ignore_ascii_case_rejects_different() {
 	// Non-ASCII bytes compared by their actual value (not folded).
 	assert !lsh_eq_ignore_ascii_case(0x80, 0x80 + 32)
 }
+
+// ---- lsh_match_path_suffix (highlighter.v) -----------------------------
+//
+// Case-insensitive suffix match used by lsh_glob_match's fast path.
+
+fn test_lsh_match_path_suffix_basic() {
+	assert lsh_match_path_suffix('main.rs'.bytes(), '.rs'.bytes())
+	assert lsh_match_path_suffix('a/b/c.txt'.bytes(), '.txt'.bytes())
+	assert !lsh_match_path_suffix('main.rs'.bytes(), '.txt'.bytes())
+}
+
+fn test_lsh_match_path_suffix_case_insensitive() {
+	assert lsh_match_path_suffix('Main.RS'.bytes(), '.rs'.bytes())
+	assert lsh_match_path_suffix('main.rs'.bytes(), '.RS'.bytes())
+}
+
+fn test_lsh_match_path_suffix_too_short() {
+	// path shorter than suffix → no match.
+	assert !lsh_match_path_suffix('a.rs'.bytes(), 'main.rs'.bytes())
+	assert !lsh_match_path_suffix(''.bytes(), 'x'.bytes())
+}
+
+fn test_lsh_match_path_suffix_empty_suffix() {
+	// Empty suffix matches any path (vacuously).
+	assert lsh_match_path_suffix('main.rs'.bytes(), ''.bytes())
+	assert lsh_match_path_suffix(''.bytes(), ''.bytes())
+}
+
+// ---- lsh_highlight_color / lsh_highlight_attr (highlighter.v) ----------
+//
+// Pure mappings from HighlightKind to (IndexedColor, Attributes). The
+// color match covers all the kinds the highlighter emits; the attr
+// match only fires for the four markup kinds, everything else attr_none.
+
+fn test_lsh_highlight_color_basic_kinds() {
+	assert lsh_highlight_color(lsh_kind_comment) == int(IndexedColor.green)
+	assert lsh_highlight_color(lsh_kind_method) == int(IndexedColor.bright_yellow)
+	assert lsh_highlight_color(lsh_kind_string) == int(IndexedColor.bright_red)
+	assert lsh_highlight_color(lsh_kind_variable) == int(IndexedColor.bright_cyan)
+	assert lsh_highlight_color(lsh_kind_constant_language) == int(IndexedColor.bright_blue)
+	assert lsh_highlight_color(lsh_kind_constant_numeric) == int(IndexedColor.bright_green)
+	assert lsh_highlight_color(lsh_kind_keyword_control) == int(IndexedColor.bright_magenta)
+}
+
+fn test_lsh_highlight_color_storage() {
+	// Storage kinds share the cyan palette.
+	assert lsh_highlight_color(lsh_kind_storage_annotation) == int(IndexedColor.cyan)
+	assert lsh_highlight_color(lsh_kind_storage_type) == int(IndexedColor.cyan)
+}
+
+fn test_lsh_highlight_color_unknown_returns_minus_one() {
+	// A kind outside the match returns -1; renderers use that to
+	// skip the color change and keep the default foreground.
+	assert lsh_highlight_color(9999) == -1
+}
+
+fn test_lsh_highlight_attr_markup_kinds() {
+	assert lsh_highlight_attr(lsh_kind_markup_bold) == attr_bold
+	assert lsh_highlight_attr(lsh_kind_markup_italic) == attr_italic
+	assert lsh_highlight_attr(lsh_kind_markup_link) == attr_underlined
+	assert lsh_highlight_attr(lsh_kind_markup_strikethrough) == attr_strikethrough
+}
+
+fn test_lsh_highlight_attr_non_markup_returns_attr_none() {
+	// Non-markup kinds do not set an attribute; the renderer keeps
+	// whatever was in effect for that cell.
+	assert lsh_highlight_attr(lsh_kind_comment) == attr_none
+	assert lsh_highlight_attr(lsh_kind_method) == attr_none
+	assert lsh_highlight_attr(lsh_kind_string) == attr_none
+	assert lsh_highlight_attr(lsh_kind_variable) == attr_none
+	assert lsh_highlight_attr(lsh_kind_keyword_control) == attr_none
+	// Unknown kind also returns attr_none.
+	assert lsh_highlight_attr(9999) == attr_none
+}
