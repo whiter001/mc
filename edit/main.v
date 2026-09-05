@@ -108,10 +108,13 @@ mut:
 	search_options   SearchOptions
 	// The needle collected by the first Ctrl+R prompt, used by the second.
 	replace_needle   string
-	// Dirty-quit protection: the first Ctrl+W/Ctrl+Q on a dirty document
-	// only warns; a second one within the same warning forces the action.
-	close_armed      bool
-	quit_armed       bool
+	// Dirty-quit modal: pops up when Ctrl+W/Ctrl+Q is pressed on a dirty
+	// document. dirty_action encodes the focused button:
+	//   0=Save, 1=Discard, 2=Cancel (default). dirty_for_quit is true for
+	//   Ctrl+Q and false for Ctrl+W.
+	dirty_modal     bool
+	dirty_action    int
+	dirty_for_quit  bool
 	// Menu bar state (menubar.v): menu_focus = bar highlighted via F10,
 	// menu_open = a dropdown is open, menu_idx/menu_item_idx = selection.
 	menu_focus       bool
@@ -369,8 +372,6 @@ fn (mut ed Editor) reset_view_state() {
 	ed.scroll = Point{}
 	ed.scroll_x_max = 0
 	ed.preferred_column = 0
-	ed.close_armed = false
-	ed.quit_armed = false
 	ed.mode = .edit
 	ed.prompt_text = ''
 }
@@ -447,15 +448,6 @@ fn (mut ed Editor) process_input() {
 }
 
 fn (mut ed Editor) handle_event(ev Input) {
-	// Any event other than the Ctrl+W / Ctrl+Q keypresses themselves disarms
-	// the dirty-close / quit warnings.
-	is_arm_key := ev.kind == .keyboard
-		&& (ev.key == kbmod_ctrl | vk_w || ev.key == kbmod_ctrl | vk_q)
-	if !is_arm_key {
-		ed.close_armed = false
-		ed.quit_armed = false
-	}
-
 	// Resize always applies, even while a modal (About / file picker) is open.
 	if ev.kind == .resize {
 		ed.size = ev.size
@@ -484,6 +476,35 @@ fn (mut ed Editor) handle_event(ev Input) {
 			ed.error_log_close()
 			return
 		}
+	}
+
+	// Dirty-close / dirty-quit modal.
+	if ed.dirty_modal {
+		match ev.kind {
+			.keyboard {
+				vk := u32(ev.key) & vk_mask
+				match vk {
+					vk_left  { ed.dirty_action = (ed.dirty_action + 3 - 1) % 3 }
+					vk_right { ed.dirty_action = (ed.dirty_action + 1) % 3 }
+					vk_return { ed.resolve_dirty_modal() }
+					vk_escape { ed.dirty_modal = false }
+					else {}
+				}
+			}
+			.text {
+				if ev.text == 's' || ev.text == 'S' {
+					ed.dirty_action = 0
+					ed.resolve_dirty_modal()
+				} else if ev.text == 'n' || ev.text == 'N' {
+					ed.dirty_action = 1
+					ed.resolve_dirty_modal()
+				} else if ev.text == 'c' || ev.text == 'C' || ev.text == '\x1b' {
+					ed.dirty_modal = false
+				}
+			}
+			else {}
+		}
+		return
 	}
 
 	// Any event dismisses the About dialog.
@@ -819,12 +840,13 @@ fn (mut ed Editor) save_active() {
 	ed.status = 'saved ${path}'
 }
 
-// close_active closes the active document (Ctrl+W). Dirty documents require a
-// second Ctrl+W to confirm.
+// close_active closes the active document (Ctrl+W). Dirty documents pop up
+// the dirty_modal instead.
 fn (mut ed Editor) close_active() {
-	if ed.docs[ed.active].buf.is_dirty() && !ed.close_armed {
-		ed.close_armed = true
-		ed.status = 'unsaved changes; press Ctrl+W again to discard'
+	if ed.docs[ed.active].buf.is_dirty() {
+		ed.dirty_modal = true
+		ed.dirty_for_quit = false
+		ed.dirty_action = 2 // default focus: Cancel
 		return
 	}
 	ed.docs.delete(ed.active)
@@ -846,14 +868,88 @@ fn (mut ed Editor) next_document() {
 	}
 }
 
-// request_exit quits, warning once if there are unsaved changes (Ctrl+Q).
+// request_exit quits, showing the dirty modal if there are unsaved changes.
 fn (mut ed Editor) request_exit() {
-	if ed.any_dirty() && !ed.quit_armed {
-		ed.quit_armed = true
-		ed.status = 'unsaved changes; press Ctrl+Q again to quit anyway'
+	if ed.any_dirty() {
+		ed.dirty_modal = true
+		ed.dirty_for_quit = true
+		ed.dirty_action = 2
 		return
 	}
 	ed.quit = true
+}
+
+// resolve_dirty_modal performs the action selected in the dirty modal and
+// returns true so the caller can return early from handle_event.
+fn (mut ed Editor) resolve_dirty_modal() bool {
+	action := ed.dirty_action
+	ed.dirty_modal = false
+	match action {
+		0 {
+			// Save then continue. save_active() may open the picker for
+			// untitled docs; that picker takes over input on the next tick.
+			ed.save_active()
+			if ed.dirty_for_quit {
+				ed.quit = true
+			} else {
+				ed.docs.delete(ed.active)
+				if ed.docs.len == 0 { ed.quit = true; return true }
+				if ed.active >= ed.docs.len { ed.active = ed.docs.len - 1 }
+				ed.reset_view_state()
+			}
+		}
+		1 {
+			// Discard changes.
+			if ed.dirty_for_quit {
+				ed.quit = true
+			} else {
+				ed.docs.delete(ed.active)
+				if ed.docs.len == 0 { ed.quit = true; return true }
+				if ed.active >= ed.docs.len { ed.active = ed.docs.len - 1 }
+				ed.reset_view_state()
+			}
+		}
+		2 {
+			// Cancel: do nothing.
+		}
+		else {}
+	}
+	return true
+}
+
+// draw_dirty_modal renders the centered "Save / Don't Save / Cancel" panel.
+fn (mut ed Editor) draw_dirty_modal() {
+	lines := [
+		if ed.dirty_for_quit { 'Quit: unsaved changes' } else { 'Close: unsaved changes' },
+		'',
+		' Save   Don\'t Save   Cancel ',
+	]
+	box_w := CoordType(36)
+	box_h := CoordType(lines.len)
+	left := coord_max((ed.size.width - box_w) / 2, 0)
+	top := coord_max((ed.size.height - box_h) / 2, 0)
+	right := coord_min(left + box_w, ed.size.width)
+	for i, text in lines {
+		y := top + CoordType(i)
+		if y >= ed.size.height { break }
+		ed.fb.replace_text(y, left, right, picker_fit_line(text, box_w))
+		mut row := Rect{
+			left: left, top: y, right: right, bottom: y + 1,
+		}
+		ed.fb.reverse(mut row)
+	}
+	btn_y := top + 2
+	if btn_y < ed.size.height {
+		btn_cols := [CoordType(1), CoordType(8), CoordType(19)]
+		btn_widths := [CoordType(4), CoordType(11), CoordType(6)]
+		if ed.dirty_action >= 0 && ed.dirty_action < 3 {
+			bx := left + btn_cols[ed.dirty_action]
+			mut btn_row := Rect{
+				left: bx, top: btn_y, right: bx + btn_widths[ed.dirty_action], bottom: btn_y + 1,
+			}
+			ed.fb.reverse(mut btn_row)
+		}
+	}
 }
 
 // ---- Editing keys ---------------------------------------------------------------
@@ -1109,7 +1205,6 @@ fn (mut ed Editor) handle_key(key InputKey) {
 		if vk != vk_up && vk != vk_down && vk != vk_prior && vk != vk_next {
 			ed.preferred_column = ed.docs[ed.active].buf.cursor_visual_pos().x
 		}
-		// The dirty-close/quit disarm lives in handle_event() now.
 		if make_visible {
 			ed.docs[ed.active].buf.make_cursor_visible()
 		}
@@ -1629,6 +1724,9 @@ fn (mut ed Editor) draw() {
 	}
 	if ed.clipboard_large_pending {
 		ed.draw_clipboard_warning()
+	}
+	if ed.dirty_modal {
+		ed.draw_dirty_modal()
 	}
 	if ed.error_log_count > 0 && ed.error_log_open {
 		ed.draw_error_log()
