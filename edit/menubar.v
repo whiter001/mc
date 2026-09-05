@@ -13,6 +13,7 @@ enum MenuAction {
 	file_open
 	file_save
 	file_save_as
+	file_preferences
 	file_close
 	file_exit
 	edit_undo
@@ -54,6 +55,7 @@ fn (ed &Editor) build_menus() []MenuBarMenu {
 				MenuItem{ label: 'Open...', accel: 'Ctrl+O', action: .file_open },
 				MenuItem{ label: 'Save', accel: 'Ctrl+S', action: .file_save },
 				MenuItem{ label: 'Save As...', accel: 'Ctrl+Shift+S', action: .file_save_as },
+				MenuItem{ label: 'Preferences...', accel: '', action: .file_preferences },
 				MenuItem{ label: 'Close', accel: 'Ctrl+W', action: .file_close },
 				MenuItem{ label: 'Exit', accel: 'Ctrl+Q', action: .file_exit },
 			]
@@ -309,6 +311,9 @@ fn (mut ed Editor) activate_menu_item(action MenuAction) {
 		}
 		.file_save_as {
 			ed.open_picker(true)
+		}
+		.file_preferences {
+			ed.open_preferences()
 		}
 		.file_close {
 			ed.close_active()
