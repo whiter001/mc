@@ -42,10 +42,10 @@ fn lsh_glob_fast_path(pattern []u8, name []u8) ?bool {
 	if pattern.len < 4 || pattern[0] != `*` || pattern[1] != `*` || pattern[2] != `/` {
 		return none
 	}
-	mut suffix := pattern[3..]
+	mut suffix := unsafe { pattern[3..] }
 	mut needs_dir_anchor := true
 	if suffix.len > 0 && suffix[0] == `*` {
-		suffix = suffix[1..]
+		suffix = unsafe { suffix[1..] }
 		needs_dir_anchor = false
 	}
 	if suffix.len == 0 || suffix.contains(`*`) {

@@ -289,8 +289,4 @@ pub fn (b GapBuffer) read_backward(off int) []u8 {
 	return unsafe { (b.text + beg).vbytes(len) }
 }
 
-// Compile-time check that GapBuffer implements both document interfaces.
-fn gap_buffer_implements_interfaces(mut gb GapBuffer) {
-	_ := ReadableDocument(gb)
-	_ := WriteableDocument(gb)
-}
+

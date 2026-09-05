@@ -14,10 +14,6 @@ struct StraightRgba {
 	value u32
 }
 
-fn straight_rgba_zero() StraightRgba {
-	return StraightRgba{ value: 0 }
-}
-
 fn straight_rgba_from_rgba(color u32) StraightRgba {
 	return StraightRgba{ value: color }
 }

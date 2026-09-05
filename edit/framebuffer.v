@@ -5,7 +5,7 @@ module main
 // and it diffs against the previous frame and emits the minimal VT escape
 // sequences needed to update the screen.
 
-import math
+import math as _
 
 // Same constants as used in the PCG family of RNGs.
 const hash_multiplier = u64(6364136223846793005) // Knuth's MMIX multiplier (64-bit)
@@ -42,8 +42,7 @@ enum IndexedColor {
 	foreground
 }
 
-// indexed_colors_count is the number of indices used by IndexedColor.
-const indexed_colors_count = 18
+
 
 // DEFAULT_THEME is the fallback theme. Matches Windows Terminal's Ottosson theme.
 fn default_theme() []StraightRgba {

@@ -139,7 +139,7 @@ pub fn sys_init() {
 
 // sigwinch_handler sets a flag so the next read_stdin() injects a window
 // size report. Async-signal-safe: it only sets a flag, like the Rust version.
-fn sigwinch_handler(sig int) {
+fn sigwinch_handler(_ int) {
 	g_sys.inject_resize = true
 }
 
@@ -200,7 +200,7 @@ pub fn switch_modes() ! {
 	}
 
 	// Set inject_resize whenever we get a SIGWINCH.
-	C.signal(C.SIGWINCH, voidptr(sigwinch_handler))
+	unsafe { C.signal(C.SIGWINCH, voidptr(sigwinch_handler)) }
 
 	// Get the original terminal modes so we can disable raw mode on exit.
 	if C.tcgetattr(g_sys.stdout_fd, &g_sys.stdout_initial_termios) < 0 {
@@ -408,7 +408,7 @@ pub fn read_stdin(timeout_ms int) ?string {
 		if tail > 0 {
 			g_sys.utf8_len = tail
 			unsafe { C.memcpy(&g_sys.utf8_buf[0], &buf[buf.len - tail], usize(tail)) }
-			buf = buf[..buf.len - tail]
+			buf = unsafe { buf[..buf.len - tail] }
 		}
 	}
 

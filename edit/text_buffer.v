@@ -785,13 +785,13 @@ pub fn (mut b TextBuffer) read_file(path string) ! {
 	b.buffer.clear()
 
 	done := first_chunk_len == 0
-	mut chunk := first[..first_chunk_len]
+	mut chunk := first[0..first_chunk_len].clone()
 
 	// Strip the UTF-8 BOM, if this is a UTF-8 file.
 	if b.encoding == 'UTF-8' && chunk.len >= 3 && chunk[0] == 0xEF && chunk[1] == 0xBB
 		&& chunk[2] == 0xBF {
 		b.encoding = 'UTF-8 BOM'
-		chunk = chunk[3..]
+		chunk = chunk[3..].clone()
 	}
 	if chunk.len > 0 {
 		b.buffer.replace(0, 0, chunk)
@@ -1543,7 +1543,7 @@ fn (mut b TextBuffer) write(text []u8, at Cursor, raw bool) {
 			mut plain := line.clone()
 			if !raw && !b.indent_with_tabs {
 				end := memchr2(`\t`, `\t`, line, line_off)
-				plain = line[line_off..end]
+				plain = line[line_off..end].clone()
 			}
 
 			// Non-tabs are written as-is; the outer loop already handles
@@ -1584,7 +1584,7 @@ fn (mut b TextBuffer) write(text []u8, at Cursor, raw bool) {
 
 			outer: for off < limit {
 				mut chunk := b.buffer.read_forward(off)
-				chunk = chunk[..coord_min(CoordType(chunk.len), CoordType(limit - off))]
+				chunk = chunk[0..coord_min(CoordType(chunk.len), CoordType(limit - off))].clone()
 
 				for c in chunk {
 					if c == ` ` {
@@ -2769,12 +2769,12 @@ pub fn (mut b TextBuffer) render(origin Point, destination Rect, focused bool, m
 					for off < chunk.len && (chunk[off] == ` ` || chunk[off] == `\t`) {
 						is_tab := chunk[off] == `\t`
 						glyph_off := global_off + off
-						visualize := glyph_off >= selection_off_start
+						is_visualized := glyph_off >= selection_off_start
 							&& glyph_off < selection_off_end
 						mut whitespace := tab_whitespace
 						mut prefix_add := 0
 
-						if is_tab || visualize {
+						if is_tab || is_visualized {
 							// We need the character's visual position in order
 							// to either compute the tab size, or set the
 							// foreground color of the visualizer.
@@ -2787,7 +2787,7 @@ pub fn (mut b TextBuffer) render(origin Point, destination Rect, focused bool, m
 							tab_size = b.tab_size_eval(cursor_line.column)
 						}
 
-						if visualize {
+						if is_visualized {
 							// If the whitespace is part of the selection, we
 							// replace " " with "･" and "\t" with "￫".
 							if is_tab {

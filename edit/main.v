@@ -169,7 +169,7 @@ mut:
 }
 
 fn main() {
-	mut paths := os.args[1..]
+	mut paths := os.args[1..].clone()
 	if paths.len > 0 && (paths[0] == '-h' || paths[0] == '--help') {
 		println('usage: edit [file...]')
 		return
