@@ -45,3 +45,38 @@ fn test_word_select() {
 	assert beg5 == 6
 	assert end5 == 11
 }
+
+// ---- classify (navigation.v) ----------------------------------------------
+//
+// classify is the per-byte lookup the word navigation uses to decide
+// which kind of run a cursor sits on. It must agree with the Rust table
+// exactly so word_forward / word_backward / word_select stay correct.
+
+fn test_classify_whitespace() {
+	assert classify(` `) == .whitespace
+	assert classify(`\t`) == .whitespace
+}
+
+fn test_classify_newline() {
+	assert classify(`\n`) == .newline
+	assert classify(`\r`) == .newline
+}
+
+fn test_classify_separator() {
+	// One entry from each end of the word_separators string.
+	assert classify(`\``) == .separator
+	assert classify(`?`) == .separator
+	assert classify(`,`) == .separator
+	assert classify(`/`) == .separator
+}
+
+fn test_classify_word() {
+	// ASCII letters and digits are word bytes.
+	assert classify(`a`) == .word
+	assert classify(`Z`) == .word
+	assert classify(`0`) == .word
+	assert classify(`9`) == .word
+	// Non-ASCII high bytes default to .word (UTF-8 continuation/start).
+	assert classify(0x80) == .word
+	assert classify(0xff) == .word
+}

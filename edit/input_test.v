@@ -270,3 +270,30 @@ fn test_input_mixed_stream() {
 	assert inputs[1].kind == .keyboard && inputs[1].key == vk_up
 	assert inputs[2].kind == .keyboard && inputs[2].key == kbmod_ctrl | vk_a
 }
+
+// ---- clamp_coord (input.v) -------------------------------------------------
+
+fn test_clamp_coord_in_range() {
+	// In-range values pass through unchanged.
+	assert clamp_coord(5, 0, 10) == 5
+	assert clamp_coord(0, 0, 10) == 0
+	assert clamp_coord(10, 0, 10) == 10
+}
+
+fn test_clamp_coord_below_min() {
+	// Below the minimum clamps up to min.
+	assert clamp_coord(-3, 0, 10) == 0
+	assert clamp_coord(-100, -50, 50) == -50
+}
+
+fn test_clamp_coord_above_max() {
+	// Above the maximum clamps down to max.
+	assert clamp_coord(15, 0, 10) == 10
+	assert clamp_coord(100, -50, 50) == 50
+}
+
+fn test_clamp_coord_degenerate_range() {
+	// When min == max the value is forced to that single point.
+	assert clamp_coord(7, 5, 5) == 5
+	assert clamp_coord(0, 5, 5) == 5
+}

@@ -120,3 +120,45 @@ fn test_highlighter_long_line_skipped() {
 	assert spans.len >= 2
 	assert spans[0].kind == lsh_kind_storage_type
 }
+
+// ---- ASCII case-insensitive helpers (highlighter.v) -----------------------
+//
+// lsh_ascii_lower / lsh_eq_ignore_ascii_case are the per-byte primitives
+// the glob matcher uses to fold ASCII letter case without paying for a
+// full locale-aware lowercase.
+
+fn test_lsh_ascii_lower_uppercase_to_lowercase() {
+	// A-Z → a-z (add 32).
+	assert lsh_ascii_lower(`A`) == `a`
+	assert lsh_ascii_lower(`Z`) == `z`
+	assert lsh_ascii_lower(`M`) == `m`
+}
+
+fn test_lsh_ascii_lower_passthrough() {
+	// Lowercase letters, digits, and non-ASCII bytes pass through unchanged.
+	assert lsh_ascii_lower(`a`) == `a`
+	assert lsh_ascii_lower(`z`) == `z`
+	assert lsh_ascii_lower(`0`) == `0`
+	assert lsh_ascii_lower(`9`) == `9`
+	assert lsh_ascii_lower(` `) == ` `
+	assert lsh_ascii_lower(0x7f) == 0x7f
+	assert lsh_ascii_lower(0x80) == 0x80 // non-ASCII high byte
+}
+
+fn test_lsh_eq_ignore_ascii_case_matches() {
+	// Same letter, different case → true.
+	assert lsh_eq_ignore_ascii_case(`A`, `a`)
+	assert lsh_eq_ignore_ascii_case(`a`, `A`)
+	assert lsh_eq_ignore_ascii_case(`M`, `m`)
+}
+
+fn test_lsh_eq_ignore_ascii_case_rejects_different() {
+	// Different letters → false.
+	assert !lsh_eq_ignore_ascii_case(`A`, `B`)
+	assert !lsh_eq_ignore_ascii_case(`a`, `z`)
+	// Same case but different bytes → false.
+	assert !lsh_eq_ignore_ascii_case(`A`, `1`)
+	assert !lsh_eq_ignore_ascii_case(`0`, `1`)
+	// Non-ASCII bytes compared by their actual value (not folded).
+	assert !lsh_eq_ignore_ascii_case(0x80, 0x80 + 32)
+}
