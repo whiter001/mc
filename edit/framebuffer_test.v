@@ -224,3 +224,141 @@ fn test_fb_render_diff_is_small() {
 	assert out2.contains('\x1b[3;1H')
 	assert !out2.contains('\x1b[1;1H')
 }
+
+// ---- is_unsane / visualize / sanitize_control_chars ------------------
+//
+// These three helpers live in framebuffer.v but don't touch any
+// Framebuffer state — they map an input byte stream to a UTF-8
+// visualization plus a list of byte ranges the caller should
+// re-color. The Rust port is in render.rs; the tests below pin the
+// boundary semantics (which control characters get replaced, how
+// U+FFFD is treated, and the borrowed-vs-owned string flag).
+
+fn test_is_unsane_c0_and_del() {
+	// All C0 controls (0x00..0x1F) are unsane.
+	for ch in [rune(0x00), rune(0x01), rune(0x0a), rune(0x1f)] {
+		assert is_unsane([]u8{}, 0, 0, ch)
+	}
+	// DEL is unsane.
+	assert is_unsane([]u8{}, 0, 0, rune(0x7f))
+}
+
+fn test_is_unsane_c1_range() {
+	// All C1 controls (0x80..0x9F) are unsane.
+	for ch in [rune(0x80), rune(0x8a), rune(0x9f)] {
+		assert is_unsane([]u8{}, 0, 0, ch)
+	}
+}
+
+fn test_is_unsane_printable_ascii_is_sane() {
+	// Plain ASCII letters, digits, and printable symbols are sane.
+	for ch in [`a`, `Z`, `0`, `9`, ` `, `!`] {
+		assert !is_unsane([]u8{}, 0, 0, ch)
+	}
+}
+
+fn test_is_unsane_fffd_only_when_decoded_from_invalid_bytes() {
+	// U+FFFD from valid UTF-8 (the 3-byte sequence 0xEF 0xBF 0xBD)
+	// is treated as a legitimate source character and stays sane.
+	valid_fffd := [u8(0xEF), 0xBF, 0xBD]
+	assert !is_unsane(valid_fffd, 0, valid_fffd.len, rune(0xFFFD))
+	// The same rune from a single 0xEF byte (or any other invalid
+	// sequence) is the decoder's replacement and is unsane.
+	assert is_unsane([u8(0xEF)], 0, 1, rune(0xFFFD))
+	assert is_unsane([]u8{}, 0, 0, rune(0xFFFD))
+}
+
+fn test_is_unsane_high_unicode_is_sane() {
+	// CJK, emoji, combining marks all pass through as sane.
+	for ch in [rune(0x4e2d), rune(0x1F600), rune(0x0301)] {
+		assert !is_unsane([]u8{}, 0, 0, ch)
+	}
+}
+
+fn test_visualize_c0_to_block_glyph() {
+	// C0 controls map to U+2580..U+259F — the upper-half through
+	// quadrant-and-three-quarters block glyphs.
+	assert visualize(rune(0x00)) == '\u2580' // upper half block
+	assert visualize(rune(0x01)) == '\u2581' // lower one eighth block
+	assert visualize(rune(0x1f)) == '\u259F' // quadrant upper right and lower left and lower right
+}
+
+fn test_visualize_del_and_c1() {
+	// DEL (0x7F) and C1 controls (0x80..0x9F) use different glyphs.
+	assert visualize(rune(0x7f)) == '\u25A1' // white square
+	assert visualize(rune(0x80)) == '\u25A6' // square with horizontal fill
+	assert visualize(rune(0x9f)) == '\u25A6'
+}
+
+fn test_visualize_fffd_passes_through() {
+	// U+FFFD renders as itself so the caller can replace an
+	// already-replaced byte with the same glyph.
+	assert visualize(rune(0xFFFD)) == '\uFFFD'
+}
+
+fn test_sanitize_control_chars_empty_input() {
+	res := sanitize_control_chars([]u8{})
+	assert res.text == ''
+	assert res.unsane_ranges.len == 0
+	assert res.owned == false
+}
+
+fn test_sanitize_control_chars_all_sane_passes_through() {
+	// All-sane input is returned without an allocation: `owned`
+	// is false so the caller knows it can borrow without freeing.
+	res := sanitize_control_chars('hello world'.bytes())
+	assert res.text == 'hello world'
+	assert res.unsane_ranges.len == 0
+	assert res.owned == false
+}
+
+fn test_sanitize_control_chars_replaces_c0() {
+	// A single LF at the start is replaced with the U+258A glyph
+	// (LF is byte 0x0A; the C0 glyph is U+2580 | byte).
+	res := sanitize_control_chars('\nhi'.bytes())
+	assert res.text.len > 2
+	assert res.text[0..3] == '\u258A'
+	assert res.text[3..] == 'hi'
+	assert res.unsane_ranges.len == 1
+	assert res.unsane_ranges[0].start == 0
+	assert res.unsane_ranges[0].end == 3
+	assert res.owned == true
+}
+
+fn test_sanitize_control_chars_replaces_del() {
+	// DEL (0x7F) becomes the white-square glyph U+25A1.
+	res := sanitize_control_chars([u8(`a`), 0x7f, u8(`b`)])
+	assert res.text == 'a\u25A1b'
+	assert res.unsane_ranges.len == 1
+	assert res.unsane_ranges[0].start == 1
+	assert res.unsane_ranges[0].end == 4
+}
+
+fn test_sanitize_control_chars_replaces_invalid_byte_runs() {
+	// Raw 0x80 is an invalid UTF-8 start byte, so utf8_chars yields
+	// U+FFFD for it. is_unsane then sees an FFFD that wasn't backed
+	// by the real FFFD byte sequence and replaces it with the FFFD
+	// visualization. The end result is two consecutive FFFD bytes
+	// collapsed into a single FFFD in the output.
+	res := sanitize_control_chars([u8(`a`), 0x80, u8(`b`)])
+	assert res.text == 'a\uFFFDb'
+	assert res.unsane_ranges.len == 1
+}
+
+fn test_sanitize_control_chars_keeps_legitimate_fffd() {
+	// A genuinely-encoded U+FFFD stays as-is and does not show up
+	// in unsane_ranges (it's already a printable glyph).
+	res := sanitize_control_chars([u8(`a`), 0xEF, 0xBF, 0xBD, u8(`b`)])
+	assert res.text == 'a\uFFFDb'
+	assert res.unsane_ranges.len == 0
+}
+
+fn test_sanitize_control_chars_groups_consecutive_unsane() {
+	// Two consecutive control chars share a single range, not two.
+	res := sanitize_control_chars([u8(`a`), 0x01, 0x02, u8(`b`)])
+	assert res.text == 'a\u2581\u2582b'
+	// Just one range covers both glyphs.
+	assert res.unsane_ranges.len == 1
+	assert res.unsane_ranges[0].start == 1
+	assert res.unsane_ranges[0].end == 7
+}
