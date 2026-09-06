@@ -319,13 +319,59 @@ fn (mut ed Editor) handle_picker_key(key InputKey) {
 // Clicks elsewhere in the modal do nothing; the picker is only closed via
 // Escape or a successful open/save, like a modal in the Rust original.
 fn (mut ed Editor) handle_picker_mouse(mouse InputMouse) {
+	if mouse.state == .scroll {
+		if ed.picker_overwrite != '' {
+			return
+		}
+		if mouse.scroll.y != 0 {
+			// scroll the list: scroll.y < 0 moves selection up, ×3 mirrors main.v handle_mouse
+			delta := mouse.scroll.y * CoordType(3)
+			if ed.picker_autocomplete.len > 0 && ed.picker_overwrite == '' {
+				prev := ed.picker_autocomplete_sel
+				ed.picker_autocomplete_sel += int(delta)
+				if ed.picker_autocomplete_sel < 0 {
+					ed.picker_autocomplete_sel = 0
+				} else if ed.picker_autocomplete_sel >= ed.picker_autocomplete.len {
+					ed.picker_autocomplete_sel = ed.picker_autocomplete.len - 1
+				}
+				if ed.picker_autocomplete_sel == prev {
+					// Already at boundary: fall through to directory listing.
+					ed.picker_sel += int(delta)
+					if ed.picker_sel < 0 {
+						ed.picker_sel = 0
+					} else if ed.picker_sel >= ed.picker_entries.len {
+						ed.picker_sel = ed.picker_entries.len - 1
+					}
+					ed.picker_sync_name()
+				}
+			} else {
+				ed.picker_sel += int(delta)
+				if ed.picker_sel < 0 {
+					ed.picker_sel = 0
+				} else if ed.picker_sel >= ed.picker_entries.len {
+					ed.picker_sel = ed.picker_entries.len - 1
+				}
+				ed.picker_sync_name()
+			}
+			ed.picker_clamp_scroll()
+		}
+		return
+	}
 	if mouse.state != .left || mouse.drag || ed.picker_overwrite != '' {
 		return
 	}
 	r := ed.picker_rect()
+	// Rust modal_end semantics: click outside dismisses
+	if mouse.position.x < r.left || mouse.position.x >= r.right
+		|| mouse.position.y < r.top || mouse.position.y >= r.bottom {
+		ed.picker = false
+		return
+	}
 	suggestions_h := CoordType(ed.picker_autocomplete.len)
 	list_top := r.top + 3 + suggestions_h
-	if mouse.position.x < r.left || mouse.position.x >= r.right {
+	if mouse.position.y < r.top + 3 {
+		// Clicked on the title/path/name rows: dismiss.
+		ed.picker = false
 		return
 	}
 	if mouse.position.y >= r.top + 3 && mouse.position.y < list_top {

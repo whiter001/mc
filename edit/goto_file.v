@@ -140,15 +140,34 @@ fn (mut ed Editor) handle_goto_file_key(key InputKey) {
 }
 
 fn (mut ed Editor) handle_goto_file_mouse(mouse InputMouse) {
+	if mouse.state == .scroll {
+		if mouse.scroll.y != 0 {
+			// scroll the list: scroll.y < 0 moves selection up, ×3 mirrors main.v handle_mouse
+			delta := mouse.scroll.y * CoordType(3)
+			ed.goto_file_sel += int(delta)
+			if ed.goto_file_sel < 0 {
+				ed.goto_file_sel = 0
+			} else if ed.goto_file_sel >= ed.docs.len {
+				ed.goto_file_sel = ed.docs.len - 1
+			}
+			ed.goto_file_clamp_scroll()
+		}
+		return
+	}
 	if mouse.state != .left || mouse.drag {
 		return
 	}
 	r := ed.goto_file_rect()
 	list_right := ed.goto_file_list_right()
-	if mouse.position.x < r.left || mouse.position.x >= list_right {
+	// Rust modal_end semantics: click outside dismisses
+	if mouse.position.x < r.left || mouse.position.x >= r.right
+		|| mouse.position.y < r.top || mouse.position.y >= r.bottom {
+		ed.goto_file = false
 		return
 	}
-	if mouse.position.y < r.top + 1 || mouse.position.y >= r.bottom {
+	if mouse.position.x >= list_right || mouse.position.y == r.top {
+		// Click landed on the title row or scrollbar gutter: dismiss.
+		ed.goto_file = false
 		return
 	}
 	idx := ed.goto_file_scroll + int(mouse.position.y - (r.top + 1))

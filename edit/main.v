@@ -46,6 +46,8 @@ enum StatusButtonKind {
 	indentation
 	// Opens the language picker (Rust "language").
 	language
+	// Opens the Go to File modal (Rust "filename" button).
+	filename
 }
 
 // SearchButtonKind identifies a clickable search option toggle.
@@ -913,7 +915,7 @@ fn (mut ed Editor) close_active() {
 	ed.reset_view_state()
 }
 
-// next_document cycles to the next document (Ctrl+P).
+// next_document cycles to the next document (Ctrl+PageDown).
 fn (mut ed Editor) next_document() {
 	if ed.docs.len > 1 {
 		ed.active = (ed.active + 1) % ed.docs.len
@@ -1760,6 +1762,12 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	name := if ed.cur().path == '' { '[untitled]' } else { ed.cur().path }
 	right := (if b.is_dirty() { '* ' } else { '' }) + name
 
+	// Filename button (Rust "filename"): right-aligned clickable region that
+	// opens the Go to File modal; aligns with Rust draw_statusbar.rs:196.
+	right_text := right
+	right_start := ed.size.width - CoordType(right_text.len) - 1
+	ed.status_buttons << StatusButton{ kind: .filename, left: right_start, right: right_start + CoordType(right_text.len) }
+
 	// Middle: a status message when there is one, otherwise the key hints.
 	mut mid := ed.status
 	if mid == '' {
@@ -1901,7 +1909,19 @@ fn (mut ed Editor) handle_status_click(x CoordType) {
 				.language {
 					ed.open_language_picker()
 				}
+				.filename {
+					ed.open_goto_file()
+				}
 			}
+			return
+		}
+	}
+	// Filename button lives outside compute_status_buttons (it's right-aligned
+	// in draw_statusbar, not in the left group). Test it after the main loop
+	// so a click in either group is routed exactly once.
+	for btn in ed.status_buttons {
+		if btn.kind == .filename && x >= btn.left && x < btn.right {
+			ed.open_goto_file()
 			return
 		}
 	}
@@ -2022,9 +2042,17 @@ fn (mut ed Editor) handle_clipboard_warning_mouse(mouse InputMouse) {
 		return
 	}
 	box_w := CoordType(56)
+	box_h := CoordType(4)
 	left := coord_max((ed.size.width - box_w) / 2, 0)
-	top := coord_max((ed.size.height - 4) / 2, 0)
+	top := coord_max((ed.size.height - box_h) / 2, 0)
 	right := coord_min(left + box_w, ed.size.width)
+	bottom := coord_min(top + box_h, ed.size.height)
+	// Rust modal_end semantics: click outside dismisses (equivalent to "N").
+	if mouse.position.x < left || mouse.position.x >= right
+		|| mouse.position.y < top || mouse.position.y >= bottom {
+		ed.resolve_clipboard_warning(false, false)
+		return
+	}
 	// Buttons live on the 4th (last) row of the modal; the rect math mirrors
 	// the inline label '[ Always ]  [ Yes ]  [ No ]'.
 	if mouse.position.y != top + 3 {

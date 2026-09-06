@@ -249,10 +249,26 @@ fn (mut ed Editor) handle_language_picker_key(key InputKey) {
 // ListSelection::Activated and the goto_file modal's
 // click-to-activate behavior).
 fn (mut ed Editor) handle_language_picker_mouse(mouse InputMouse) {
+	status_y := ed.size.height - 1
+	list_h := ed.language_picker_list_height(status_y)
+	if mouse.state == .scroll {
+		if mouse.scroll.y != 0 {
+			// scroll the list: scroll.y < 0 moves selection up, ×3 mirrors main.v handle_mouse
+			delta := mouse.scroll.y * CoordType(3)
+			total := ed.language_picker_count()
+			ed.language_picker_sel += int(delta)
+			if ed.language_picker_sel < 0 {
+				ed.language_picker_sel = 0
+			} else if ed.language_picker_sel >= total {
+				ed.language_picker_sel = total - 1
+			}
+			ed.language_picker_clamp_scroll(list_h)
+		}
+		return
+	}
 	if mouse.state != .left || mouse.drag {
 		return
 	}
-	status_y := ed.size.height - 1
 	width := language_picker_width
 	mut left := CoordType(0)
 	for btn in ed.compute_status_buttons() {
@@ -269,15 +285,22 @@ fn (mut ed Editor) handle_language_picker_mouse(mouse InputMouse) {
 	if left < 0 {
 		left = 0
 	}
-	height := ed.language_picker_list_height(status_y) + 1 // title row + list
+	height := list_h + 1 // title row + list
 	mut top := status_y - height
 	if top < 1 {
 		top = 1
 	}
-	if mouse.position.x < left || mouse.position.x >= left + width {
+	right := left + width
+	bottom := top + height
+	// Rust modal_end semantics: click outside dismisses
+	if mouse.position.x < left || mouse.position.x >= right
+		|| mouse.position.y < top || mouse.position.y >= bottom {
+		ed.language_picker = false
 		return
 	}
-	if mouse.position.y < top + 1 || mouse.position.y >= top + height {
+	if mouse.position.y == top {
+		// Clicked the title row: dismiss.
+		ed.language_picker = false
 		return
 	}
 	pos := ed.language_picker_scroll + int(mouse.position.y - (top + 1))
