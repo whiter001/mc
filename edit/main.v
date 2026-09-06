@@ -127,9 +127,11 @@ mut:
 	menu_idx         int
 	menu_item_idx    int
 	// Go to File modal (goto_file.v).
-	goto_file        bool
-	goto_file_sel    int
-	goto_file_scroll int
+	goto_file            bool
+	goto_file_sel        int       // index into goto_file_filtered (not ed.docs)
+	goto_file_scroll     int
+	goto_file_filter     string    // 过滤字符串，空 = 不过滤
+	goto_file_filtered   []int     // 匹配过滤的文档 index 列表（按 ed.docs 顺序）
 	about_open       bool
 	// Set when the replace prompt pair collects a needle for
 	// find_and_replace_all (Edit > Replace All) instead of a single replace.
@@ -598,6 +600,14 @@ fn (mut ed Editor) handle_event(ev Input) {
 			}
 			.mouse {
 				ed.handle_goto_file_mouse(ev.mouse)
+			}
+			.text, .paste {
+				mut s := if ev.kind == .text { ev.text } else { ev.data.bytestr() }
+				idx := s.index_any('\r\n')
+				if idx >= 0 {
+					s = s[..idx]
+				}
+				ed.handle_goto_file_text(s)
 			}
 			else {}
 		}

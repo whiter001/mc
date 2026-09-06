@@ -55,11 +55,12 @@ fn test_goto_file_rect_clamped_to_viewport_when_smaller() {
 	assert r.bottom == 5
 }
 
-fn test_goto_file_list_height_subtracts_title() {
-	// The list gets one less row than the rect height (the title row).
+fn test_goto_file_list_height_subtracts_title_and_filter() {
+	// The list gets two rows less than the rect height: the title row
+	// and the filter input row.
 	ed := fresh_editor_with_buffer()
 	r := ed.goto_file_rect()
-	assert ed.goto_file_list_height() == r.height() - 1
+	assert ed.goto_file_list_height() == r.height() - 2
 }
 
 // ---- goto_file_entry_text ----------------------------------------------
@@ -114,11 +115,12 @@ fn test_goto_file_clamp_scroll_keeps_selection_visible_at_bottom() {
 	for i in 1 .. 30 {
 		ed.add_document('/tmp/x${i}.txt') or { return }
 	}
-	// 80x24 → list_h = 13, so a selection of 25 needs scroll >= 13.
+	// 80x24 → list_h = 12 (title + filter rows reserved), so a selection
+	// of 25 needs scroll >= 25 - 12 + 1 = 14.
 	ed.goto_file_scroll = 0
 	ed.goto_file_sel = 25
 	ed.goto_file_clamp_scroll()
-	assert ed.goto_file_scroll == 25 - 13 + 1
+	assert ed.goto_file_scroll == 25 - 12 + 1
 }
 
 // ---- goto_file_activate ------------------------------------------------
@@ -188,18 +190,18 @@ fn test_goto_file_key_prior_next_pages() {
 		ed.add_document('/tmp/x${i}.txt') or { return }
 	}
 	ed.open_goto_file()
-	// Page-down from 0 jumps by list_h (80x24 → 13).
+	// Page-down from 0 jumps by list_h (80x24 → 12 with title+filter reserved).
 	ed.handle_goto_file_key(InputKey(vk_next))
-	assert ed.goto_file_sel == 13
+	assert ed.goto_file_sel == 12
 	// Page-down again.
 	ed.handle_goto_file_key(InputKey(vk_next))
-	assert ed.goto_file_sel == 26
+	assert ed.goto_file_sel == 24
 	// Past-end clamp.
 	ed.handle_goto_file_key(InputKey(vk_next))
 	assert ed.goto_file_sel == 29
 	// Page-up jumps back by the same step.
 	ed.handle_goto_file_key(InputKey(vk_prior))
-	assert ed.goto_file_sel == 29 - 13
+	assert ed.goto_file_sel == 29 - 12
 }
 
 fn test_goto_file_key_return_activates() {
