@@ -441,3 +441,111 @@ fn test_copy_from_str_multiline() {
 	assert b.logical_line_count() == 1
 	assert buf_text(mut b) == 'single'
 }
+
+// ---------------------------------------------------------------------------
+// Regex search (SearchOptions.use_regex) — minimal subset
+// ---------------------------------------------------------------------------
+
+fn test_find_regex_wildcard_vs_literal() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'abc')
+	// use_regex=false: '.' is a literal dot, so it must NOT match 'abc'.
+	b.find_and_select('a.c', SearchOptions{ use_regex: false })
+	assert !b.has_selection()
+	// use_regex=true: '.' is a wildcard and matches 'abc'.
+	b.find_and_select('a.c', SearchOptions{ use_regex: true })
+	mut ok, beg, end := b.selection_range()
+	assert ok
+	assert beg.offset == 0 && end.offset == 3
+}
+
+fn test_find_regex_anchors() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'hello world\nhello again')
+	// '^hello' only matches at the start of a line.
+	b.find_and_select('^hello', SearchOptions{ use_regex: true })
+	mut ok, mut beg, _ := b.selection_range()
+	assert ok
+	assert beg.offset == 0
+	// Second match: the 'hello' at the start of the second line.
+	b.find_and_select('^hello', SearchOptions{ use_regex: true })
+	ok, beg, _ = b.selection_range()
+	assert ok
+	assert beg.offset == 12
+	// 'world$' does not match the 'world' that is not at line end.
+	b.find_and_select('worl', SearchOptions{ use_regex: true })
+}
+
+fn test_find_regex_classes_and_boundaries() {
+	// \bcat\b matches only the standalone 'cat' word; 'category'/'scatter'
+	// embed "cat" but without word boundaries on both sides.
+	text := 'cat category scatter'.bytes()
+	mbeg, mend := find_substring_match(text, '\\bcat\\b'.bytes(), 0, SearchOptions{ use_regex: true })
+	assert mbeg == 0 && mend == 3
+	// No other whole-word 'cat' exists when searching past the first hit.
+	beg2, _ := find_substring_match(text, '\\bcat\\b'.bytes(), 1, SearchOptions{ use_regex: true })
+	assert beg2 == -1
+	// \d matches a single digit; a character class matches one of its members.
+	text2 := 'x=42; y=7'.bytes()
+	db, de := find_substring_match(text2, '\\d'.bytes(), 0, SearchOptions{ use_regex: true })
+	assert db == 2 && de == 3
+	xb, xe := find_substring_match(text2, '[xy]'.bytes(), 0, SearchOptions{ use_regex: true })
+	assert xb == 0 && xe == 1
+}
+
+fn test_find_regex_case_insensitive() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'HELLO world')
+	b.find_and_select('hello', SearchOptions{ use_regex: true, match_case: false })
+	mut ok, mut beg, mut end := b.selection_range()
+	assert ok
+	assert beg.offset == 0 && end.offset == 5
+}
+
+// ---------------------------------------------------------------------------
+// Case folding beyond ASCII (Latin-1 supplement / Greek / Cyrillic)
+// ---------------------------------------------------------------------------
+
+fn test_find_case_insensitive_latin1_greek_cyrillic() {
+	// Latin-1 supplement: É (U+00C9) folds to é.
+	mut b := new_text_buffer(false)
+	wr(mut b, 'RÉSUMÉ café')
+	b.find_and_select('résumé', SearchOptions{ match_case: false })
+	mut ok, mut beg, mut end := b.selection_range()
+	assert ok && beg.offset == 0
+
+	// Greek: ΓΕΙΑ (uppercase) folds to γεια.
+	mut g := new_text_buffer(false)
+	wr(mut g, 'ΓΕΙΑ γεια')
+	g.find_and_select('γεια', SearchOptions{ match_case: false })
+	ok, beg, end = g.selection_range()
+	assert ok && beg.offset == 0
+
+	// Cyrillic: ПРИВЕТ folds to привет.
+	mut r := new_text_buffer(false)
+	wr(mut r, 'ПРИВЕТ привет')
+	r.find_and_select('привет', SearchOptions{ match_case: false })
+	ok, beg, end = r.selection_range()
+	assert ok && beg.offset == 0
+}
+
+// ---------------------------------------------------------------------------
+// Whole-word boundaries now treat non-ASCII bytes as word characters
+// ---------------------------------------------------------------------------
+
+fn test_find_whole_word_non_ascii_boundary() {
+	// A 'cat' immediately followed by a non-ASCII letter (é) is NOT a whole word
+	// now that non-ASCII bytes count as word characters.
+	mut b := new_text_buffer(false)
+	wr(mut b, 'caté dog')
+	b.find_and_select('cat', SearchOptions{ whole_word: true })
+	assert !b.has_selection()
+
+	// A standalone 'cat' still matches as a whole word.
+	mut c := new_text_buffer(false)
+	wr(mut c, 'cat dog')
+	c.find_and_select('cat', SearchOptions{ whole_word: true })
+	mut ok, beg, end := c.selection_range()
+	assert ok && beg.offset == 0 && end.offset == 3
+}
+

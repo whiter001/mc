@@ -106,6 +106,9 @@ mut:
 	last_replacement string
 	// Search options mirror the Rust search panel toggles.
 	search_options   SearchOptions
+	// search_failed mirrors Rust's state.search_success (inverted): true when
+	// the current prompt needle has no match, used to paint the prompt line red.
+	search_failed    bool
 	// The needle collected by the first Ctrl+R prompt, used by the second.
 	replace_needle   string
 	// Dirty-quit modal: pops up when Ctrl+W/Ctrl+Q is pressed on a dirty
@@ -261,12 +264,28 @@ fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 	}
 	text := ' ${label}${ed.prompt_text}'
 	ed.fb.replace_text(status_y, 0, ed.size.width, text)
-	ed.fb.reverse(mut Rect{
-		left:   0
-		top:    status_y
-		right:  ed.size.width
-		bottom: status_y + 1
-	})
+
+	// On a failed needle search, paint the whole prompt line red with bright
+	// white text (Rust draw_editor.rs:84-87, state.search_success).
+	failed := ed.search_failed && (ed.prompt_kind == .search || ed.prompt_kind == .replace)
+	if failed {
+		mut rect := Rect{
+			left:   0
+			top:    status_y
+			right:  ed.size.width
+			bottom: status_y + 1
+		}
+		ed.fb.blend_bg(mut rect, ed.fb.indexed(IndexedColor.red))
+		ed.fb.blend_fg(mut rect, ed.fb.indexed(IndexedColor.bright_white))
+	} else {
+		mut rect := Rect{
+			left:   0
+			top:    status_y
+			right:  ed.size.width
+			bottom: status_y + 1
+		}
+		ed.fb.reverse(mut rect)
+	}
 	// text.len is bytes, not terminal columns (wide glyphs count double),
 	// so measure the display width via MeasurementConfig.
 	mut cfg := new_measurement_config(StringDocument{ text: text })
@@ -310,19 +329,21 @@ fn (mut ed Editor) draw_search_prompt_options(options_y CoordType) {
 	text += segment + ' '
 
 	ed.fb.replace_text(options_y, 0, ed.size.width, text)
-	ed.fb.reverse(mut Rect{
+	mut opt_rect := Rect{
 		left:   0
 		top:    options_y
 		right:  ed.size.width
 		bottom: options_y + 1
-	})
+	}
+	ed.fb.reverse(mut opt_rect)
 	for btn in ed.search_buttons {
-		ed.fb.reverse(mut Rect{
+		mut btn_rect := Rect{
 			left:   btn.left
 			top:    options_y
 			right:  btn.right
 			bottom: options_y + 1
-		})
+		}
+		ed.fb.reverse(mut btn_rect)
 	}
 }
 
@@ -507,8 +528,14 @@ fn (mut ed Editor) handle_event(ev Input) {
 		return
 	}
 
-	// Any event dismisses the About dialog.
+	// The About dialog is dismissed by any user event, except the mouse
+	// release that pairs with the click that opened it. In SGR mouse mode
+	// that release arrives as state=none with drag=false; swallowing it
+	// keeps the dialog visible until the user actually does something.
 	if ed.about_open {
+		if ev.kind == .mouse && ev.mouse.state == .none && !ev.mouse.drag {
+			return
+		}
 		ed.about_open = false
 		return
 	}
@@ -591,8 +618,13 @@ fn (mut ed Editor) handle_event(ev Input) {
 				if idx >= 0 {
 					s = s[..idx]
 				}
-				ed.prompt_text += s
-			} else {
+			ed.prompt_text += s
+			// Incremental search: re-run the search as the needle changes
+			// (Rust editline change -> SearchAction::Search, draw_editor.rs:81).
+			if ed.prompt_kind == .search || ed.prompt_kind == .replace {
+				ed.run_prompt_search()
+			}
+		} else {
 				data := if ev.kind == .text { ev.text.bytes() } else { ev.data }
 				ed.docs[ed.active].buf.write_canon(data)
 				ed.preferred_column = ed.docs[ed.active].buf.cursor_visual_pos().x
@@ -633,12 +665,26 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 		.replace_with { ed.last_replacement }
 		else { '' }
 	}
+	// If the active document has a user selection, prefill the needle with it
+	// (Rust draw_editor.rs:59-62). This applies to the search and replace
+	// prompts, which both collect a needle.
+	if kind == .search || kind == .replace {
+		mut b := &ed.docs[ed.active].buf
+		if b.has_selection() {
+			if sel := b.extract_user_selection(false) {
+				ed.prompt_text = sel.bytestr()
+			}
+		}
+	}
+	// A freshly opened prompt starts in the "not failed" state.
+	ed.search_failed = false
 }
 
 fn (mut ed Editor) cancel_prompt() {
 	ed.mode = .edit
 	ed.prompt_text = ''
 	ed.search_buttons = []
+	ed.search_failed = false
 }
 
 fn (ed &Editor) prompt_search_needle() string {
@@ -652,11 +698,13 @@ fn (ed &Editor) prompt_search_needle() string {
 fn (mut ed Editor) run_prompt_search() {
 	needle := ed.prompt_search_needle()
 	if needle == '' {
+		ed.search_failed = false
 		return
 	}
 	mut b := &ed.docs[ed.active].buf
 	b.find_and_select(needle, ed.search_options)
 	b.make_cursor_visible()
+	ed.search_failed = !b.has_selection()
 	if !b.has_selection() {
 		ed.status = 'not found: ${needle}'
 	}
@@ -710,6 +758,11 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 					n++
 				}
 				ed.prompt_text = ed.prompt_text[..ed.prompt_text.len - n]
+				// Re-run the search after deleting a character (Rust re-searches
+				// on every editline change).
+				if ed.prompt_kind == .search || ed.prompt_kind == .replace {
+					ed.run_prompt_search()
+				}
 			}
 		}
 		vk_c {
@@ -1730,11 +1783,13 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	text += ' '.repeat(int(pad)) + mid + ' ' + right
 
 	ed.fb.replace_text(status_y, 0, ed.size.width, text)
-	ed.fb.reverse(mut Rect{ left: 0, top: status_y, right: ed.size.width, bottom: status_y + 1 })
+	mut rect := Rect{ left: 0, top: status_y, right: ed.size.width, bottom: status_y + 1 }
+	ed.fb.reverse(mut rect)
 	// Buttons are highlighted by reversing their own rect a second time
 	// (same trick as the menu bar), reading as raised against the inverted row.
 	for btn in ed.status_buttons {
-		ed.fb.reverse(mut Rect{ left: btn.left, top: status_y, right: btn.right, bottom: status_y + 1 })
+		mut btn_rect := Rect{ left: btn.left, top: status_y, right: btn.right, bottom: status_y + 1 }
+		ed.fb.reverse(mut btn_rect)
 	}
 }
 
@@ -1760,15 +1815,18 @@ fn (mut ed Editor) draw_indent_picker(status_y CoordType) {
 	}
 
 	// Reverse the whole block first so it reads as a floating panel.
-	ed.fb.reverse(mut Rect{ left: left, top: top, right: left + width, bottom: top + 2 })
+	mut rect := Rect{ left: left, top: top, right: left + width, bottom: top + 2 }
+	ed.fb.reverse(mut rect)
 
 	r1 := ' Tabs        Spaces '
 	mid := left + width / 2
 	ed.fb.replace_text(top, left, left + width, r1)
 	if b.indent_with_tabs() {
-		ed.fb.reverse(mut Rect{ left: left, top: top, right: mid, bottom: top + 1 })
+		mut tabs_rect := Rect{ left: left, top: top, right: mid, bottom: top + 1 }
+		ed.fb.reverse(mut tabs_rect)
 	} else {
-		ed.fb.reverse(mut Rect{ left: mid, top: top, right: left + width, bottom: top + 1 })
+		mut spaces_rect := Rect{ left: mid, top: top, right: left + width, bottom: top + 1 }
+		ed.fb.reverse(mut spaces_rect)
 	}
 
 	mut r2 := ' '
@@ -1782,7 +1840,8 @@ fn (mut ed Editor) draw_indent_picker(status_y CoordType) {
 	for w in 1 .. 9 {
 		if b.tab_size() == w {
 			col := left + CoordType(2 * (w - 1)) + 1
-			ed.fb.reverse(mut Rect{ left: col, top: top + 1, right: col + 2, bottom: top + 2 })
+			mut col_rect := Rect{ left: col, top: top + 1, right: col + 2, bottom: top + 2 }
+			ed.fb.reverse(mut col_rect)
 		}
 	}
 }

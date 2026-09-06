@@ -152,12 +152,13 @@ fn (mut ed Editor) draw_menubar() {
 		line += ' ${menu.title} '
 	}
 	ed.fb.replace_text(0, 0, ed.size.width, line)
-	ed.fb.reverse(mut Rect{
+	mut rect := Rect{
 		left:   0
 		top:    0
 		right:  ed.size.width
 		bottom: 1
-	})
+	}
+	ed.fb.reverse(mut rect)
 	if ed.menu_open || ed.menu_focus {
 		mut r := rects[ed.menu_idx]
 		ed.fb.reverse(mut r)

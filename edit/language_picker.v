@@ -319,12 +319,13 @@ fn (mut ed Editor) draw_language_picker(status_y CoordType) {
 	ed.language_picker_clamp_scroll(list_h)
 
 	// Whole panel reverse-videoed.
-	ed.fb.reverse(mut Rect{
+	mut rect := Rect{
 		left:   left
 		top:    top
 		right:  left + width
 		bottom: top + height
-	})
+	}
+	ed.fb.reverse(mut rect)
 
 	// Title row.
 	mut title_row := Rect{

@@ -7,6 +7,44 @@ module main
 // pure. Keeping them here keeps `cpulimit -l 200 -z -- ./build.sh test`
 // honest without dragging in the rest of the editor.
 
+fn test_run_prompt_search_sets_search_failed() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	wr(mut ed.docs[ed.active].buf, 'hello world')
+
+	// A needle with no match flips the failed flag (drives the red prompt line).
+	ed.mode = .prompt
+	ed.prompt_kind = .search
+	ed.prompt_text = 'zzz'
+	ed.run_prompt_search()
+	assert ed.search_failed == true
+
+	// A present needle clears the failed flag.
+	ed.prompt_text = 'world'
+	ed.run_prompt_search()
+	assert ed.search_failed == false
+}
+
+fn test_start_prompt_prefills_needle_from_selection() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	wr(mut ed.docs[ed.active].buf, 'hello world')
+	mut b := &ed.docs[ed.active].buf
+	// Select 'world' (offset 6..11 on line 0).
+	b.set_selection(OptSelection{ valid: true, beg: Point{ x: 6, y: 0 }, end: Point{ x: 11, y: 0 } })
+
+	// Ctrl+F/Ctrl+R with a selection prefills the needle with it.
+	ed.start_prompt(.search)
+	assert ed.prompt_text == 'world'
+	ed.start_prompt(.replace)
+	assert ed.prompt_text == 'world'
+
+	// With no selection, the needle falls back to last_search.
+	ed.last_search = 'foo'
+	b.set_selection(OptSelection{ valid: false })
+	ed.start_prompt(.search)
+	assert ed.prompt_text == 'foo'
+}
 fn test_clipboard_size_label_bytes() {
 	// Below 1 KiB is still formatted in KiB with one decimal.
 	assert clipboard_size_label(0) == '0 KiB'

@@ -105,8 +105,10 @@ pub mut:
 	match_case bool
 	// If true, the search matches whole words.
 	whole_word bool
-	// Reserved for API compatibility. Regex is NOT supported by this port:
-	// the search is always a literal byte-substring search.
+	// When true, `find_and_select` etc. interpret the pattern as a minimal
+	// regular expression (literals, `.`, `^`, `$`, `\b`, `\w`/`\W`, `\s`/`\S`,
+	// `\d`/`\D`, escapes, and `[...]` classes). When false (default), the
+	// pattern is a literal byte substring.
 	use_regex bool
 }
 
@@ -2338,37 +2340,135 @@ fn (mut b TextBuffer) undo_redo(undo bool) {
 
 // ---- Searching -------------------------------------------------------------------
 //
-// NOTE: the Rust original uses ICU regular expressions. This port implements a
-// pure byte-substring search. SearchOptions.use_regex is kept for API
-// compatibility but ignored; whole_word uses ASCII word boundaries; with
-// match_case=false only ASCII letters are folded.
+// The Rust original uses ICU regular expressions. This port implements a pure
+// byte-substring search by default, plus a minimal regex engine (see
+// find_regex_match) enabled via SearchOptions.use_regex. whole_word treats any
+// non-ASCII byte as a word character (matching ICU's Unicode `\w` for boundary
+// purposes), and match_case=false folds ASCII plus the common Latin-1, Greek
+// and Cyrillic uppercase blocks.
 
-// is_word_byte reports whether the byte is an ASCII word character
-// ([A-Za-z0-9_], same as regex `\b`).
+// is_word_byte reports whether the byte is a word character, matching the
+// Unicode `\b` semantics used by the Rust original's ICU `\w`/word boundary:
+// ASCII [A-Za-z0-9_], plus any non-ASCII byte (a UTF-8 lead or continuation
+// byte >= 0x80 is treated as part of a word — sufficient for boundary
+// detection without pulling in a Unicode table).
 fn is_word_byte(c u8) bool {
 	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || (c >= `0` && c <= `9`)
-		|| c == `_`
+		|| c == `_` || c >= 0x80
 }
 
-// fold_ascii lowercases ASCII letters in-place in a new slice.
-fn fold_ascii(text []u8) []u8 {
+// is_word_rune reports whether a codepoint is a word character (see
+// is_word_byte). Any non-ASCII codepoint is treated as a word character.
+fn is_word_rune(cp rune) bool {
+	c := u8(cp)
+	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || (c >= `0` && c <= `9`)
+		|| c == `_` || cp >= 0x80
+}
+
+fn is_space(c u8) bool {
+	return c == ` ` || c == `\t` || c == `\n` || c == `\r` || c == 0x0b || c == 0x0c
+}
+
+fn is_space_rune(cp rune) bool {
+	return is_space(u8(cp))
+}
+
+// utf8_decode decodes the codepoint starting at `s[i]` and returns it together
+// with its byte length. Invalid lead bytes are treated as a single-byte codepoint
+// (lossy, matching utf8_lossy's behavior elsewhere).
+fn utf8_decode(s []u8, i int) (rune, int) {
+	if i >= s.len {
+		return 0, 1
+	}
+	c := s[i]
+	if c < 0x80 {
+		return rune(c), 1
+	}
+	if c >= 0xf0 {
+		if i + 3 < s.len {
+			cp := (rune(c & 0x07) << 18) | (rune(s[i + 1] & 0x3f) << 12)
+				| (rune(s[i + 2] & 0x3f) << 6) | rune(s[i + 3] & 0x3f)
+			return cp, 4
+		}
+	} else if c >= 0xe0 {
+		if i + 2 < s.len {
+			cp := (rune(c & 0x0f) << 12) | (rune(s[i + 1] & 0x3f) << 6) | rune(s[i + 2] & 0x3f)
+			return cp, 3
+		}
+	} else if c >= 0xc0 {
+		if i + 1 < s.len {
+			cp := (rune(c & 0x1f) << 6) | rune(s[i + 1] & 0x3f)
+			return cp, 2
+		}
+	}
+	return rune(c), 1
+}
+
+// utf8_encode encodes a codepoint as its UTF-8 byte sequence.
+fn utf8_encode(cp rune) []u8 {
+	if cp < 0x80 {
+		return [u8(cp)]
+	} else if cp < 0x800 {
+		return [u8(0xc0 | (cp >> 6)), u8(0x80 | (cp & 0x3f))]
+	} else if cp < 0x10000 {
+		return [u8(0xe0 | (cp >> 12)), u8(0x80 | ((cp >> 6) & 0x3f)), u8(0x80 | (cp & 0x3f))]
+	}
+	return [u8(0xf0 | (cp >> 18)), u8(0x80 | ((cp >> 12) & 0x3f)), u8(0x80 | ((cp >> 6) & 0x3f)),
+		u8(0x80 | (cp & 0x3f))]
+}
+
+// fold_rune lowercases a codepoint for case-insensitive search. Covers ASCII
+// plus the common Latin-1 supplement, Greek and Cyrillic uppercase blocks using
+// small range tables (no ICU, no large generated table).
+fn fold_rune(cp rune) rune {
+	if cp >= 0x41 && cp <= 0x5a {
+		return cp + 0x20
+	}
+	if cp >= 0xc0 && cp <= 0xd6 {
+		return cp + 0x20
+	}
+	if cp >= 0xd8 && cp <= 0xde {
+		return cp + 0x20
+	}
+	if cp >= 0x391 && cp <= 0x3a9 {
+		return cp + 0x20
+	}
+	if cp >= 0x410 && cp <= 0x42f {
+		return cp + 0x20
+	}
+	return cp
+}
+
+// fold_text lowercases a UTF-8 byte string codepoint-by-codepoint. The result
+// has the same byte length as the input (uppercase and lowercase occupy the
+// same number of bytes in every block handled by fold_rune), so it is safe to
+// use for positional substring matching.
+fn fold_text(text []u8) []u8 {
 	if text.len == 0 {
 		return []u8{}
 	}
 	mut out := []u8{ len: text.len }
-	for i in 0..text.len {
-		c := text[i]
-		if c >= `A` && c <= `Z` {
-			out[i] = c + 32
-		} else {
-			out[i] = c
+	mut oi := 0
+	mut i := 0
+	for i < text.len {
+		cp, n := utf8_decode(text, i)
+		enc := utf8_encode(fold_rune(cp))
+		for b in enc {
+			out[oi] = b
+			oi++
 		}
+		i += n
 	}
 	return out
 }
 
 // find_substring_match finds the next match of `pattern` in `text` at or after
 // `start`. Returns (-1, -1) if there's no match.
+//
+// With `use_regex` disabled (the default) this is a pure literal byte-substring
+// search. With `use_regex` enabled, `pattern` is interpreted as a minimal
+// regular expression (see find_regex_match). `whole_word` and `match_case` are
+// applied to both paths.
 fn find_substring_match(text []u8, pattern []u8, start int, options SearchOptions) (int, int) {
 	if pattern.len == 0 || start > text.len {
 		return -1, -1
@@ -2378,11 +2478,15 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 		s = 0
 	}
 
+	if options.use_regex {
+		return find_regex_match(text, pattern, s, options)
+	}
+
 	mut text_folded := text.clone()
 	mut pattern_folded := pattern.clone()
 	if !options.match_case {
-		text_folded = fold_ascii(text)
-		pattern_folded = fold_ascii(pattern)
+		text_folded = fold_text(text)
+		pattern_folded = fold_text(pattern)
 	}
 
 	last := text_folded.len - pattern_folded.len
@@ -2398,7 +2502,7 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 			continue
 		}
 		// Whole-word check: the character before and after the match must not
-		// be an ASCII word character.
+		// be a word character (ASCII [A-Za-z0-9_], or any non-ASCII byte).
 		if options.whole_word {
 			if off > 0 && is_word_byte(text_folded[off - 1]) {
 				continue
@@ -2411,6 +2515,304 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 		return off, off + pattern.len
 	}
 	return -1, -1
+}
+
+// is_word_boundary reports whether position `t` in `text` is a word boundary:
+// exactly one of the characters on either side is a word character. A position
+// at the very start or end of the text (no character on that side) counts as a
+// boundary against a word character.
+fn is_word_boundary(text []u8, t int) bool {
+	left := if t > 0 { is_word_byte(text[t - 1]) } else { false }
+	right := if t < text.len { is_word_byte(text[t]) } else { false }
+	return left != right
+}
+
+// find_regex_match searches `text` for `pattern` (a minimal regex; see
+// re_seq_match) starting at byte offset `start`. `whole_word` and `match_case`
+// from `options` are applied. Returns (beg, end) byte offsets, or (-1, -1).
+fn find_regex_match(text []u8, pattern []u8, start int, options SearchOptions) (int, int) {
+	for off := start; off <= text.len; off++ {
+		end := re_seq_match(pattern, 0, text, off, options)
+		if end < 0 {
+			continue
+		}
+		// Whole-word check: the characters immediately around the match must
+		// not be word characters.
+		if options.whole_word {
+			if off > 0 && is_word_byte(text[off - 1]) {
+				continue
+			}
+			if end < text.len && is_word_byte(text[end]) {
+				continue
+			}
+		}
+		return off, end
+	}
+	return -1, -1
+}
+
+// re_seq_match tries to match the regex `pat` against `text` starting at byte
+// offset `ti`, from pattern position `pi` onward. On success it returns the end
+// byte offset of the match in `text`; on failure it returns -1. It implements a
+// minimal subset: literals, `.`, `^`, `$`, `\b`/`\B`, `\w`/`\W`, `\s`/`\S`,
+// `\d`/`\D`, escaped characters, and character classes `[...]` (with ranges and
+// negation). It does not support quantifiers or groups.
+fn re_seq_match(pat []u8, pi int, text []u8, ti int, options SearchOptions) int {
+	mut p := pi
+	mut t := ti
+	for p < pat.len {
+		c := pat[p]
+		match c {
+			`\\` {
+				p++
+				if p >= pat.len {
+					return -1
+				}
+				e := pat[p]
+				p++
+				nt := re_escape_match(e, text, t, options)
+				if nt < 0 {
+					return -1
+				}
+				t = nt
+			}
+			`.` {
+				// Any character except newline.
+				if t >= text.len {
+					return -1
+				}
+				cp, n := utf8_decode(text, t)
+				if cp == `\n` {
+					return -1
+				}
+				t += n
+				p++
+			}
+			`^` {
+				if !(t == 0 || (t > 0 && text[t - 1] == `\n`)) {
+					return -1
+				}
+				p++
+			}
+			`$` {
+				if !(t == text.len || text[t] == `\n`) {
+					return -1
+				}
+				p++
+			}
+			`[` {
+				ok, np, nt := re_class_match(pat, p, text, t, options)
+				if !ok {
+					return -1
+				}
+				p = np
+				t = nt
+			}
+			else {
+				if t >= text.len {
+					return -1
+				}
+				pcp, pn := utf8_decode(pat, p)
+				tcp, tn := utf8_decode(text, t)
+				if options.match_case {
+					if tcp != pcp {
+						return -1
+					}
+				} else {
+					if fold_rune(tcp) != fold_rune(pcp) {
+						return -1
+					}
+				}
+				t += tn
+				p += pn
+			}
+		}
+	}
+	return t
+}
+
+// re_escape_match handles an escape sequence `\<e>` at the matcher position.
+// Returns the new text offset, or -1 if the assertion/character does not match.
+fn re_escape_match(e u8, text []u8, t int, options SearchOptions) int {
+	match e {
+		`b` {
+			if !is_word_boundary(text, t) {
+				return -1
+			}
+			return t
+		}
+		`B` {
+			if is_word_boundary(text, t) {
+				return -1
+			}
+			return t
+		}
+		`w` {
+			if t >= text.len {
+				return -1
+			}
+			cp, n := utf8_decode(text, t)
+			if !is_word_rune(cp) {
+				return -1
+			}
+			return t + n
+		}
+		`W` {
+			if t >= text.len {
+				return -1
+			}
+			cp, n := utf8_decode(text, t)
+			if is_word_rune(cp) {
+				return -1
+			}
+			return t + n
+		}
+		`s` {
+			if t >= text.len || !is_space(text[t]) {
+				return -1
+			}
+			return t + 1
+		}
+		`S` {
+			if t >= text.len || is_space(text[t]) {
+				return -1
+			}
+			return t + 1
+		}
+		`d` {
+			if t >= text.len || !(text[t] >= `0` && text[t] <= `9`) {
+				return -1
+			}
+			return t + 1
+		}
+		`D` {
+			if t >= text.len || (text[t] >= `0` && text[t] <= `9`) {
+				return -1
+			}
+			return t + 1
+		}
+		`n` {
+			if t >= text.len || text[t] != `\n` {
+				return -1
+			}
+			return t + 1
+		}
+		`t` {
+			if t >= text.len || text[t] != `\t` {
+				return -1
+			}
+			return t + 1
+		}
+		`r` {
+			if t >= text.len || text[t] != `\r` {
+				return -1
+			}
+			return t + 1
+		}
+		else {
+			// Any other escaped byte is a literal (e.g. `\*` is a literal '*').
+			if t >= text.len {
+				return -1
+			}
+			pcp, _ := utf8_decode([e], 0)
+			tcp, tn := utf8_decode(text, t)
+			if options.match_case {
+				if tcp != pcp {
+					return -1
+				}
+			} else {
+				if fold_rune(tcp) != fold_rune(pcp) {
+					return -1
+				}
+			}
+			return t + tn
+		}
+	}
+}
+
+// re_class_match matches a character class starting at pattern position `p`
+// (which points at '['). Returns (matched, new_p after ']', new_t).
+fn re_class_match(pat []u8, p int, text []u8, t int, options SearchOptions) (bool, int, int) {
+	mut pi := p + 1
+	mut negated := false
+	if pi < pat.len && pat[pi] == `^` {
+		negated = true
+		pi++
+	}
+	if t >= text.len {
+		// Consume the class so the parser stays in sync, but report no match.
+		for pi < pat.len && pat[pi] != `]` {
+			pi++
+		}
+		if pi < pat.len && pat[pi] == `]` {
+			pi++
+		}
+		return false, pi, t
+	}
+	cp, n := utf8_decode(text, t)
+	mut found := false
+	for pi < pat.len && pat[pi] != `]` {
+		if pat[pi] == `\\` {
+			pi++
+			if pi >= pat.len {
+				break
+			}
+			e := pat[pi]
+			pi++
+			if re_class_char_matches(e, cp, options) {
+				found = true
+			}
+		} else {
+			lo_cp, lo_n := utf8_decode(pat, pi)
+			pi += lo_n
+			// Range `a-z` (a literal dash is matched literally when it is the
+			// first or last element, which we approximate by only treating '-'
+			// as a range operator when followed by another class element).
+			if pi < pat.len && pat[pi] == `-` && pi + 1 < pat.len && pat[pi + 1] != `]` {
+				pi++ // consume '-'
+				hi_cp, hi_n := utf8_decode(pat, pi)
+				pi += hi_n
+				lo := if options.match_case { lo_cp } else { fold_rune(lo_cp) }
+				hi := if options.match_case { hi_cp } else { fold_rune(hi_cp) }
+				fc := if options.match_case { cp } else { fold_rune(cp) }
+				if fc >= lo && fc <= hi {
+					found = true
+				}
+			} else if cp == lo_cp {
+				found = true
+			}
+		}
+	}
+	if pi < pat.len && pat[pi] == `]` {
+		pi++
+	}
+	if found != negated {
+		return true, pi, t + n
+	}
+	return false, pi, t
+}
+
+// re_class_char_matches tests whether codepoint `cp` satisfies the class escape
+// `e` (used inside `[...]`).
+fn re_class_char_matches(e u8, cp rune, options SearchOptions) bool {
+	match e {
+		`w` { return is_word_rune(cp) }
+		`W` { return !is_word_rune(cp) }
+		`s` { return is_space_rune(cp) }
+		`S` { return !is_space_rune(cp) }
+		`d` { return cp >= `0` && cp <= `9` }
+		`D` { return !(cp >= `0` && cp <= `9`) }
+		`n` { return cp == `\n` }
+		`t` { return cp == `\t` }
+		`r` { return cp == `\r` }
+		else {
+			pcp, _ := utf8_decode([e], 0)
+			if options.match_case {
+				return cp == pcp
+			}
+			return fold_rune(cp) == fold_rune(pcp)
+		}
+	}
 }
 
 // find_construct_search builds a cached search state for the given pattern.

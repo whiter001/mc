@@ -36,34 +36,10 @@ $if macos {
 	fn C.__errno_location() &int
 }
 
-// struct termios layouts. The kernel writes the full struct via tcgetattr,
-// so the declarations must match the platform ABI exactly.
-$if macos {
-	// darwin arm64: tcflag_t = unsigned long, speed_t = unsigned long, NCCS = 20
-	struct C.termios {
-	mut:
-		c_iflag  u64
-		c_oflag  u64
-		c_cflag  u64
-		c_lflag  u64
-		c_cc     [20]u8
-		c_ispeed u64
-		c_ospeed u64
-	}
-} $else {
-	// linux asm-generic (aarch64): tcflag_t = unsigned int, NCCS = 19
-	struct C.termios {
-	mut:
-		c_iflag  u32
-		c_oflag  u32
-		c_cflag  u32
-		c_lflag  u32
-		c_line   u8
-		c_cc     [19]u8
-		c_ispeed u32
-		c_ospeed u32
-	}
-}
+// NOTE: `struct C.termios` is now provided by the vlib `term` module (pulled
+// in transitively via `import os`), with an ABI-identical layout on both
+// darwin (u64 flag fields, NCCS=20) and linux (u32 flag fields, NCCS=19).
+// We no longer declare it here; re-declaring it clashes with vlib's version.
 
 struct C.pollfd {
 mut:
@@ -80,25 +56,9 @@ mut:
 	ws_ypixel u16
 }
 
-// Only the leading fields we actually read are declared; the trailing
-// padding keeps the buffer large enough for the kernel's full struct stat.
-$if macos {
-	// darwin arm64: dev_t = i32, then mode/nlink (u16 each), ino_t = u64
-	struct C.stat {
-		st_dev   i32
-		st_mode  u16
-		st_nlink u16
-		st_ino   u64
-		pad      [128]u8
-	}
-} $else {
-	// linux aarch64: dev_t = u64, ino_t = u64
-	struct C.stat {
-		st_dev u64
-		st_ino u64
-		pad    [128]u8
-	}
-}
+// NOTE: `struct C.stat` is now provided by the vlib `os` module (with the
+// full kernel layout, including the st_dev/st_mode/st_ino fields we read).
+// We no longer declare it here; re-declaring it clashes with vlib's version.
 
 struct SysState {
 mut:

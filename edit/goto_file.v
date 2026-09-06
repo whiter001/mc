@@ -39,6 +39,22 @@ fn (mut ed Editor) goto_file_clamp_scroll() {
 	}
 }
 
+// goto_file_has_scrollbar reports whether the document list overflows the
+// modal, in which case the rightmost column is reserved for a scrollbar.
+fn (ed &Editor) goto_file_has_scrollbar() bool {
+	return ed.docs.len > ed.goto_file_list_height()
+}
+
+// goto_file_list_right returns the exclusive right edge of the list rows,
+// leaving room for the scrollbar when there is one.
+fn (ed &Editor) goto_file_list_right() CoordType {
+	r := ed.goto_file_rect()
+	if ed.goto_file_has_scrollbar() {
+		return r.right - 1
+	}
+	return r.right
+}
+
 fn (ed &Editor) goto_file_entry_text(idx int) string {
 	if idx < 0 || idx >= ed.docs.len {
 		return ''
@@ -128,7 +144,8 @@ fn (mut ed Editor) handle_goto_file_mouse(mouse InputMouse) {
 		return
 	}
 	r := ed.goto_file_rect()
-	if mouse.position.x < r.left || mouse.position.x >= r.right {
+	list_right := ed.goto_file_list_right()
+	if mouse.position.x < r.left || mouse.position.x >= list_right {
 		return
 	}
 	if mouse.position.y < r.top + 1 || mouse.position.y >= r.bottom {
@@ -153,23 +170,40 @@ fn (mut ed Editor) draw_goto_file() {
 	ed.fb.replace_text(r.top, r.left, r.right, picker_fit_line(' Go to File ', width))
 	ed.fb.reverse(mut row)
 	list_h := ed.goto_file_list_height()
+	list_right := ed.goto_file_list_right()
 	for i in 0 .. list_h {
 		idx := ed.goto_file_scroll + i
-		if idx >= ed.docs.len {
-			break
+		// Rows past the last document are painted blank on purpose:
+		// leaving them untouched lets the editor text underneath show
+		// through the modal.
+		line := if idx >= 0 && idx < ed.docs.len {
+			picker_fit_line(ed.goto_file_entry_text(idx), list_right - r.left)
+		} else {
+			picker_fit_line('', list_right - r.left)
 		}
 		y := r.top + 1 + CoordType(i)
-		line := picker_fit_line(ed.goto_file_entry_text(idx), width)
-		ed.fb.replace_text(y, r.left, r.right, line)
+		ed.fb.replace_text(y, r.left, list_right, line)
 		mut item_row := Rect{
 			left: r.left
 			top: y
-			right: r.right
+			right: list_right
 			bottom: y + 1
 		}
 		ed.fb.reverse(mut item_row)
 		if idx == ed.goto_file_sel {
 			ed.fb.reverse(mut item_row)
 		}
+	}
+
+	if ed.goto_file_has_scrollbar() {
+		// After the reversed rows: draw_scrollbar sets explicit fg/bg
+		// colors that reverse() would otherwise swap.
+		track := Rect{
+			left: r.right - 1
+			top: r.top + 1
+			right: r.right
+			bottom: r.bottom
+		}
+		ed.fb.draw_scrollbar(r, track, ed.goto_file_scroll, ed.docs.len)
 	}
 }
