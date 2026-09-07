@@ -945,6 +945,23 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 				ed.find_previous()
 			}
 		}
+		vk_up, vk_down {
+			// ↑/↓ step through hits without the F-keys: Mac keyboards need
+			// fn+F3 unless the system "standard function keys" toggle is on,
+			// and terminals can't distinguish Shift+Enter without the kitty
+			// keyboard protocol.
+			if mods == kbmod_none && ed.prompt_kind != .goto_line {
+				needle := ed.prompt_search_needle()
+				if needle != '' {
+					ed.last_search = needle
+				}
+				if vk == vk_up {
+					ed.find_previous()
+				} else {
+					ed.find_next()
+				}
+			}
+		}
 		vk_back {
 			if mods == kbmod_none {
 				ed.prompt_backspace()

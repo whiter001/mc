@@ -55,5 +55,5 @@ P1 — 性能
 - [ ] `find_and_replace_all` 去掉循环内 `read_all()`：一次扫描收集全部命中区间，再按累计偏移 delta 逐个替换
 
 P2 — 可选增强
-- [x] Shift+F3 反向查找（Rust 无，V 侧自加）
+- [x] Shift+F3 反向查找（Rust 无，V 侧自加）；prompt 内 ↑/↓ = 上/下一个（免 fn 键替代）
 - [ ] 命中计数显示（如 `3/17`）
