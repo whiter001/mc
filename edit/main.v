@@ -693,6 +693,22 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 	ed.search_failed = false
 }
 
+// start_replace opens the replace prompt pair. With a selection, Rust fills
+// the needle from it and puts the focus on the replacement field right away
+// (draw_editor.rs:59-62), so here the second prompt opens directly.
+fn (mut ed Editor) start_replace() {
+	mut b := &ed.docs[ed.active].buf
+	if b.has_selection() {
+		if sel := b.extract_user_selection(false) {
+			ed.replace_needle = sel.bytestr()
+			ed.last_search = ed.replace_needle
+			ed.start_prompt(.replace_with)
+			return
+		}
+	}
+	ed.start_prompt(.replace)
+}
+
 fn (mut ed Editor) cancel_prompt() {
 	ed.mode = .edit
 	ed.prompt_text = ''
@@ -710,6 +726,9 @@ fn (ed &Editor) prompt_search_needle() string {
 
 fn (mut ed Editor) run_prompt_search() {
 	needle := ed.prompt_search_needle()
+	// The Rust editline writes state.search_needle as you type, so the needle
+	// stays active even if the prompt is dismissed with Escape.
+	ed.last_search = needle
 	if needle == '' {
 		ed.search_failed = false
 		return
@@ -760,6 +779,15 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 		vk_return {
 			if mods == kbmod_none {
 				ed.confirm_prompt()
+			} else if mods == kbmod_ctrl_alt {
+				// Ctrl+Alt+Enter in the replacement field replaces every
+				// occurrence (Rust draw_editor.rs:109, SearchAction::ReplaceAll).
+				// The needle field only handles plain Enter in Rust, so this
+				// stays limited to the second prompt.
+				if ed.prompt_kind == .replace_with {
+					ed.replace_all = true
+					ed.confirm_prompt()
+				}
 			}
 		}
 		vk_f3 {
@@ -817,6 +845,7 @@ fn (mut ed Editor) confirm_prompt() {
 	match kind {
 		.search {
 			if text == '' {
+				ed.move_cursor_to_selection_beg()
 				return
 			}
 			ed.last_search = text
@@ -864,9 +893,22 @@ fn (mut ed Editor) confirm_prompt() {
 	}
 }
 
+// move_cursor_to_selection_beg drops the cursor at the start of the selection.
+// Rust's find_and_select("") does exactly this and nothing else
+// (buffer/mod.rs:1126-1130): an empty needle clears no selection, it just
+// rewinds the cursor.
+fn (mut ed Editor) move_cursor_to_selection_beg() {
+	mut b := &ed.docs[ed.active].buf
+	if b.has_selection() {
+		b.cursor_move_to_logical(b.selection.beg)
+		b.make_cursor_visible()
+	}
+}
+
 // find_next selects the next occurrence of the last search term (F3).
 fn (mut ed Editor) find_next() {
 	if ed.last_search == '' {
+		ed.move_cursor_to_selection_beg()
 		return
 	}
 	mut b := &ed.docs[ed.active].buf
@@ -1643,7 +1685,15 @@ fn (mut ed Editor) make_cursor_visible() {
 	mut b := &ed.docs[ed.active].buf
 	cursor := b.cursor_visual_pos()
 	text_width := ed.text_width()
-	viewport_height := ed.size.height - 2 // minus the menu bar and status line
+	// ...minus the menu bar and status line.
+	mut viewport_height := ed.size.height - 2
+	// The search options row is drawn over the last text row
+	// (draw_search_prompt_options at status_y - 1), so that row is not
+	// actually usable while a search prompt is open. Rust reserves the same
+	// space via height_reduction (draw_editor.rs:21-25).
+	if ed.mode == .prompt && ed.prompt_kind != .goto_line {
+		viewport_height--
+	}
 
 	mut x := ed.scroll.x
 	mut y := ed.scroll.y

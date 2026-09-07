@@ -2857,8 +2857,14 @@ fn (mut b TextBuffer) find_select_next(mut search ActiveSearch, offset int, wrap
 	}
 
 	if range_beg >= 0 {
-		// Now the search offset is no more at the start of the buffer.
-		search.next_search_offset = range_end
+		// A zero-width hit (e.g. the `^` anchor) would be found again at the
+		// same offset, so resume one grapheme past it. ICU's regex iterator
+		// advances on its own in the Rust original; here it's explicit.
+		search.next_search_offset = if range_end == range_beg {
+			b.find_advance_past_zero_width(range_end)
+		} else {
+			range_end
+		}
 
 		beg_cursor := b.cursor_move_to_offset_internal(b.cursor, range_beg)
 		end_cursor := b.cursor_move_to_offset_internal(beg_cursor, range_end)
