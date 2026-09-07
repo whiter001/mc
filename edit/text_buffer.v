@@ -96,6 +96,10 @@ mut:
 	next_search_offset   int
 	// If we know there were no hits, we can skip searching.
 	no_matches           bool
+	// When true the search state was created by a reverse Shift+F3 lookup.
+	// Kept separate from SearchOptions so SearchOptions equality (which gates
+	// search-state reuse) stays stable for the common forward case.
+	reverse              bool
 }
 
 // SearchOptions are the options for a search operation.
@@ -2517,6 +2521,49 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 	return -1, -1
 }
 
+// find_substring_match_before is the reverse counterpart of find_substring_match:
+// it returns the largest match whose `range_end` is at or before `end_at` and
+// whose `range_beg` is strictly before `end_at`. The `range_beg < end_at`
+// exclusion is what stops Shift+F3 from spinning in place on zero-width
+// patterns (`^`, `$`, `\b`): a hit sitting exactly on `end_at` is the match
+// we're currently sitting on, and a backwards step must move off it. When
+// several candidates end at the same offset, the rightmost (largest
+// `range_beg`) wins, mirroring how Shift+F3 steps backward through repeated
+// hits. The scan resumes one past each candidate's start so overlapping hits
+// (e.g. "aa" inside "aaa") are still considered. Side effect: when wrapping to
+// the end of the buffer, a zero-width hit at EOF (beg == end == text.len) has
+// beg == end_at and is therefore rejected; that's acceptable since there's
+// nothing to select after it.
+fn find_substring_match_before(text []u8, pattern []u8, end_at int, options SearchOptions) (int, int) {
+	if pattern.len == 0 || end_at <= 0 {
+		return -1, -1
+	}
+	mut max_end := -1
+	mut max_beg := -1
+	mut off := 0
+	for off < end_at {
+		beg, end := find_substring_match(text, pattern, off, options)
+		if beg < 0 {
+			break
+		}
+		// Accept only candidates that end at or before `end_at` and do not
+		// begin exactly at `end_at` (the currently-selected hit).
+		if end <= end_at && beg < end_at {
+			if end > max_end || (end == max_end && beg > max_beg) {
+				max_end = end
+				max_beg = beg
+			}
+		}
+		// Resume just past this match's start so any overlapping candidate
+		// starting later is still examined.
+		off = beg + 1
+	}
+	if max_beg < 0 {
+		return -1, -1
+	}
+	return max_beg, max_end
+}
+
 // is_word_boundary reports whether position `t` in `text` is a word boundary:
 // exactly one of the characters on either side is a word character. A position
 // at the very start or end of the text (no character on that side) counts as a
@@ -2825,7 +2872,16 @@ fn (b TextBuffer) find_construct_search(pattern string, options SearchOptions) A
 		selection_generation: 0
 		next_search_offset:   0
 		no_matches:           false
+		reverse:              false
 	}
+}
+
+// find_construct_search_reverse mirrors find_construct_search but flips the
+// reverse flag so the cached state is treated as a backward search.
+fn (b TextBuffer) find_construct_search_reverse(pattern string, options SearchOptions) ActiveSearch {
+	mut s := b.find_construct_search(pattern, options)
+	s.reverse = true
+	return s
 }
 
 // find_select_next finds the next match at or after `offset` and selects it.
@@ -2887,6 +2943,62 @@ fn (mut b TextBuffer) find_select_next(mut search ActiveSearch, offset int, wrap
 	return false
 }
 
+// find_select_prev finds the previous match ending at or before `offset` and
+// selects it. `offset` is an exclusive upper bound: matches beginning at
+// `offset` are not returned, so a zero-width hit sitting exactly on the
+// current position isn't selected again. With `wrap`, the search wraps around
+// to the end of the buffer. Returns whether a match was found.
+fn (mut b TextBuffer) find_select_prev(mut search ActiveSearch, offset int, wrap bool) bool {
+	// Refresh the search start offset if the buffer changed or the offset
+	// moved.
+	if search.buffer_generation != b.buffer.generation() {
+		search.buffer_generation = b.buffer.generation()
+		search.next_search_offset = offset
+	} else if search.next_search_offset != offset {
+		search.next_search_offset = offset
+	}
+
+	mut range_beg := -1
+	mut range_end := 0
+	text := b.read_all()
+
+	range_beg, range_end = find_substring_match_before(text, search.pattern.bytes(),
+		search.next_search_offset, search.options)
+
+	// If we ran off the start of the buffer, and we know that there's
+	// something to find, start the search again from the end (= wrap around).
+	if range_beg < 0 && wrap && search.next_search_offset != text.len {
+		search.next_search_offset = text.len
+		range_beg, range_end = find_substring_match_before(text, search.pattern.bytes(),
+			text.len, search.options)
+	}
+
+	if range_beg >= 0 {
+		// A zero-width hit is excluded next time by the beg < offset rule; a
+		// real hit is excluded because the search resumes at its own `beg`.
+		search.next_search_offset = range_beg
+
+		beg_cursor := b.cursor_move_to_offset_internal(b.cursor, range_beg)
+		end_cursor := b.cursor_move_to_offset_internal(beg_cursor, range_end)
+
+		b.set_cursor(end_cursor)
+		b.make_cursor_visible()
+
+		search.selection_generation = b.set_selection(OptSelection{
+			valid: true
+			beg:   beg_cursor.logical_pos
+			end:   end_cursor.logical_pos
+		})
+		return true
+	}
+
+	// Avoid searching through the entire document again if we know there's
+	// nothing to find.
+	search.no_matches = true
+	search.selection_generation = b.set_selection(OptSelection{})
+	return false
+}
+
 // find_advance_past_zero_width computes the offset to resume searching from
 // after replacing a zero-width match. Returns 0 if we're at the end of the
 // buffer.
@@ -2902,8 +3014,15 @@ fn (b TextBuffer) find_advance_past_zero_width(offset int) int {
 // find_and_select finds the next occurrence of the given `pattern` and selects
 // it.
 pub fn (mut b TextBuffer) find_and_select(pattern string, options SearchOptions) {
-	// When the search input changes we must reset the search.
-	if b.search.valid && (b.search.pattern != pattern || b.search.options != options) {
+	// Switching from a reverse (Shift+F3) search back to a forward one must
+	// step off the hit the reverse search selected, not land on it again: the
+	// forward search resumes from the selection end in that case.
+	resume_from_end := b.search.valid && b.search.reverse
+		&& b.search.selection_generation == b.selection_generation
+
+	// When the search input changes, or the cached state was built for a
+	// reverse search, we must reset the search.
+	if b.search.valid && (b.search.reverse || b.search.pattern != pattern || b.search.options != options) {
 		b.search = ActiveSearch{}
 	}
 
@@ -2932,6 +3051,58 @@ pub fn (mut b TextBuffer) find_and_select(pattern string, options SearchOptions)
 	mut next_search_offset := b.search.next_search_offset
 	if b.search.selection_generation != b.selection_generation {
 		if b.selection.valid {
+			beg, end := minmax_points(b.selection.beg, b.selection.end)
+			if resume_from_end {
+				off := b.cursor_move_to_logical_internal(b.cursor, end).offset
+				// A zero-width hit (e.g. `^`) has beg == end; starting from
+				// there would find the same hit again, so move past it.
+				next_search_offset = if beg == end { b.find_advance_past_zero_width(off) } else { off }
+			} else {
+				next_search_offset = b.cursor_move_to_logical_internal(b.cursor, beg).offset
+			}
+		} else {
+			next_search_offset = b.cursor.offset
+		}
+	}
+
+	b.find_select_next(mut b.search, next_search_offset, true)
+}
+
+// find_and_select_prev finds the previous occurrence of the given `pattern` and
+// selects it. It is the reverse counterpart of find_and_select, used by
+// Shift+F3.
+pub fn (mut b TextBuffer) find_and_select_prev(pattern string, options SearchOptions) {
+	// When the search input changes, or the cached state was built for a
+	// forward search, we must reset the search.
+	if b.search.valid && (!b.search.reverse || b.search.pattern != pattern || b.search.options != options) {
+		b.search = ActiveSearch{}
+	}
+
+	// When transitioning from some search to no search, we must clear the
+	// selection.
+	if pattern.len == 0 {
+		if b.selection.valid {
+			b.cursor_move_to_logical(b.selection.beg)
+		}
+		return
+	}
+
+	if !b.search.valid {
+		b.search = b.find_construct_search_reverse(pattern, options)
+	}
+
+	// If we previously searched through the entire document and found 0
+	// matches, then we can avoid searching again.
+	if b.search.no_matches {
+		return
+	}
+
+	// If the user moved the cursor since the last search, but the needle
+	// remained the same, we still need to move the start of the search to the
+	// new cursor position.
+	mut next_search_offset := b.search.next_search_offset
+	if b.search.selection_generation != b.selection_generation {
+		if b.selection.valid {
 			beg, _ := minmax_points(b.selection.beg, b.selection.end)
 			next_search_offset = b.cursor_move_to_logical_internal(b.cursor, beg).offset
 		} else {
@@ -2939,7 +3110,7 @@ pub fn (mut b TextBuffer) find_and_select(pattern string, options SearchOptions)
 		}
 	}
 
-	b.find_select_next(mut b.search, next_search_offset, true)
+	b.find_select_prev(mut b.search, next_search_offset, true)
 }
 
 // find_and_replace finds the next occurrence of the given `pattern` and

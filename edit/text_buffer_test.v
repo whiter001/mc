@@ -319,6 +319,81 @@ fn test_find_and_select_next() {
 	assert end.offset == 17
 }
 
+fn test_find_and_select_prev() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'hello world hello')
+
+	// With the cursor at the start and no selection, Shift+F3 wraps around
+	// and finds the last occurrence first.
+	b.find_and_select_prev('hello', SearchOptions{})
+	mut ok, mut beg, mut end := b.selection_range()
+	assert ok
+	assert beg.offset == 12
+	assert end.offset == 17
+
+	// Stepping back again finds the first occurrence.
+	b.find_and_select_prev('hello', SearchOptions{})
+	ok, beg, end = b.selection_range()
+	assert ok
+	assert beg.offset == 0
+	assert end.offset == 5
+
+	// Stepping back past the first hit wraps around to the end again.
+	b.find_and_select_prev('hello', SearchOptions{})
+	ok, beg, end = b.selection_range()
+	assert ok
+	assert beg.offset == 12
+	assert end.offset == 17
+}
+
+fn test_find_and_select_direction_switch() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'aa bb aa bb aa')
+
+	// Forward twice lands on the second "aa".
+	b.find_and_select('aa', SearchOptions{})
+	b.find_and_select('aa', SearchOptions{})
+	mut ok, mut beg, _ := b.selection_range()
+	assert ok
+	assert beg.offset == 6
+
+	// Shift+F3 steps back to the first hit.
+	b.find_and_select_prev('aa', SearchOptions{})
+	ok, beg, _ = b.selection_range()
+	assert ok
+	assert beg.offset == 0
+
+	// F3 after Shift+F3 steps forward off the current hit instead of
+	// landing on it again.
+	b.find_and_select('aa', SearchOptions{})
+	ok, beg, _ = b.selection_range()
+	assert ok
+	assert beg.offset == 6
+}
+
+fn test_find_and_select_prev_zero_width() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'aaa\nbbb\nccc\n')
+
+	// `^` matches at every line start. Zero-width hits are stored as an
+	// invalid (empty) selection, so assert on the cursor position, which
+	// find_select_* places at the match end.
+	b.find_and_select('^', SearchOptions{ use_regex: true })
+	assert b.cursor.offset == 0
+	b.find_and_select('^', SearchOptions{ use_regex: true })
+	assert b.cursor.offset == 4
+
+	// Reverse search must step off the current zero-width hit instead of
+	// spinning in place.
+	b.find_and_select_prev('^', SearchOptions{ use_regex: true })
+	assert b.cursor.offset == 0
+
+	// Stepping back past the first line start wraps to the last one; the
+	// zero-width hit at EOF (offset 12) is not selectable.
+	b.find_and_select_prev('^', SearchOptions{ use_regex: true })
+	assert b.cursor.offset == 8
+}
+
 fn test_find_and_select_case_insensitive() {
 	mut b := new_text_buffer(false)
 	wr(mut b, 'Hello World')

@@ -320,6 +320,14 @@ fn (mut p InputParser) next() ?Input {
 							key:  InputKey(vk) | parse_modifiers(csi)
 						}
 					}
+				} else if fb >= `P` && fb <= `S` {
+					// CSI modifier form of F1-F4 (final bytes P/Q/R/S). Used by
+					// Shift+F3 == ESC[1;2R among others.
+					vk := vk_f1 + u32(fb - `P`)
+					return Input{
+						kind: .keyboard
+						key:  InputKey(vk) | parse_modifiers(csi)
+					}
 				} else if fb == `Z` {
 					return Input{
 						kind: .keyboard
@@ -339,10 +347,10 @@ fn (mut p InputParser) next() ?Input {
 						u8(0),
 						u8(0),
 						u8(0),
-						u8(0),
-						u8(0),
-						u8(0),
-						u8(0),
+						u8(vk_f1), // 11
+						u8(vk_f2), // 12
+						u8(vk_f3), // 13
+						u8(vk_f4), // 14
 						u8(vk_f5), // 15
 						u8(0),
 						u8(vk_f6), // 17

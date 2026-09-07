@@ -132,6 +132,14 @@ fn test_input_shift_tab() {
 	assert inputs[0].key == kbmod_shift | vk_tab
 }
 
+fn test_input_shift_f3() {
+	mut p := new_input_parser()
+	// xterm CSI modifier form of F1-F4 (final bytes P/Q/R/S).
+	assert p.parse('\x1b[1;2R')[0].key == kbmod_shift | vk_f3
+	// rxvt-style tilde form.
+	assert p.parse('\x1b[13;2~')[0].key == kbmod_shift | vk_f3
+}
+
 fn test_input_sgr_mouse_press_release() {
 	mut p := new_input_parser()
 	// Button 0 (left) pressed at column 10, row 5 (1-based).

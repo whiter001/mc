@@ -937,6 +937,12 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 					ed.last_search = needle
 				}
 				ed.find_next()
+			} else if mods == kbmod_shift {
+				needle := ed.prompt_search_needle()
+				if needle != '' {
+					ed.last_search = needle
+				}
+				ed.find_previous()
 			}
 		}
 		vk_back {
@@ -1087,6 +1093,22 @@ fn (mut ed Editor) find_next() {
 	b.make_cursor_visible()
 	// Mirror Rust's state.search_success, so an F3 from inside the search
 	// prompt also paints the prompt line red when it misses.
+	ed.search_failed = !b.has_selection()
+	if !b.has_selection() {
+		ed.status = 'not found: ${ed.last_search}'
+	}
+}
+
+// find_previous selects the previous occurrence of the last search term
+// (Shift+F3; V-only addition, the Rust original has no reverse search).
+fn (mut ed Editor) find_previous() {
+	if ed.last_search == '' {
+		ed.move_cursor_to_selection_beg()
+		return
+	}
+	mut b := &ed.docs[ed.active].buf
+	b.find_and_select_prev(ed.last_search, ed.search_options)
+	b.make_cursor_visible()
 	ed.search_failed = !b.has_selection()
 	if !b.has_selection() {
 		ed.status = 'not found: ${ed.last_search}'
@@ -1400,6 +1422,9 @@ fn (mut ed Editor) handle_key(key InputKey) {
 		vk_f3 {
 			if mods == kbmod_none {
 				ed.find_next()
+				handled = true
+			} else if mods == kbmod_shift {
+				ed.find_previous()
 				handled = true
 			}
 		}
