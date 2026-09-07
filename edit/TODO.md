@@ -44,8 +44,8 @@ P0 — 语义/交互对齐
 - [ ] **空 needle 回车**：Rust `find_and_select("")` 会清选区并把光标移到选区起点（`buffer/mod.rs:1126-1130`）；V 的 `confirm_prompt`/`find_next` 直接 return（`main.v:806`、`main.v:856`）
 - [ ] **Ctrl+R 且已有选区时**：Rust 把焦点直接放到 replacement 框（needle 已由选区填好，`draw_editor.rs:59-62`）；V 仍要先过一遍 needle 段
 - [ ] **prompt 单行编辑能力**：Rust 的 editline 是完整单行 TextBuffer（←/→、Home/End、Delete、Ctrl+V、Ctrl+A、行内选区、粘贴 strip 换行）；V 只有追加 + Backspace（`main.v:765-800`），换行 strip 已有（`main.v:629`）
-- [ ] `whole_word` 边界扩展到非 ASCII：非 ASCII 码点视为词字符
-- [ ] 大小写折叠扩展到 Latin-1/希腊/西里尔常用区段
+- [x] `whole_word` 边界扩展到非 ASCII：非 ASCII 码点视为词字符（`text_buffer.v:2362` `is_word_rune` 把 `cp >= 0x80` 当词字符；`is_word_byte` 同样，`find_substring_match` / `re_seq_match` 用它做 `\b` 边界）
+- [x] 大小写折叠扩展到 Latin-1/希腊/西里尔常用区段（`text_buffer.v:2423` `fold_rune`：ASCII + Latin-1 `À-Ö Ø-Þ` + Greek `Α-Ω` + Cyrillic `А-Я`；`fold_text` 编码后字节数相等，所以可安全复用 `text_buffer.v:2485` 的折叠后位置）
 
 P1 — 性能
 - [ ] `find_substring_match` 改分块流式匹配：走 `gap_buffer.read_forward` 零拷贝视图，不再 `read_all()`
