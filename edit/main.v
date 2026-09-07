@@ -671,9 +671,10 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 	ed.mode = .prompt
 	ed.prompt_kind = kind
 	ed.prompt_text = match kind {
-		// Prefill replace with the last search, replace_with with the last
-		// replacement (Rust keeps both in state across invocations).
-		.replace { ed.last_search }
+		// Rust has a single needle input shared by the search and replace
+		// panels (state.search_needle), so both reopen with the last needle
+		// and Enter keeps finding the next hit.
+		.search, .replace { ed.last_search }
 		.replace_with { ed.last_replacement }
 		else { '' }
 	}
@@ -759,6 +760,18 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 		vk_return {
 			if mods == kbmod_none {
 				ed.confirm_prompt()
+			}
+		}
+		vk_f3 {
+			// F3 works from inside the prompt as well (Rust main.rs:410 runs
+			// search_execute globally), using the needle currently in the
+			// prompt, which the Rust editline edits in place.
+			if mods == kbmod_none {
+				needle := ed.prompt_search_needle()
+				if needle != '' {
+					ed.last_search = needle
+				}
+				ed.find_next()
 			}
 		}
 		vk_back {
@@ -861,6 +874,9 @@ fn (mut ed Editor) find_next() {
 	// internal next_search_offset, as long as the selection is untouched.
 	b.find_and_select(ed.last_search, ed.search_options)
 	b.make_cursor_visible()
+	// Mirror Rust's state.search_success, so an F3 from inside the search
+	// prompt also paints the prompt line red when it misses.
+	ed.search_failed = !b.has_selection()
 	if !b.has_selection() {
 		ed.status = 'not found: ${ed.last_search}'
 	}

@@ -7,6 +7,12 @@ module main
 // pure. Keeping them here keeps `cpulimit -l 200 -z -- ./build.sh test`
 // honest without dragging in the rest of the editor.
 
+// wr writes a string into a buffer. Each _test.v is compiled on its own, so
+// the helper in text_buffer_test.v is not visible here.
+fn wr(mut b TextBuffer, s string) {
+	b.write_raw(s.bytes())
+}
+
 fn test_run_prompt_search_sets_search_failed() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
@@ -45,6 +51,30 @@ fn test_start_prompt_prefills_needle_from_selection() {
 	ed.start_prompt(.search)
 	assert ed.prompt_text == 'foo'
 }
+
+fn test_prompt_f3_finds_next_hit() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	wr(mut ed.docs[ed.active].buf, 'foo\nbaz foo\nfoo\n')
+
+	ed.start_prompt(.search)
+	ed.prompt_text = 'foo'
+	ed.run_prompt_search()
+
+	mut b := &ed.docs[ed.active].buf
+	assert b.has_selection()
+	assert b.selection.beg.y == 0
+
+	// F3 works from inside the prompt, using the needle currently in it
+	// (Rust main.rs:410 runs search_execute with state.search_needle).
+	ed.handle_prompt_key(InputKey(vk_f3))
+	assert b.selection.beg.y == 1
+	ed.handle_prompt_key(InputKey(vk_f3))
+	assert b.selection.beg.y == 2
+	assert ed.search_failed == false
+	assert ed.last_search == 'foo'
+}
+
 fn test_clipboard_size_label_bytes() {
 	// Below 1 KiB is still formatted in KiB with one decimal.
 	assert clipboard_size_label(0) == '0 KiB'

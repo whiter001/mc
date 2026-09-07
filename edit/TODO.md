@@ -18,8 +18,8 @@ V 侧对应 `text_buffer.v:2348-2601`、`main.v:626-819`。
 
 | # | Rust | V 现状 | 差异 |
 |---|------|--------|------|
-| 1 | editline 内容变化即触发 `SearchAction::Search`（边打字边跳） | 只有 Enter / 切选项才搜（`main.v:594` 追加文本后不搜） | 缺增量搜索 |
-| 2 | 有选区时 Ctrl+F 用选区文本填 needle（`draw_editor.rs:59-62`） | 用 `last_search` 预填（`main.v:632`） | 行为不同 |
+| 1 | editline 内容变化即触发 `SearchAction::Search`（边打字边跳） | 已对齐：prompt 文本变化即 `run_prompt_search()`（`main.v:637`） | — |
+| 2 | 有选区时 Ctrl+F 用选区文本填 needle；无选区时沿用上次 needle（`state.search_needle`） | 已对齐：选区优先，否则 `.search`/`.replace` 都预填 `last_search`（`main.v:673`） | — |
 | 3 | `use_regex` 走 ICU 正则；`whole_word` 是 `\b(?:转义pattern)\b`（Unicode `\w`） | `use_regex` 完全无效（选项可见但 `find_substring_match` 不读它）；`whole_word` 只看 ASCII `is_word_byte`（`text_buffer.v:2348`） | 语义缺失/降级 |
 | 4 | 大小写不敏感 = ICU CASE_INSENSITIVE（Unicode 折叠） | `fold_ascii` 只折 A-Z | 非 ASCII 不匹配 |
 | 5 | 失败时 needle 框变红（`search_success`） | 只在 status 行写 `not found:` | 反馈弱 |
@@ -32,10 +32,11 @@ V 侧对应 `text_buffer.v:2348-2601`、`main.v:626-819`。
 ## 查找功能优化计划
 
 P0 — 语义/交互对齐
-- [ ] 增量搜索：prompt 文本变化后调 `run_prompt_search()`（`main.v:594` 之后）
+- [x] 增量搜索：prompt 文本变化后调 `run_prompt_search()`（`main.v:594` 之后）
 - [ ] `use_regex` 处理：实现最小正则子集（`. ^ $ \b \w \s [...]`、转义）或把选项改为不可选，避免"开关无效"
-- [ ] Ctrl+F/Ctrl+R 有选区时用选区填 needle（复用 `extract_user_selection` 等价路径）
-- [ ] 搜索失败视觉反馈：not found 时 prompt 行变红（对齐 `search_success`）
+- [x] Ctrl+F/Ctrl+R 有选区时用选区填 needle（复用 `extract_user_selection` 等价路径）
+- [x] 搜索失败视觉反馈：not found 时 prompt 行变红（对齐 `search_success`）
+- [x] F3 在 prompt 内也生效，用当前 needle 找下一个（Rust `main.rs:410` 是全局 F3）
 - [ ] `whole_word` 边界扩展到非 ASCII：非 ASCII 码点视为词字符
 - [ ] 大小写折叠扩展到 Latin-1/希腊/西里尔常用区段
 
