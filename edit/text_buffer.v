@@ -3113,6 +3113,46 @@ pub fn (mut b TextBuffer) find_and_select_prev(pattern string, options SearchOpt
 	b.find_select_prev(mut b.search, next_search_offset, true)
 }
 
+// search_match_stats returns (index, total) for `pattern`: `total` is the
+// number of matches in the buffer, `index` the 1-based position of the
+// currently selected match (0 when the selection is not on a match). The scan
+// advances exactly like find_select_next (no overlapping hits, zero-width
+// hits step one grapheme forward), so the count matches what F3 visits.
+pub fn (b TextBuffer) search_match_stats(pattern string, options SearchOptions) (int, int) {
+	if pattern.len == 0 {
+		return 0, 0
+	}
+	text := b.read_all()
+	mut sel_beg := -1
+	if b.selection.valid {
+		beg, _ := minmax_points(b.selection.beg, b.selection.end)
+		sel_beg = b.cursor_move_to_logical_internal(b.cursor, beg).offset
+	}
+	mut total := 0
+	mut index := 0
+	mut off := 0
+	for off <= text.len {
+		beg, end := find_substring_match(text, pattern.bytes(), off, options)
+		if beg < 0 {
+			break
+		}
+		total++
+		if beg == sel_beg {
+			index = total
+		}
+		if end == beg {
+			next := b.find_advance_past_zero_width(end)
+			if next <= off {
+				break
+			}
+			off = next
+		} else {
+			off = end
+		}
+	}
+	return index, total
+}
+
 // find_and_replace finds the next occurrence of the given `pattern` and
 // replaces it with `replacement`.
 pub fn (mut b TextBuffer) find_and_replace(pattern string, options SearchOptions, replacement []u8) {

@@ -394,6 +394,46 @@ fn test_find_and_select_prev_zero_width() {
 	assert b.cursor.offset == 8
 }
 
+fn test_search_match_stats() {
+	mut b := new_text_buffer(false)
+	wr(mut b, 'hello world hello\nfoo hello bar\n')
+
+	// No selection: index 0, total counts every hit.
+	mut index, mut total := b.search_match_stats('hello', SearchOptions{})
+	assert index == 0
+	assert total == 3
+
+	// Selection on the second hit: index 2.
+	b.find_and_select('hello', SearchOptions{})
+	b.find_and_select('hello', SearchOptions{})
+	index, total = b.search_match_stats('hello', SearchOptions{})
+	assert index == 2
+	assert total == 3
+
+	// Reverse navigation moves the index backwards.
+	b.find_and_select_prev('hello', SearchOptions{})
+	index, total = b.search_match_stats('hello', SearchOptions{})
+	assert index == 1
+	assert total == 3
+
+	// Zero-width matches on a fresh buffer (no selection): counted, but with
+	// no selection the index is 0. '^' also matches after the trailing
+	// newline (start of the empty last line), consistent with what F3
+	// navigation visits.
+	mut b2 := new_text_buffer(false)
+	wr(mut b2, 'hello world hello\nfoo hello bar\n')
+	index, total = b2.search_match_stats('^', SearchOptions{ use_regex: true })
+	assert index == 0
+	assert total == 3
+
+	// Case-insensitive counting and no-match counting.
+	index, total = b.search_match_stats('HELLO', SearchOptions{})
+	assert total == 3
+	index, total = b.search_match_stats('zzz', SearchOptions{})
+	assert index == 0
+	assert total == 0
+}
+
 fn test_find_and_select_case_insensitive() {
 	mut b := new_text_buffer(false)
 	wr(mut b, 'Hello World')

@@ -116,6 +116,13 @@ mut:
 	// search_failed mirrors Rust's state.search_success (inverted): true when
 	// the current prompt needle has no match, used to paint the prompt line red.
 	search_failed    bool
+	// Hit counter for the last search ("3/17"), refreshed by update_search_stats
+	// after every find navigation. search_hit_generation invalidates the pair
+	// when the buffer is edited. search_hit_index is 0 when the selection is
+	// not on a hit (e.g. a zero-width regex match, which stores no selection).
+	search_hit_index      int
+	search_hit_total      int
+	search_hit_generation u32
 	// The needle collected by the first Ctrl+R prompt, used by the second.
 	replace_needle   string
 	// Dirty-quit modal: pops up when Ctrl+W/Ctrl+Q is pressed on a dirty
@@ -344,6 +351,22 @@ fn (mut ed Editor) draw_search_prompt_options(options_y CoordType) {
 	text += segment + ' '
 
 	ed.fb.replace_text(options_y, 0, ed.size.width, text)
+	// Hit counter, right-aligned ("3/17"; bare total when the selection is
+	// not on a hit, e.g. a zero-width regex match).
+	if ed.search_hit_total > 0 {
+		mut b := &ed.docs[ed.active].buf
+		if ed.search_hit_generation == b.buffer.generation() {
+			ctr := if ed.search_hit_index > 0 {
+				'${ed.search_hit_index}/${ed.search_hit_total}'
+			} else {
+				'${ed.search_hit_total}'
+			}
+			ctr_x := ed.size.width - CoordType(ctr.len) - 1
+			if ctr_x > CoordType(text.len) {
+				ed.fb.replace_text(options_y, ctr_x, ed.size.width, ctr)
+			}
+		}
+	}
 	mut opt_rect := Rect{
 		left:   0
 		top:    options_y
@@ -877,6 +900,21 @@ fn (mut ed Editor) run_prompt_search() {
 	if !b.has_selection() {
 		ed.status = 'not found: ${needle}'
 	}
+	ed.update_search_stats()
+}
+
+// update_search_stats refreshes the hit counter (index/total) shown on the
+// search options row and the status bar.
+fn (mut ed Editor) update_search_stats() {
+	if ed.docs.len == 0 || ed.last_search == '' {
+		ed.search_hit_index = 0
+		ed.search_hit_total = 0
+		return
+	}
+	b := &ed.docs[ed.active].buf
+	ed.search_hit_index, ed.search_hit_total = b.search_match_stats(ed.last_search,
+		ed.search_options)
+	ed.search_hit_generation = b.buffer.generation()
 }
 
 fn (mut ed Editor) toggle_search_option(kind SearchButtonKind) {
@@ -1114,6 +1152,7 @@ fn (mut ed Editor) find_next() {
 	if !b.has_selection() {
 		ed.status = 'not found: ${ed.last_search}'
 	}
+	ed.update_search_stats()
 }
 
 // find_previous selects the previous occurrence of the last search term
@@ -1130,6 +1169,7 @@ fn (mut ed Editor) find_previous() {
 	if !b.has_selection() {
 		ed.status = 'not found: ${ed.last_search}'
 	}
+	ed.update_search_stats()
 }
 
 // replace_active replaces the current search hit (if the selection is one) and
@@ -2041,6 +2081,18 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	pos_str := 'Ln ${pos.y + 1}, Col ${pos.x + 1}'
 	text += pos_str
 	x += CoordType(pos_str.len)
+	// Hit counter of the active search ("3/17"), dropped as soon as the
+	// buffer is edited (generation no longer matches).
+	if ed.search_hit_total > 0 && ed.last_search != ''
+		&& ed.search_hit_generation == b.buffer.generation() {
+		hits := if ed.search_hit_index > 0 {
+			'${ed.search_hit_index}/${ed.search_hit_total}'
+		} else {
+			'${ed.search_hit_total}'
+		}
+		text += '  ' + hits
+		x += CoordType(hits.len + 2)
+	}
 	if b.is_overtype() {
 		text += '  OVR'
 		x += 6

@@ -56,4 +56,4 @@ P1 — 性能
 
 P2 — 可选增强
 - [x] Shift+F3 反向查找（Rust 无，V 侧自加）；prompt 内 ↑/↓ = 上/下一个（免 fn 键替代）
-- [ ] 命中计数显示（如 `3/17`）
+- [x] 命中计数显示（`3/17`）：选项行右侧 + 状态栏 Ln/Col 后，`search_match_stats` 统计，buffer generation 变化即失效
