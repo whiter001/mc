@@ -99,8 +99,17 @@
 - [ ] transport TLS（net.openssl 或 net.mbedtls 可行性验证先行）
 - [ ] HTTPS/SNI 路由
 
+## P9 STCP visitor（已完成第一批）
+- [x] msg：NewVisitorConn（'v'）/ NewVisitorConnResp（'3'），字段与 Go 版 JSON tag 一致（全标量，无需 Wire 副本）
+- [x] config：`[[visitors]]` 段（VisitorConfig：name/type/server_name/server_user/secret_key/bind_addr/bind_port）；ProxyConfig 加 sk/allow_users；stcp 校验（local_port + sk 必填，不要求 remote_port）；visitor 校验（type 仅 stcp）
+- [x] server/visitor.v：VisitorManager（listen/validate/remove/remove_for_control）；sk = md5(sk+timestamp) 校验 + allow_users（空=仅同登录用户，非空=命中或 "*"）
+- [x] server：handle_conn 分发 NewVisitorConn → handle_visitor_conn（按 run_id 取 visitor 登录 user → 校验 → 回 resp → 走属主 control 的 work conn 链路 relay）；handle_new_proxy 加 stcp 分支；Control 加 user 字段；close/CloseProxy 清理监听项
+- [x] client/visitor.v：本地监听 bind_addr:bind_port → 每连接新拨 vfrps 发 NewVisitorConn → 10s 等 resp → netx.relay；会话断开关监听器、重连重起
+- [x] e2e：test/e2e/stcp_proxy_test.v（自包含 helper）——回显两轮、错 sk 拒绝、allow_users=["*"] 放行、不在列表拒绝、跨用户（USER=user2）放行；连续 3 次全绿
+
 ## P9+ 可选（不主动做）
-- [ ] STCP/XTCP visitor、NAT 打洞
+- [ ] XTCP visitor、NAT 打洞（nathole：STUN/ClassifyNATFeature/MakeHole；隧道协议选型待定，V 无 QUIC/KCP 库）
+- [ ] stcp use_encryption/use_compression、xtcp fallback_to/keep_tunnel_open
 - [ ] tcpmux（HTTP CONNECT 多路复用）
 - [ ] Prometheus metrics
 - [ ] KCP / WebSocket 传输

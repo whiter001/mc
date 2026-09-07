@@ -44,6 +44,7 @@ pub mut:
 	controls_mu     sync.Mutex
 	vhost_routes    map[string]VhostRoute // host -> 路由
 	vhost_routes_mu sync.Mutex
+	visitor_mgr     &VisitorManager // stcp 监听项注册表（proxy_name -> 监听项）
 	stop            bool // 收到退出信号后置位
 	closed          bool
 	close_mu        sync.Mutex
@@ -52,15 +53,16 @@ pub mut:
 // new_service 创建服务端实例（含端口管理器）。
 pub fn new_service(cfg config.ServerConfig) &Service {
 	return &Service{
-		cfg:             cfg
-		listener:        unsafe { nil }
-		vhost_listener:  unsafe { nil }
-		pm:              new_port_manager(cfg.bind_addr, cfg.allow_ports)
-		controls:        map[string]&Control{}
-		controls_mu:     sync.new_mutex()
-		vhost_routes:    map[string]VhostRoute{}
+		cfg: cfg
+		listener: unsafe { nil }
+		vhost_listener: unsafe { nil }
+		pm: new_port_manager(cfg.bind_addr, cfg.allow_ports)
+		controls: map[string]&Control{}
+		controls_mu: sync.new_mutex()
+		vhost_routes: map[string]VhostRoute{}
 		vhost_routes_mu: sync.new_mutex()
-		close_mu:        sync.new_mutex()
+		visitor_mgr: new_visitor_manager()
+		close_mu: sync.new_mutex()
 	}
 }
 
@@ -95,7 +97,6 @@ pub fn (mut s Service) run() ! {
 	}) or {}
 
 	spawn s.accept_loop()
-
 	for !s.stop {
 		time.sleep(stop_poll_interval)
 	}
@@ -117,6 +118,7 @@ fn (mut s Service) accept_loop() {
 }
 
 // handle_conn 读首条消息并分发：Login → 建控制会话；NewWorkConn → 注册 work conn；
+// NewVisitorConn → stcp visitor 连接（鉴权后当作用户连接走 work conn 链路）；
 // 其他类型或读失败 → 直接关闭连接。
 // 参数不带 mut：spawn 传参 `mut x &T` 会捕获调用方栈地址（原因见 netx.copy_one_way 注释）。
 fn (mut s Service) handle_conn(conn &net.TcpConn) {
@@ -132,6 +134,9 @@ fn (mut s Service) handle_conn(conn &net.TcpConn) {
 		}
 		msg.NewWorkConn {
 			s.handle_work_conn(c, m)
+		}
+		msg.NewVisitorConn {
+			s.handle_visitor_conn(c, m)
 		}
 		else {
 			log.warn('service: unexpected first message ${typeof(m).name}, closing conn')
@@ -259,17 +264,17 @@ fn (mut s Service) handle_login_conn(conn &net.TcpConn, login msg.Login) {
 		c.close() or {}
 		return
 	}
-	mut ctl := new_control(c, s.cfg.auth_token, s.cfg.bind_addr, s.pm, s, rid,
-		s.cfg.auth_additional_scopes)
+	mut ctl := new_control(c, s.cfg.auth_token, s.cfg.bind_addr, s.pm, s, rid, s.cfg.auth_additional_scopes)
 	ctl.verify_login(login) or {
 		log.warn('control ${ctl.run_id}: login rejected: bad privilege_key')
 		msg.write_msg(mut c, msg.LoginResp{
 			version: version.version
-			error:   'authentication failed'
+			error: 'authentication failed'
 		}) or {}
 		c.close() or {}
 		return
 	}
+	ctl.user = login.user
 	s.register_control(ctl) or {
 		log.warn('service: control ${ctl.run_id} was replaced')
 		ctl.close()
@@ -317,6 +322,99 @@ fn (mut s Service) handle_work_conn(conn &net.TcpConn, m msg.NewWorkConn) {
 		return
 	}
 	ctl.register_work_conn(cc)
+}
+
+// handle_visitor_conn 处理 stcp visitor 连接（首条消息为 NewVisitorConn）：
+// 按 run_id 找 visitor 客户端的 control 取其登录 user → VisitorManager 校验
+// sk 与 allow_users → 回 NewVisitorConnResp{error: ''} → 把这条 visitor 连接
+// 当作用户连接走属主 control 的 work conn 链路（ReqWorkConn → get_work_conn →
+// StartWorkConn → relay）。对齐 Go 版 server/visitor 的 NewConn 语义。
+// 参数不带 mut：spawn 传参 `mut x &T` 的限制同 handle_work_conn。
+fn (mut s Service) handle_visitor_conn(conn &net.TcpConn, m msg.NewVisitorConn) {
+	mut vc := conn
+	// 1) 按 run_id 找 visitor 客户端的 control，取其登录 user
+	s.controls_mu.lock()
+	visitor_ctl := s.controls[m.run_id] or {
+		s.controls_mu.unlock()
+		log.warn('visitor: no control for run_id ${m.run_id}, rejecting visitor conn')
+		msg.write_msg(mut vc, msg.NewVisitorConnResp{
+			proxy_name: m.proxy_name
+			error: 'no control for run_id ${m.run_id}'
+		}) or {}
+		vc.close() or {}
+		return
+	}
+	s.controls_mu.unlock()
+	visitor_user := visitor_ctl.user
+
+	// 2) 校验 sk 与 allow_users
+	listener := s.visitor_mgr.validate(m.proxy_name, m.timestamp, m.sign_key, visitor_user) or {
+		log.warn('visitor: ${err.msg()}')
+		msg.write_msg(mut vc, msg.NewVisitorConnResp{
+			proxy_name: m.proxy_name
+			error: err.msg()
+		}) or {}
+		vc.close() or {}
+		return
+	}
+
+	// 3) 应答同意
+	msg.write_msg(mut vc, msg.NewVisitorConnResp{
+		proxy_name: m.proxy_name
+	}) or {
+		log.warn('visitor: write NewVisitorConnResp failed: ${err.msg()}')
+		vc.close() or {}
+		return
+	}
+
+	// 4) 走属主 control 的 work conn 链路
+	mut ctl := listener.control
+	ctl.send_req_work_conn() or {
+		log.warn('visitor: send ReqWorkConn failed for proxy [${m.proxy_name}]: ${err.msg()}')
+		vc.close() or {}
+		return
+	}
+	mut work_conn := ctl.get_work_conn(work_conn_wait_timeout) or {
+		log.warn('visitor: wait work conn timed out for proxy [${m.proxy_name}]')
+		vc.close() or {}
+		return
+	}
+	// 5) 发 StartWorkConn（带 visitor 连接地址对信息）
+	peer := vc.peer_addr() or {
+		vc.close() or {}
+		work_conn.close() or {}
+		return
+	}
+	src_addr, src_port := netx.split_host_port('${peer}') or {
+		vc.close() or {}
+		work_conn.close() or {}
+		return
+	}
+	local := vc.addr() or {
+		vc.close() or {}
+		work_conn.close() or {}
+		return
+	}
+	dst_addr, dst_port := netx.split_host_port('${local}') or {
+		vc.close() or {}
+		work_conn.close() or {}
+		return
+	}
+	msg.write_msg(mut work_conn, msg.StartWorkConn{
+		proxy_name: m.proxy_name
+		src_addr: src_addr
+		dst_addr: dst_addr
+		src_port: u16(src_port)
+		dst_port: u16(dst_port)
+	}) or {
+		log.warn('visitor: send StartWorkConn failed: ${err.msg()}')
+		vc.close() or {}
+		work_conn.close() or {}
+		return
+	}
+	// 6) 双向 relay（relay 接管并关闭两条连接）
+	log.info('visitor: proxy [${m.proxy_name}] relay established for visitor [${m.run_id}]')
+	netx.relay(vc, work_conn)
 }
 
 // register_control 把 control 注册进控制表；同 run_id 已有 control 时先关闭旧的控制
@@ -380,7 +478,7 @@ pub fn (mut s Service) close() ! {
 pub fn (mut s Service) register_vhost_route(host string, control &Control, proxy_name string) {
 	s.vhost_routes_mu.lock()
 	s.vhost_routes[host] = VhostRoute{
-		control:    control
+		control: control
 		proxy_name: proxy_name
 	}
 	s.vhost_routes_mu.unlock()
@@ -493,10 +591,10 @@ fn (mut s Service) handle_vhost_conn(user_conn &net.TcpConn) {
 	}
 	msg.write_msg(mut work_conn, msg.StartWorkConn{
 		proxy_name: route.proxy_name
-		src_addr:   src_addr
-		dst_addr:   dst_addr
-		src_port:   u16(src_port)
-		dst_port:   u16(dst_port)
+		src_addr: src_addr
+		dst_addr: dst_addr
+		src_port: u16(src_port)
+		dst_port: u16(dst_port)
 	}) or {
 		log.warn('vhost: send StartWorkConn failed: ${err.msg()}')
 		uc.close() or {}

@@ -21,7 +21,7 @@ const udp_work_conn_wait_timeout = 10 * time.second
 pub struct TcpProxy {
 pub mut:
 	name        string
-	remote_port int      // 实际监听端口（acquire 分配或指定）
+	remote_port int // 实际监听端口（acquire 分配或指定）
 	control     &Control // 所属控制会话
 	listener    &net.TcpListener
 	closed      bool
@@ -31,11 +31,11 @@ pub mut:
 // new_tcp_proxy 创建 TCP 代理，remote_port 为已分配端口。
 pub fn new_tcp_proxy(name string, remote_port int, control &Control) &TcpProxy {
 	return &TcpProxy{
-		name:        name
+		name: name
 		remote_port: remote_port
-		control:     control
-		listener:    unsafe { nil }
-		close_mu:    sync.new_mutex()
+		control: control
+		listener: unsafe { nil }
+		close_mu: sync.new_mutex()
 	}
 }
 
@@ -111,10 +111,10 @@ fn (mut p TcpProxy) handle_user_conn(user_conn &net.TcpConn) {
 	}
 	msg.write_msg(mut work_conn, msg.StartWorkConn{
 		proxy_name: p.name
-		src_addr:   src_addr
-		dst_addr:   dst_addr
-		src_port:   u16(src_port)
-		dst_port:   u16(dst_port)
+		src_addr: src_addr
+		dst_addr: dst_addr
+		src_port: u16(src_port)
+		dst_port: u16(dst_port)
 	}) or {
 		log.warn('tcp proxy [${p.name}]: send StartWorkConn failed: ${err.msg()}')
 		uc.close() or {}
@@ -161,11 +161,11 @@ pub fn (mut p TcpProxy) is_closed() bool {
 pub struct UdpProxy {
 pub mut:
 	name        string
-	remote_port int      // 实际监听端口（acquire_udp 分配或指定）
+	remote_port int // 实际监听端口（acquire_udp 分配或指定）
 	control     &Control // 所属控制会话
 	udp_conn    &net.UdpConn
 	work_conn   &net.TcpConn // 当前复用的 work conn（首次包时申请并写入；可为 nil 表示尚未就绪）
-	work_mu     sync.Mutex   // 保护 work_conn 的设置与读取
+	work_mu     sync.Mutex // 保护 work_conn 的设置与读取
 	closed      bool
 	close_mu    sync.Mutex
 }
@@ -173,13 +173,13 @@ pub mut:
 // new_udp_proxy 创建 UDP 代理，remote_port 为已分配端口。
 pub fn new_udp_proxy(name string, remote_port int, control &Control) &UdpProxy {
 	return &UdpProxy{
-		name:        name
+		name: name
 		remote_port: remote_port
-		control:     control
-		udp_conn:    unsafe { nil }
-		work_conn:   unsafe { nil }
-		work_mu:     sync.new_mutex()
-		close_mu:    sync.new_mutex()
+		control: control
+		udp_conn: unsafe { nil }
+		work_conn: unsafe { nil }
+		work_mu: sync.new_mutex()
+		close_mu: sync.new_mutex()
 	}
 }
 
@@ -240,10 +240,10 @@ fn (mut p UdpProxy) acquire_work_conn() bool {
 	// 真实用户地址走 UDPPacket.local_addr / remote_addr 携带，handler 不依赖此字段）
 	msg.write_msg(mut wc_mut, msg.StartWorkConn{
 		proxy_name: p.name
-		src_addr:   '0.0.0.0'
-		dst_addr:   '0.0.0.0'
-		src_port:   0
-		dst_port:   u16(p.remote_port)
+		src_addr: '0.0.0.0'
+		dst_addr: '0.0.0.0'
+		src_port: 0
+		dst_port: u16(p.remote_port)
 	}) or {
 		log.warn('udp proxy [${p.name}]: send StartWorkConn failed: ${err.msg()}')
 		p.work_mu.lock()
@@ -292,9 +292,9 @@ fn (mut p UdpProxy) read_loop() {
 		// V 0.5.2 UdpConn 无 addr() 方法；用已知 remote_port 与 bind_addr 拼 local_addr
 		mut local_str := netx.join_host_port(p.control.bind_addr, p.remote_port)
 		msg.write_msg(mut wc, msg.UDPPacket{
-			content:     pkt_content
+			content: pkt_content
 			remote_addr: '${addr}'
-			local_addr:  local_str
+			local_addr: local_str
 		}) or {
 			log.warn('udp proxy [${p.name}]: write UDPPacket to work conn failed: ${err.msg()}')
 			// work conn 死了，清掉让下次重新申请

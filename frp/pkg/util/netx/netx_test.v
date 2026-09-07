@@ -149,8 +149,8 @@ fn test_close_all_is_idempotent() {
 	mut ln, mut c1, mut s1, mut c2, mut s2 := setup_pair()!
 	mut rc := &RelayCloser{
 		mu: sync.new_mutex()
-		a:  s1
-		b:  s2
+		a: s1
+		b: s2
 	}
 	// 多次调用 close_all 不能 panic，且结果幂等
 	rc.close_all()

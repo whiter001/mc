@@ -20,12 +20,14 @@ pub const type_start_work_conn = `s`
 pub const type_ping = `h`
 pub const type_pong = `4`
 pub const type_udp_packet = `u`
+pub const type_new_visitor_conn = `v`
+pub const type_new_visitor_conn_resp = `3`
 
 // ClientSpec 客户端类型说明（对应 Go 版 ClientSpec，目前仅 VirtualClient 使用）。
 pub struct ClientSpec {
 pub:
 	typ              string @[json: 'type'; omitempty]
-	always_auth_pass bool   @[json: 'always_auth_pass'; omitempty]
+	always_auth_pass bool @[json: 'always_auth_pass'; omitempty]
 }
 
 // Login 客户端启动时向服务端发送的登录消息。
@@ -34,18 +36,18 @@ pub:
 // 同理 client_spec（结构体字段）也不能加 omitempty。
 pub struct Login {
 pub:
-	version       string            @[json: 'version'; omitempty]
-	hostname      string            @[json: 'hostname'; omitempty]
-	os            string            @[json: 'os'; omitempty]
-	arch          string            @[json: 'arch'; omitempty]
-	user          string            @[json: 'user'; omitempty]
-	privilege_key string            @[json: 'privilege_key'; omitempty]
-	timestamp     i64               @[json: 'timestamp'; omitempty]
-	run_id        string            @[json: 'run_id'; omitempty]
-	client_id     string            @[json: 'client_id'; omitempty]
+	version       string @[json: 'version'; omitempty]
+	hostname      string @[json: 'hostname'; omitempty]
+	os            string @[json: 'os'; omitempty]
+	arch          string @[json: 'arch'; omitempty]
+	user          string @[json: 'user'; omitempty]
+	privilege_key string @[json: 'privilege_key'; omitempty]
+	timestamp     i64 @[json: 'timestamp'; omitempty]
+	run_id        string @[json: 'run_id'; omitempty]
+	client_id     string @[json: 'client_id'; omitempty]
 	metas         map[string]string @[json: 'metas']
-	client_spec   ClientSpec        @[json: 'client_spec']
-	pool_count    int               @[json: 'pool_count'; omitempty]
+	client_spec   ClientSpec @[json: 'client_spec']
+	pool_count    int @[json: 'pool_count'; omitempty]
 }
 
 // LoginWire 是 Login 的"解码专用"副本，去掉 map 字段。
@@ -55,17 +57,17 @@ pub:
 // 后果：从线上读到的 metas 内容无法还原（保持空 map）。
 // 待 V 修复 json map 后，可删除本结构与转换函数。
 struct LoginWire {
-	version       string     @[json: 'version'; omitempty]
-	hostname      string     @[json: 'hostname'; omitempty]
-	os            string     @[json: 'os'; omitempty]
-	arch          string     @[json: 'arch'; omitempty]
-	user          string     @[json: 'user'; omitempty]
-	privilege_key string     @[json: 'privilege_key'; omitempty]
-	timestamp     i64        @[json: 'timestamp'; omitempty]
-	run_id        string     @[json: 'run_id'; omitempty]
-	client_id     string     @[json: 'client_id'; omitempty]
+	version       string @[json: 'version'; omitempty]
+	hostname      string @[json: 'hostname'; omitempty]
+	os            string @[json: 'os'; omitempty]
+	arch          string @[json: 'arch'; omitempty]
+	user          string @[json: 'user'; omitempty]
+	privilege_key string @[json: 'privilege_key'; omitempty]
+	timestamp     i64 @[json: 'timestamp'; omitempty]
+	run_id        string @[json: 'run_id'; omitempty]
+	client_id     string @[json: 'client_id'; omitempty]
 	client_spec   ClientSpec @[json: 'client_spec']
-	pool_count    int        @[json: 'pool_count'; omitempty]
+	pool_count    int @[json: 'pool_count'; omitempty]
 }
 
 // LoginResp 服务端对登录的应答。
@@ -82,31 +84,31 @@ pub:
 // 同样不能加 omitempty（原因见 Login 注释）。
 pub struct NewProxy {
 pub:
-	proxy_name           string            @[json: 'proxy_name'; omitempty]
-	proxy_type           string            @[json: 'proxy_type'; omitempty]
-	use_encryption       bool              @[json: 'use_encryption'; omitempty]
-	use_compression      bool              @[json: 'use_compression'; omitempty]
-	bandwidth_limit      string            @[json: 'bandwidth_limit'; omitempty]
-	bandwidth_limit_mode string            @[json: 'bandwidth_limit_mode'; omitempty]
-	group                string            @[json: 'group'; omitempty]
-	group_key            string            @[json: 'group_key'; omitempty]
+	proxy_name           string @[json: 'proxy_name'; omitempty]
+	proxy_type           string @[json: 'proxy_type'; omitempty]
+	use_encryption       bool @[json: 'use_encryption'; omitempty]
+	use_compression      bool @[json: 'use_compression'; omitempty]
+	bandwidth_limit      string @[json: 'bandwidth_limit'; omitempty]
+	bandwidth_limit_mode string @[json: 'bandwidth_limit_mode'; omitempty]
+	group                string @[json: 'group'; omitempty]
+	group_key            string @[json: 'group_key'; omitempty]
 	metas                map[string]string @[json: 'metas']
 	annotations          map[string]string @[json: 'annotations']
 	// tcp 和 udp 专用
 	remote_port int @[json: 'remote_port'; omitempty]
 	// http 和 https 专用
-	custom_domains      []string          @[json: 'custom_domains']
-	subdomain           string            @[json: 'subdomain'; omitempty]
-	subdomain_host      string            @[json: 'subdomain_host'; omitempty]
-	locations           []string          @[json: 'locations']
-	http_user           string            @[json: 'http_user'; omitempty]
-	http_pwd            string            @[json: 'http_pwd'; omitempty]
-	host_header_rewrite string            @[json: 'host_header_rewrite'; omitempty]
+	custom_domains      []string @[json: 'custom_domains']
+	subdomain           string @[json: 'subdomain'; omitempty]
+	subdomain_host      string @[json: 'subdomain_host'; omitempty]
+	locations           []string @[json: 'locations']
+	http_user           string @[json: 'http_user'; omitempty]
+	http_pwd            string @[json: 'http_pwd'; omitempty]
+	host_header_rewrite string @[json: 'host_header_rewrite'; omitempty]
 	headers             map[string]string @[json: 'headers']
 	response_headers    map[string]string @[json: 'response_headers']
-	route_by_http_user  string            @[json: 'route_by_http_user'; omitempty]
+	route_by_http_user  string @[json: 'route_by_http_user'; omitempty]
 	// stcp, sudp, xtcp
-	sk          string   @[json: 'sk'; omitempty]
+	sk          string @[json: 'sk'; omitempty]
 	allow_users []string @[json: 'allow_users']
 	// tcpmux
 	multiplexer string @[json: 'multiplexer'; omitempty]
@@ -115,26 +117,26 @@ pub:
 // NewProxyWire 是 NewProxy 的"解码专用"副本，去掉 4 个 map 字段，
 // 原因见 LoginWire 注释。
 struct NewProxyWire {
-	proxy_name           string   @[json: 'proxy_name'; omitempty]
-	proxy_type           string   @[json: 'proxy_type'; omitempty]
-	use_encryption       bool     @[json: 'use_encryption'; omitempty]
-	use_compression      bool     @[json: 'use_compression'; omitempty]
-	bandwidth_limit      string   @[json: 'bandwidth_limit'; omitempty]
-	bandwidth_limit_mode string   @[json: 'bandwidth_limit_mode'; omitempty]
-	group                string   @[json: 'group'; omitempty]
-	group_key            string   @[json: 'group_key'; omitempty]
-	remote_port          int      @[json: 'remote_port'; omitempty]
+	proxy_name           string @[json: 'proxy_name'; omitempty]
+	proxy_type           string @[json: 'proxy_type'; omitempty]
+	use_encryption       bool @[json: 'use_encryption'; omitempty]
+	use_compression      bool @[json: 'use_compression'; omitempty]
+	bandwidth_limit      string @[json: 'bandwidth_limit'; omitempty]
+	bandwidth_limit_mode string @[json: 'bandwidth_limit_mode'; omitempty]
+	group                string @[json: 'group'; omitempty]
+	group_key            string @[json: 'group_key'; omitempty]
+	remote_port          int @[json: 'remote_port'; omitempty]
 	custom_domains       []string @[json: 'custom_domains']
-	subdomain            string   @[json: 'subdomain'; omitempty]
-	subdomain_host       string   @[json: 'subdomain_host'; omitempty]
+	subdomain            string @[json: 'subdomain'; omitempty]
+	subdomain_host       string @[json: 'subdomain_host'; omitempty]
 	locations            []string @[json: 'locations']
-	http_user            string   @[json: 'http_user'; omitempty]
-	http_pwd             string   @[json: 'http_pwd'; omitempty]
-	host_header_rewrite  string   @[json: 'host_header_rewrite'; omitempty]
-	route_by_http_user   string   @[json: 'route_by_http_user'; omitempty]
-	sk                   string   @[json: 'sk'; omitempty]
+	http_user            string @[json: 'http_user'; omitempty]
+	http_pwd             string @[json: 'http_pwd'; omitempty]
+	host_header_rewrite  string @[json: 'host_header_rewrite'; omitempty]
+	route_by_http_user   string @[json: 'route_by_http_user'; omitempty]
+	sk                   string @[json: 'sk'; omitempty]
 	allow_users          []string @[json: 'allow_users']
-	multiplexer          string   @[json: 'multiplexer'; omitempty]
+	multiplexer          string @[json: 'multiplexer'; omitempty]
 }
 
 // NewProxyResp 服务端对 NewProxy 的应答。
@@ -162,17 +164,17 @@ pub:
 	// 故须为 pub mut（client/proxy.v handle_work_conn 构造后按条件赋值）。
 pub mut:
 	privilege_key string @[json: 'privilege_key'; omitempty]
-	timestamp     i64    @[json: 'timestamp'; omitempty]
+	timestamp     i64 @[json: 'timestamp'; omitempty]
 }
 
 // NewWorkConnWire 是 NewWorkConn 的"解码专用"副本。
 // 背景：V 0.5.2 的 json2.decode 对 NewWorkConn 在特定时序下会 panic
-//（array.get 越界，与 Login/LoginWire 同源问题）。先解码到本结构再回填，
+// （array.get 越界，与 Login/LoginWire 同源问题）。先解码到本结构再回填，
 // 与 Login/LoginWire 走相同的兼容路径。
 struct NewWorkConnWire {
 	run_id        string @[json: 'run_id']
 	privilege_key string @[json: 'privilege_key'; omitempty]
-	timestamp     i64    @[json: 'timestamp'; omitempty]
+	timestamp     i64 @[json: 'timestamp'; omitempty]
 }
 
 // ReqWorkConn 服务端向客户端请求一条 work 连接（无字段）。
@@ -184,8 +186,8 @@ pub:
 	proxy_name string @[json: 'proxy_name'; omitempty]
 	src_addr   string @[json: 'src_addr'; omitempty]
 	dst_addr   string @[json: 'dst_addr'; omitempty]
-	src_port   u16    @[json: 'src_port'; omitempty]
-	dst_port   u16    @[json: 'dst_port'; omitempty]
+	src_port   u16 @[json: 'src_port'; omitempty]
+	dst_port   u16 @[json: 'dst_port'; omitempty]
 	error      string @[json: 'error'; omitempty]
 }
 
@@ -195,7 +197,7 @@ pub:
 pub struct Ping {
 pub mut:
 	privilege_key string @[json: 'privilege_key'; omitempty]
-	timestamp     i64    @[json: 'timestamp'; omitempty]
+	timestamp     i64 @[json: 'timestamp'; omitempty]
 }
 
 // Pong 心跳应答。
@@ -210,7 +212,7 @@ pub:
 // 注意：content 为数组字段，不能加 omitempty。
 pub struct UDPPacket {
 pub:
-	content     []u8   @[json: 'c']
+	content     []u8 @[json: 'c']
 	local_addr  string @[json: 'l'; omitempty]
 	remote_addr string @[json: 'r'; omitempty]
 }
@@ -241,3 +243,24 @@ pub type Message = Login
 	| Ping
 	| Pong
 	| UDPPacket
+	| NewVisitorConn
+	| NewVisitorConnResp
+
+// NewVisitorConn visitor 客户端为每条用户连接新开一条 TCP 连到 vfrps，
+// 首条消息即本消息。对齐 Go 版 msg.NewVisitorConn。
+pub struct NewVisitorConn {
+pub:
+	run_id          string @[json: 'run_id'; omitempty]
+	proxy_name      string @[json: 'proxy_name'; omitempty]
+	sign_key        string @[json: 'sign_key'; omitempty]
+	timestamp       i64 @[json: 'timestamp'; omitempty]
+	use_encryption  bool @[json: 'use_encryption'; omitempty]
+	use_compression bool @[json: 'use_compression'; omitempty]
+}
+
+// NewVisitorConnResp 服务端对 NewVisitorConn 的应答：error 为空即同意。
+pub struct NewVisitorConnResp {
+pub:
+	proxy_name string @[json: 'proxy_name'; omitempty]
+	error      string @[json: 'error'; omitempty]
+}

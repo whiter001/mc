@@ -20,14 +20,14 @@ fn test_validate_run_id() {
 	assert !validate_run_id('a'.repeat(65))
 	// 控制字符：\n、NUL、DEL
 	assert !validate_run_id('run\nforged')
-	assert !validate_run_id('run\u0000forged')
-	assert !validate_run_id('run\u007fforged')
+	assert !validate_run_id('run\x00forged')
+	assert !validate_run_id('run\x7fforged')
 	// C1 控制符 U+0085 (NEL)
-	assert !validate_run_id('run\u0085forged')
+	assert !validate_run_id('runforged')
 	// Cf 软连字符 U+00AD
-	assert !validate_run_id('run\u00adforged')
+	assert !validate_run_id('run­forged')
 	// Zl 行分隔符 U+2028
-	assert !validate_run_id('run\u2028forged')
+	assert !validate_run_id('run forged')
 	// 非法 UTF-8（单字节 0xFF）
 	assert !validate_run_id('run' + u8(0xff).ascii_str())
 	// 合法值放行：hex、含 '-' / '%' 的可打印串、中文
@@ -172,7 +172,7 @@ fn test_parse_allow_ports_malformed() {
 }
 
 // test_acquire_specified_port_unavailable 验证指定端口被其他进程占用时报 unavailable
-//（问题 4：指定端口路径探测内核占用，对齐 Go 版 ErrPortUnAvailable）。
+// （问题 4：指定端口路径探测内核占用，对齐 Go 版 ErrPortUnAvailable）。
 fn test_acquire_specified_port_unavailable() {
 	lo := find_free_allow_window(1) or {
 		assert false, err.msg()

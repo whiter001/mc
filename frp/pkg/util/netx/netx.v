@@ -96,8 +96,8 @@ fn copy_one_way(src &net.TcpConn, dst &net.TcpConn, rc &RelayCloser) {
 pub fn relay(a &net.TcpConn, b &net.TcpConn) {
 	mut rc := &RelayCloser{
 		mu: sync.new_mutex()
-		a:  a
-		b:  b
+		a: a
+		b: b
 	}
 	spawn copy_one_way(a, b, rc)
 	spawn copy_one_way(b, a, rc)

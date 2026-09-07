@@ -51,23 +51,23 @@ fn test_type_byte_constants() {
 
 fn test_json_roundtrip_login() {
 	orig := Login{
-		version:       'v0.1'
-		hostname:      'h1'
-		os:            'linux'
-		arch:          'amd64'
-		user:          'u1'
+		version: 'v0.1'
+		hostname: 'h1'
+		os: 'linux'
+		arch: 'amd64'
+		user: 'u1'
 		privilege_key: 'pk'
-		timestamp:     1700000000
-		run_id:        'run-1'
-		client_id:     'client-1'
-		metas:         {
+		timestamp: 1700000000
+		run_id: 'run-1'
+		client_id: 'client-1'
+		metas: {
 			'k1': 'v1'
 		}
-		client_spec:   ClientSpec{
-			typ:              'ssh-tunnel'
+		client_spec: ClientSpec{
+			typ: 'ssh-tunnel'
 			always_auth_pass: true
 		}
-		pool_count:    2
+		pool_count: 2
 	}
 	raw := json.encode(orig)
 	// 编码侧：map 字段以 JSON 对象形式上线（Go 端可读）
@@ -99,37 +99,37 @@ fn test_json_roundtrip_login() {
 
 fn test_json_roundtrip_new_proxy() {
 	orig := NewProxy{
-		proxy_name:           'ssh'
-		proxy_type:           'tcp'
-		use_encryption:       true
-		use_compression:      false
-		bandwidth_limit:      '1MB'
+		proxy_name: 'ssh'
+		proxy_type: 'tcp'
+		use_encryption: true
+		use_compression: false
+		bandwidth_limit: '1MB'
 		bandwidth_limit_mode: 'server'
-		group:                'g'
-		group_key:            'gk'
-		metas:                {
+		group: 'g'
+		group_key: 'gk'
+		metas: {
 			'a': 'b'
 		}
-		annotations:          {
+		annotations: {
 			'c': 'd'
 		}
-		remote_port:          6000
-		custom_domains:       ['a.example.com', 'b.example.com']
-		subdomain:            'sub'
-		locations:            ['/a', '/b']
-		http_user:            'u'
-		http_pwd:             'p'
-		host_header_rewrite:  'h'
-		headers:              {
+		remote_port: 6000
+		custom_domains: ['a.example.com', 'b.example.com']
+		subdomain: 'sub'
+		locations: ['/a', '/b']
+		http_user: 'u'
+		http_pwd: 'p'
+		host_header_rewrite: 'h'
+		headers: {
 			'h1': 'v1'
 		}
-		response_headers:     {
+		response_headers: {
 			'h2': 'v2'
 		}
-		route_by_http_user:   'ru'
-		sk:                   'secret'
-		allow_users:          ['alice', 'bob']
-		multiplexer:          'm'
+		route_by_http_user: 'ru'
+		sk: 'secret'
+		allow_users: ['alice', 'bob']
+		multiplexer: 'm'
 	}
 	raw := json.encode(orig)
 	// 编码侧：map / 数组字段如实上线
@@ -172,8 +172,8 @@ fn test_json_roundtrip_basic_messages() {
 	// LoginResp
 	lr := LoginResp{
 		version: 'v1'
-		run_id:  'r1'
-		error:   'e1'
+		run_id: 'r1'
+		error: 'e1'
 	}
 	dlr := json.decode(LoginResp, json.encode(lr)) or {
 		assert false
@@ -191,9 +191,9 @@ fn test_json_roundtrip_basic_messages() {
 	assert dcp == cp
 	// NewWorkConn
 	nw := NewWorkConn{
-		run_id:        'r'
+		run_id: 'r'
 		privilege_key: 'pk'
-		timestamp:     123
+		timestamp: 123
 	}
 	dnw := json.decode(NewWorkConn, json.encode(nw)) or {
 		assert false
@@ -210,10 +210,10 @@ fn test_json_roundtrip_basic_messages() {
 	// StartWorkConn
 	sw := StartWorkConn{
 		proxy_name: 'ssh'
-		src_addr:   '1.1.1.1'
-		dst_addr:   '2.2.2.2'
-		src_port:   1234
-		dst_port:   22
+		src_addr: '1.1.1.1'
+		dst_addr: '2.2.2.2'
+		src_port: 1234
+		dst_port: 22
 	}
 	dsw := json.decode(StartWorkConn, json.encode(sw)) or {
 		assert false
@@ -223,7 +223,7 @@ fn test_json_roundtrip_basic_messages() {
 	// Ping
 	pg := Ping{
 		privilege_key: 'pk'
-		timestamp:     456
+		timestamp: 456
 	}
 	dpg := json.decode(Ping, json.encode(pg)) or {
 		assert false
@@ -241,8 +241,8 @@ fn test_json_roundtrip_basic_messages() {
 	assert dpo == po
 	// UDPPacket
 	up := UDPPacket{
-		content:     [u8(0xde), 0xad, 0xbe, 0xef]
-		local_addr:  '1.2.3.4:5000'
+		content: [u8(0xde), 0xad, 0xbe, 0xef]
+		local_addr: '1.2.3.4:5000'
 		remote_addr: '5.6.7.8:6000'
 	}
 	dup := json.decode(UDPPacket, json.encode(up)) or {
@@ -295,16 +295,21 @@ fn test_write_read_tcp_roundtrip() {
 	port := '${addr}'.all_after(':').int()
 
 	mut client_result := chan string{}
+
+	// 客户端连发两条消息
+
+	// 客户端连读两条消息
+
+	// 服务端（主线程）：连读两条
 	spawn fn [port, mut client_result] () {
 		mut c := net.dial_tcp('127.0.0.1:${port}') or {
 			client_result <- 'dial: ${err}'
 			return
 		}
-		// 客户端连发两条消息
 		write_msg(mut c, Login{
-			version:  'v0.1'
+			version: 'v0.1'
 			hostname: 'testhost'
-			metas:    {
+			metas: {
 				'k1': 'v1'
 			}
 		}) or {
@@ -315,7 +320,6 @@ fn test_write_read_tcp_roundtrip() {
 			client_result <- 'write Ping: ${err}'
 			return
 		}
-		// 客户端连读两条消息
 		m1 := read_msg(mut c) or {
 			client_result <- 'read LoginResp: ${err}'
 			return
@@ -345,8 +349,6 @@ fn test_write_read_tcp_roundtrip() {
 		}
 		client_result <- ''
 	}()
-
-	// 服务端（主线程）：连读两条
 	mut sconn := lst.accept() or {
 		assert false
 		return
@@ -485,7 +487,7 @@ fn test_read_msg_conn_closed() {
 // 并发编解码压测：多线程同时 encode/decode 同一消息类型，验证 json2 懒缓存
 // 数据竞争防护（g_encode_mu / g_decode_mu）不 panic、不丢字段、不死锁。
 fn test_concurrent_encode_decode() {
-	mut fails := chan int{cap: 8}
+	mut fails := chan int{ cap: 8 }
 	for _ in 0 .. 8 {
 		spawn fn [mut fails] () {
 			mut bad := 0

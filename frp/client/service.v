@@ -64,13 +64,20 @@ pub fn (mut svc Service) run() {
 			continue
 		}
 		log.info('all proxies registered, entering control read loop')
+		// P7: 起 visitor 监听器（stcp 访问端）。绑定当前 run_id；
+		// 会话断开（read_loop 出错）时统一 close，重连后随新 run_id 重建。
+		mut visitors := start_visitors(svc.cfg, run_id)
+		if visitors.len > 0 {
+			log.info('started ${visitors.len} visitor(s) for this session')
+		}
 		// 心跳循环与读循环并发运行；心跳写走 write_mu，读循环独占读
 		interval := svc.cfg.heartbeat_interval
-		spawn heartbeat_loop(ctl, interval)
+
 		// P5: 预建 work conn 池。pool_count 条 work conn 预先 dial + 发 NewWorkConn，
 		// 蹲在 server 的 work_conns 队列里；用户连接时 server 立即从队列取，
 		// 省去 dial+auth 等待。handle_work_conn 内部已处理连接失败路径。
 		// 取 cfg by value（与 read_loop 的 ReqWorkConn 分支同型），spawn 不会捕获栈地址。
+		spawn heartbeat_loop(ctl, interval)
 		pool_count := svc.cfg.pool_count
 		if pool_count > 0 {
 			log.info('pre-warming work conn pool: ${pool_count} conns')
@@ -81,6 +88,12 @@ pub fn (mut svc Service) run() {
 		ctl.read_loop() or {
 			ctl.stop()
 			ctl.close()
+			// 关掉本会话的 visitor 监听器，避免重连后旧 listener 残留接连接
+			// （accept_loop 收到 close 后立即安静退出；已 accept 的 handle_conn
+			//  会在 server 侧 visitor 会话拆除后通过 relay EOF 自然收尾）。
+			for mut v in visitors {
+				v.close()
+			}
 			log.error('control connection lost: ${err.msg()}, retry in ${backoff}s')
 			time.sleep(backoff * time.second)
 			backoff = next_backoff(backoff)
@@ -90,15 +103,19 @@ pub fn (mut svc Service) run() {
 
 // register_proxies 为配置中的每个代理发送 NewProxy 注册消息。
 // udp 代理在 work conn 阶段跳过（P6 支持），此处照常注册，服务端自会处理。
+// sk / allow_users 为 stcp / xtcp 专用字段（ProxyConfig 已就绪）；allow_users 是数组
+// 字段，msg.v 里该字段无 omitempty，直接传即可（对齐 Go 版 NewProxy）。
 fn (mut svc Service) register_proxies(mut ctl Control) ! {
 	for p in svc.cfg.proxies {
 		ctl.write_msg(msg.NewProxy{
-			proxy_name:     p.name
-			proxy_type:     p.type
-			remote_port:    p.remote_port
+			proxy_name: p.name
+			proxy_type: p.type
+			remote_port: p.remote_port
 			custom_domains: p.custom_domains
-			subdomain:      p.subdomain
+			subdomain: p.subdomain
 			subdomain_host: p.subdomain_host
+			sk: p.sk
+			allow_users: p.allow_users
 		}) or { return error('register proxy "${p.name}" failed: ${err.msg()}') }
 		log.info('registering proxy "${p.name}" (${p.type}), remote port: ${p.remote_port}')
 	}
@@ -108,15 +125,15 @@ fn (mut svc Service) register_proxies(mut ctl Control) ! {
 fn login(mut ctl Control) ! {
 	ts := time.now().unix()
 	ctl.write_msg(msg.Login{
-		version:       version.version
-		hostname:      hostname()
-		os:            os_name()
-		arch:          arch_name()
-		user:          username()
+		version: version.version
+		hostname: hostname()
+		os: os_name()
+		arch: arch_name()
+		user: username()
 		privilege_key: auth.new_privilege_key(ctl.cfg.auth_token, ts)
-		timestamp:     ts
-		run_id:        ctl.run_id
-		pool_count:    ctl.cfg.pool_count
+		timestamp: ts
+		run_id: ctl.run_id
+		pool_count: ctl.cfg.pool_count
 	})!
 	resp := ctl.read_login_resp()!
 	if resp.error != '' {

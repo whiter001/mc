@@ -57,6 +57,8 @@ fn msg_type_byte(msg Message) u8 {
 		Ping { type_ping }
 		Pong { type_pong }
 		UDPPacket { type_udp_packet }
+		NewVisitorConn { type_new_visitor_conn }
+		NewVisitorConnResp { type_new_visitor_conn_resp }
 	}
 }
 
@@ -81,6 +83,8 @@ fn encode_message(msg Message) string {
 		Ping { json2.encode(msg, escape_unicode: true) }
 		Pong { json2.encode(msg, escape_unicode: true) }
 		UDPPacket { json2.encode(msg, escape_unicode: true) }
+		NewVisitorConn { json2.encode(msg, escape_unicode: true) }
+		NewVisitorConnResp { json2.encode(msg, escape_unicode: true) }
 	}
 }
 
@@ -171,6 +175,16 @@ fn decode_message(type_byte u8, payload []u8) !Message {
 				return error('read_msg: bad UDPPacket payload: ${err}')
 			}
 		}
+		type_new_visitor_conn {
+			return json2.decode[NewVisitorConn](data) or {
+				return error('read_msg: bad NewVisitorConn payload: ${err}')
+			}
+		}
+		type_new_visitor_conn_resp {
+			return json2.decode[NewVisitorConnResp](data) or {
+				return error('read_msg: bad NewVisitorConnResp payload: ${err}')
+			}
+		}
 		else {
 			return error('read_msg: unknown message type byte: ${type_byte}')
 		}
@@ -180,43 +194,43 @@ fn decode_message(type_byte u8, payload []u8) !Message {
 // login_from_wire 把 LoginWire 转换为 Login（map 字段保持空）。
 fn login_from_wire(w LoginWire) Login {
 	return Login{
-		version:       w.version
-		hostname:      w.hostname
-		os:            w.os
-		arch:          w.arch
-		user:          w.user
+		version: w.version
+		hostname: w.hostname
+		os: w.os
+		arch: w.arch
+		user: w.user
 		privilege_key: w.privilege_key
-		timestamp:     w.timestamp
-		run_id:        w.run_id
-		client_id:     w.client_id
-		client_spec:   w.client_spec
-		pool_count:    w.pool_count
+		timestamp: w.timestamp
+		run_id: w.run_id
+		client_id: w.client_id
+		client_spec: w.client_spec
+		pool_count: w.pool_count
 	}
 }
 
 // new_proxy_from_wire 把 NewProxyWire 转换为 NewProxy（map 字段保持空）。
 fn new_proxy_from_wire(w NewProxyWire) NewProxy {
 	return NewProxy{
-		proxy_name:           w.proxy_name
-		proxy_type:           w.proxy_type
-		use_encryption:       w.use_encryption
-		use_compression:      w.use_compression
-		bandwidth_limit:      w.bandwidth_limit
+		proxy_name: w.proxy_name
+		proxy_type: w.proxy_type
+		use_encryption: w.use_encryption
+		use_compression: w.use_compression
+		bandwidth_limit: w.bandwidth_limit
 		bandwidth_limit_mode: w.bandwidth_limit_mode
-		group:                w.group
-		group_key:            w.group_key
-		remote_port:          w.remote_port
-		custom_domains:       w.custom_domains
-		subdomain:            w.subdomain
-		subdomain_host:       w.subdomain_host
-		locations:            w.locations
-		http_user:            w.http_user
-		http_pwd:             w.http_pwd
-		host_header_rewrite:  w.host_header_rewrite
-		route_by_http_user:   w.route_by_http_user
-		sk:                   w.sk
-		allow_users:          w.allow_users
-		multiplexer:          w.multiplexer
+		group: w.group
+		group_key: w.group_key
+		remote_port: w.remote_port
+		custom_domains: w.custom_domains
+		subdomain: w.subdomain
+		subdomain_host: w.subdomain_host
+		locations: w.locations
+		http_user: w.http_user
+		http_pwd: w.http_pwd
+		host_header_rewrite: w.host_header_rewrite
+		route_by_http_user: w.route_by_http_user
+		sk: w.sk
+		allow_users: w.allow_users
+		multiplexer: w.multiplexer
 	}
 }
 
@@ -224,8 +238,8 @@ fn new_proxy_from_wire(w NewProxyWire) NewProxy {
 // 字段一一对应（见 NewWorkConnWire 注释）。
 fn new_work_conn_from_wire(w NewWorkConnWire) NewWorkConn {
 	return NewWorkConn{
-		run_id:        w.run_id
+		run_id: w.run_id
 		privilege_key: w.privilege_key
-		timestamp:     w.timestamp
+		timestamp: w.timestamp
 	}
 }

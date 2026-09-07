@@ -128,8 +128,9 @@ fn handle_udp_proxy(local config.ProxyConfig, work_conn &net.TcpConn) {
 	log.info('proxy "${local.name}": udp relay ready, local=${local_addr}')
 
 	// 本地 UDP → work conn
-	spawn udp_local_to_work(local.name, local_udp, dst, work_conn)
+
 	// work conn → 本地 UDP
+	spawn udp_local_to_work(local.name, local_udp, dst, work_conn)
 	spawn udp_work_to_local(local.name, work_conn, local_udp)
 }
 
@@ -153,9 +154,9 @@ fn udp_local_to_work(proxy_name string, local_udp &net.UdpConn, dst net.Addr, wo
 		mut pkt_content := []u8{len: n, init: 0}
 		copy(mut pkt_content, buf[..n])
 		msg.write_msg(mut wc, msg.UDPPacket{
-			content:     pkt_content
+			content: pkt_content
 			remote_addr: '${dst}'
-			local_addr:  '${src_addr}'
+			local_addr: '${src_addr}'
 		}) or {
 			log.warn('proxy "${proxy_name}": udp write to work conn failed: ${err.msg()}')
 			return

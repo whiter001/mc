@@ -27,20 +27,21 @@ const work_conn_wait_timeout = 10 * time.second
 // 使用；其方法被读循环线程、代理线程、service 线程并发调用。
 pub struct Control {
 pub mut:
-	run_id      string            // 客户端标识（服务端生成，16 字符 hex；客户端重连可自带）
-	conn        &net.TcpConn      // 控制连接
-	write_mu    sync.Mutex        // 串行化控制连接写入
+	run_id      string // 客户端标识（服务端生成，16 字符 hex；客户端重连可自带）
+	user        string // 客户端登录 user（Login.user，stcp allow_users 校验用）
+	conn        &net.TcpConn // 控制连接
+	write_mu    sync.Mutex // 串行化控制连接写入
 	work_conns  chan &net.TcpConn // 客户端上报的 work conn 队列（缓冲 64，永不 close）
-	work_mu     sync.Mutex        // 保护 closed 标志（work conn 注册与排空）
-	closed      bool              // 本 control 是否已关闭
-	token       string            // 服务端 auth token（校验 privilege_key 用）
-	auth_scopes []string          // auth_additional_scopes：额外校验范围（HeartBeats / NewWorkConns）
+	work_mu     sync.Mutex // 保护 closed 标志（work conn 注册与排空）
+	closed      bool // 本 control 是否已关闭
+	token       string // 服务端 auth token（校验 privilege_key 用）
+	auth_scopes []string // auth_additional_scopes：额外校验范围（HeartBeats / NewWorkConns）
 	tcp_proxies map[string]&TcpProxy
 	udp_proxies map[string]&UdpProxy
-	proxies_mu  sync.Mutex   // 保护代理表（tcp + udp 共享同一把锁）
-	bind_addr   string       // 代理监听地址（服务端 bind_addr）
+	proxies_mu  sync.Mutex // 保护代理表（tcp + udp 共享同一把锁）
+	bind_addr   string // 代理监听地址（服务端 bind_addr）
 	pm          &PortManager // 端口管理器（NewProxy 分配 remote_port 用）
-	svc         &Service     // 所属 Service（http 代理用其注册 vhost 路由）
+	svc         &Service // 所属 Service（http 代理用其注册 vhost 路由）
 }
 
 // new_control 创建控制会话。run_id 为空时由服务端生成随机 16 字符 hex；
@@ -50,19 +51,19 @@ pub fn new_control(conn &net.TcpConn, token string, bind_addr string, pm &PortMa
 	svc &Service, run_id string, auth_scopes []string) &Control {
 	rid := if run_id == '' { gen_run_id() } else { run_id }
 	return &Control{
-		run_id:      rid
-		conn:        conn
-		write_mu:    sync.new_mutex()
-		work_conns:  chan &net.TcpConn{cap: work_conn_chan_cap}
-		work_mu:     sync.new_mutex()
-		token:       token
+		run_id: rid
+		conn: conn
+		write_mu: sync.new_mutex()
+		work_conns: chan &net.TcpConn{ cap: work_conn_chan_cap }
+		work_mu: sync.new_mutex()
+		token: token
 		auth_scopes: auth_scopes
 		tcp_proxies: map[string]&TcpProxy{}
 		udp_proxies: map[string]&UdpProxy{}
-		proxies_mu:  sync.new_mutex()
-		bind_addr:   bind_addr
-		pm:          pm
-		svc:         svc
+		proxies_mu: sync.new_mutex()
+		bind_addr: bind_addr
+		pm: pm
+		svc: svc
 	}
 }
 
@@ -137,7 +138,7 @@ pub fn (mut c Control) verify_login(login msg.Login) ! {
 pub fn (mut c Control) send_login_success() ! {
 	c.write_msg(msg.LoginResp{
 		version: version.version
-		run_id:  c.run_id
+		run_id: c.run_id
 	})!
 }
 
@@ -166,8 +167,9 @@ pub fn (mut c Control) run() {
 	}
 }
 
-// handle_new_proxy 处理 NewProxy：支持 tcp / udp / http；tcp/udp 分配 remote_port 并起监听器，
-// http 把 custom_domains 注册到 Service.vhost_routes（由 vhost_http_port 接收后路由）；
+// handle_new_proxy 处理 NewProxy：支持 tcp / udp / http / stcp；tcp/udp 分配 remote_port
+// 并起监听器，http 把 custom_domains 注册到 Service.vhost_routes（由 vhost_http_port 接收后
+// 路由），stcp 只登记到 Service.visitor_mgr（不开 listener）；
 // 回 NewProxyResp{proxy_name, remote_addr} 或带 error 的 NewProxyResp。
 fn (mut c Control) handle_new_proxy(m msg.NewProxy) {
 	match m.proxy_type {
@@ -180,10 +182,13 @@ fn (mut c Control) handle_new_proxy(m msg.NewProxy) {
 		'http' {
 			c.start_http_proxy(m)
 		}
+		'stcp' {
+			c.start_stcp_proxy(m)
+		}
 		else {
 			c.write_msg(msg.NewProxyResp{
 				proxy_name: m.proxy_name
-				error:      'unsupported proxy type "${m.proxy_type}", only tcp/udp/http supported'
+				error: 'unsupported proxy type "${m.proxy_type}", only tcp/udp/http/stcp supported'
 			}) or {}
 		}
 	}
@@ -198,7 +203,7 @@ fn (mut c Control) start_http_proxy(m msg.NewProxy) {
 	if domains.len == 0 {
 		c.write_msg(msg.NewProxyResp{
 			proxy_name: m.proxy_name
-			error:      'http proxy needs at least one custom_domain or subdomain+subdomain_host'
+			error: 'http proxy needs at least one custom_domain or subdomain+subdomain_host'
 		}) or {}
 		return
 	}
@@ -207,7 +212,7 @@ fn (mut c Control) start_http_proxy(m msg.NewProxy) {
 	}
 	log.info('control ${c.run_id}: new proxy [${m.proxy_name}] type http, ${domains.len} domain(s)')
 	c.write_msg(msg.NewProxyResp{
-		proxy_name:  m.proxy_name
+		proxy_name: m.proxy_name
 		remote_addr: 'vhost:${c.svc.cfg.vhost_http_port}'
 	}) or {}
 }
@@ -227,12 +232,32 @@ fn http_vhost_domains(m msg.NewProxy) []string {
 	return out
 }
 
+// start_stcp_proxy 注册 stcp 代理（handle_new_proxy 的 stcp 分支）。
+// stcp 不开 remote listener、不占端口：只把 (proxy_name, sk, allow_users, 属主)
+// 登记到 Service.visitor_mgr；visitor 连接鉴权通过后再向本 control 申请 work conn。
+// remote_addr 无端口可填，用 "stcp" 占位便于 client 侧日志区分。
+fn (mut c Control) start_stcp_proxy(m msg.NewProxy) {
+	if m.sk == '' {
+		c.write_msg(msg.NewProxyResp{
+			proxy_name: m.proxy_name
+			error: 'stcp proxy needs sk'
+		}) or {}
+		return
+	}
+	c.svc.visitor_mgr.listen(m.proxy_name, m.sk, m.allow_users, c.user, c)
+	log.info('control ${c.run_id}: new proxy [${m.proxy_name}] type stcp, ${m.allow_users.len} allow_user(s)')
+	c.write_msg(msg.NewProxyResp{
+		proxy_name: m.proxy_name
+		remote_addr: 'stcp'
+	}) or {}
+}
+
 // start_tcp_proxy 启动 TCP 代理（handle_new_proxy 的 tcp 分支）。
 fn (mut c Control) start_tcp_proxy(m msg.NewProxy) {
 	port := c.pm.acquire(m.remote_port) or {
 		c.write_msg(msg.NewProxyResp{
 			proxy_name: m.proxy_name
-			error:      'allocate tcp remote port ${m.remote_port} failed: ${err.msg()}'
+			error: 'allocate tcp remote port ${m.remote_port} failed: ${err.msg()}'
 		}) or {}
 		return
 	}
@@ -241,7 +266,7 @@ fn (mut c Control) start_tcp_proxy(m msg.NewProxy) {
 		c.pm.release(port)
 		c.write_msg(msg.NewProxyResp{
 			proxy_name: m.proxy_name
-			error:      'listen tcp on port ${port} failed: ${err.msg()}'
+			error: 'listen tcp on port ${port} failed: ${err.msg()}'
 		}) or {}
 		return
 	}
@@ -250,7 +275,7 @@ fn (mut c Control) start_tcp_proxy(m msg.NewProxy) {
 	c.proxies_mu.unlock()
 	log.info('control ${c.run_id}: new proxy [${m.proxy_name}] type tcp, remote_addr :${real_port}')
 	c.write_msg(msg.NewProxyResp{
-		proxy_name:  m.proxy_name
+		proxy_name: m.proxy_name
 		remote_addr: ':${real_port}'
 	}) or {}
 }
@@ -262,7 +287,7 @@ fn (mut c Control) start_udp_proxy(m msg.NewProxy) {
 	port := c.pm.acquire_udp(m.remote_port) or {
 		c.write_msg(msg.NewProxyResp{
 			proxy_name: m.proxy_name
-			error:      'allocate udp remote port ${m.remote_port} failed: ${err.msg()}'
+			error: 'allocate udp remote port ${m.remote_port} failed: ${err.msg()}'
 		}) or {}
 		return
 	}
@@ -271,7 +296,7 @@ fn (mut c Control) start_udp_proxy(m msg.NewProxy) {
 		c.pm.release_udp(port)
 		c.write_msg(msg.NewProxyResp{
 			proxy_name: m.proxy_name
-			error:      'listen udp on port ${port} failed: ${err.msg()}'
+			error: 'listen udp on port ${port} failed: ${err.msg()}'
 		}) or {}
 		return
 	}
@@ -280,7 +305,7 @@ fn (mut c Control) start_udp_proxy(m msg.NewProxy) {
 	c.proxies_mu.unlock()
 	log.info('control ${c.run_id}: new proxy [${m.proxy_name}] type udp, remote_addr :${real_port}')
 	c.write_msg(msg.NewProxyResp{
-		proxy_name:  m.proxy_name
+		proxy_name: m.proxy_name
 		remote_addr: ':${real_port}'
 	}) or {}
 }
@@ -302,7 +327,8 @@ fn (mut c Control) handle_ping(m msg.Ping) {
 	c.write_msg(msg.Pong{}) or {}
 }
 
-// handle_close_proxy 关闭指定代理并释放其端口（按代理类型走对应的端口释放）。
+// handle_close_proxy 关闭指定代理并释放其端口（按代理类型走对应的端口释放）；
+// tcp/udp 代理表都未命中时再查 stcp 监听项（Service.visitor_mgr）。
 fn (mut c Control) handle_close_proxy(m msg.CloseProxy) {
 	c.proxies_mu.lock()
 	// 在两个 map 中查找：name 是 map 的 key，命中即删除
@@ -310,6 +336,11 @@ fn (mut c Control) handle_close_proxy(m msg.CloseProxy) {
 	hit_udp := m.proxy_name in c.udp_proxies
 	if !hit_tcp && !hit_udp {
 		c.proxies_mu.unlock()
+		// stcp 代理不在 tcp/udp 代理表里，登记在 Service.visitor_mgr
+		if c.svc.visitor_mgr.remove(m.proxy_name) {
+			log.info('control ${c.run_id}: close stcp proxy [${m.proxy_name}]')
+			return
+		}
 		log.warn('control ${c.run_id}: close unknown proxy ${m.proxy_name}')
 		return
 	}
@@ -337,7 +368,7 @@ fn (mut c Control) handle_close_proxy(m msg.CloseProxy) {
 }
 
 // close 关闭控制会话（幂等）：关闭控制连接、标记 closed（拒绝后续 work conn）、
-// 排空并关闭已入队 work conn、关闭所有代理并释放端口。
+// 排空并关闭已入队 work conn、关闭所有代理并释放端口、注销本 control 的 stcp 监听项。
 pub fn (mut c Control) close() {
 	c.work_mu.lock()
 	if c.closed {
@@ -383,4 +414,5 @@ pub fn (mut c Control) close() {
 		pxy.close()
 		c.pm.release_udp(pxy.remote_port)
 	}
+	c.svc.visitor_mgr.remove_for_control(c)
 }

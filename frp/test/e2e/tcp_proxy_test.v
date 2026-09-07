@@ -63,8 +63,8 @@ fn do_build(ch chan BuildMsg, bin string, src string) {
 	cmd := '${os.quoted_path(@VEXE)} -no-memory-limit -o ${os.quoted_path(bin)} ${os.quoted_path(src)}'
 	res := os.execute(cmd)
 	ch <- BuildMsg{
-		bin:    bin
-		exit:   res.exit_code
+		bin: bin
+		exit: res.exit_code
 		output: res.output
 	}
 }
@@ -76,7 +76,7 @@ fn build_binaries(bins [2]string, srcs [2]string) {
 	for i in 0 .. 2 {
 		before[i] = os.file_last_mod_unix(bins[i])
 	}
-	ch := chan BuildMsg{cap: 2}
+	ch := chan BuildMsg{ cap: 2 }
 	for i in 0 .. 2 {
 		spawn do_build(ch, bins[i], srcs[i])
 	}
@@ -269,7 +269,7 @@ fn start_echo_server() !&EchoServer {
 	spawn echo_accept_loop(mut l)
 	return &EchoServer{
 		listener: l
-		port:     port
+		port: port
 	}
 }
 
@@ -308,7 +308,7 @@ fn write_server_config(path string, bind_port int, token string) {
 }
 
 // write_server_config_with_allow_ports 写带 allow_ports 白名单的服务端配置
-//（对齐 Go 版 allowPorts：单端口或 start-end 区间）。
+// （对齐 Go 版 allowPorts：单端口或 start-end 区间）。
 fn write_server_config_with_allow_ports(path string, bind_port int, token string, allow_ports []string) {
 	mut content := 'bind_addr = "127.0.0.1"\nbind_port = ${bind_port}\nauth_token = "${token}"\nallow_ports = ['
 	for i, p in allow_ports {
@@ -327,7 +327,7 @@ fn write_client_config(path string, server_port int, local_port int, remote_port
 }
 
 // write_server_config_with_scopes 写带 auth_additional_scopes 的服务端配置
-//（对齐 Go 版 auth.additionalAuthScopes：取 "HeartBeats" / "NewWorkConns"）。
+// （对齐 Go 版 auth.additionalAuthScopes：取 "HeartBeats" / "NewWorkConns"）。
 fn write_server_config_with_scopes(path string, bind_port int, token string, scopes []string) {
 	mut content := 'bind_addr = "127.0.0.1"\nbind_port = ${bind_port}\nauth_token = "${token}"\n'
 	if scopes.len > 0 {
@@ -484,13 +484,13 @@ fn test_multi_proxy_e2e() {
 	write_server_config(srv_cfg, server_port, 'test-token')
 	write_multi_client_config(cli_cfg, server_port, 'test-token', 0, [
 		ProxySpec{
-			name:        'multi_a'
-			local_port:  echo1.port
+			name: 'multi_a'
+			local_port: echo1.port
 			remote_port: proxy1_remote
 		},
 		ProxySpec{
-			name:        'multi_b'
-			local_port:  echo2.port
+			name: 'multi_b'
+			local_port: echo2.port
 			remote_port: proxy2_remote
 		},
 	]!)
@@ -530,8 +530,8 @@ fn test_pool_count_e2e() {
 	write_server_config(srv_cfg, server_port, 'test-token')
 	write_multi_client_config(cli_cfg, server_port, 'test-token', pool_count, [
 		ProxySpec{
-			name:        'pooled'
-			local_port:  echo.port
+			name: 'pooled'
+			local_port: echo.port
 			remote_port: remote_port
 		},
 	]!)
@@ -581,7 +581,9 @@ fn test_allow_ports_allowed_e2e() {
 
 	srv_cfg := os.join_path(g_tmp, 'allow_allowed_vfrps.toml')
 	cli_cfg := os.join_path(g_tmp, 'allow_allowed_vfrpc.toml')
-	write_server_config_with_allow_ports(srv_cfg, server_port, 'test-token', ['${remote_port}'])
+	write_server_config_with_allow_ports(srv_cfg, server_port, 'test-token', [
+		'${remote_port}',
+	])
 	write_client_config(cli_cfg, server_port, echo.port, remote_port, 'test-token')
 
 	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
@@ -612,7 +614,9 @@ fn test_allow_ports_denied_e2e() {
 
 	srv_cfg := os.join_path(g_tmp, 'allow_denied_vfrps.toml')
 	cli_cfg := os.join_path(g_tmp, 'allow_denied_vfrpc.toml')
-	write_server_config_with_allow_ports(srv_cfg, server_port, 'test-token', ['${allowed_other}'])
+	write_server_config_with_allow_ports(srv_cfg, server_port, 'test-token', [
+		'${allowed_other}',
+	])
 	write_client_config(cli_cfg, server_port, echo.port, remote_port, 'test-token')
 
 	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
@@ -646,8 +650,10 @@ fn test_scope_both_sides_e2e() {
 	srv_cfg := os.join_path(g_tmp, 'scope_both_vfrps.toml')
 	cli_cfg := os.join_path(g_tmp, 'scope_both_vfrpc.toml')
 	write_server_config_with_scopes(srv_cfg, server_port, 'test-token', ['HeartBeats', 'NewWorkConns'])
-	write_client_config_with_scopes(cli_cfg, server_port, echo.port, remote_port, 'test-token',
-		['HeartBeats', 'NewWorkConns'])
+	write_client_config_with_scopes(cli_cfg, server_port, echo.port, remote_port, 'test-token', [
+		'HeartBeats',
+		'NewWorkConns',
+	])
 
 	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
 	up, srv_log := wait_log_contains(mut psrv, 'listening on 127.0.0.1:${server_port}', wait_total)
@@ -725,7 +731,7 @@ fn start_udp_echo_server() !&UdpEchoServer {
 	spawn udp_echo_loop(mut s)
 	return &UdpEchoServer{
 		socket: s
-		port:   port
+		port: port
 	}
 }
 
@@ -827,7 +833,7 @@ fn start_http_echo_server(label string) !&HttpEchoServer {
 	spawn http_echo_accept_loop(mut l, label)
 	return &HttpEchoServer{
 		listener: l
-		port:     port
+		port: port
 	}
 }
 
@@ -931,20 +937,19 @@ fn test_http_vhost_e2e() {
 	write_vhost_server_config(srv_cfg, server_port, vhost_port, 'test-token')
 	write_client_http_config(cli_cfg, server_port, [
 		HttpProxySpec{
-			name:           'site_a'
-			local_port:     echo1.port
+			name: 'site_a'
+			local_port: echo1.port
 			custom_domains: ['a.test']
 		},
 		HttpProxySpec{
-			name:           'site_b'
-			local_port:     echo2.port
+			name: 'site_b'
+			local_port: echo2.port
 			custom_domains: ['b.test']
 		},
 	]!)
 
 	mut psrv := start_proc(g_vfrps_bin, ['-c', srv_cfg])
-	up, srv_log := wait_log_contains(mut psrv, 'vhost HTTP listening on 127.0.0.1:${vhost_port}',
-		wait_total)
+	up, srv_log := wait_log_contains(mut psrv, 'vhost HTTP listening on 127.0.0.1:${vhost_port}', wait_total)
 	assert up, 'vfrps did not start vhost listener, log:\n${srv_log}'
 
 	mut pcli := start_proc(g_vfrpc_bin, ['-c', cli_cfg])

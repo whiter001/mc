@@ -29,7 +29,7 @@
 - **M2**：UDP 代理、多代理、连接池、心跳保活、断线重连
 - **M3**：HTTP vhost 路由（按域名分发）
 - **M4**：TLS 传输加密、HTTPS/SNI 路由
-- **M5+（可选）**：STCP/XTCP、tcpmux、metrics、KCP/WS、wire v2
+- **M5+（可选）**：~~STCP~~（已完成）/XTCP、tcpmux、metrics、KCP/WS、wire v2
 
 ## 2. 架构
 
@@ -75,16 +75,18 @@ mc/frp/                       # 项目根
 │       ├── version/version.v # 版本常量
 │       └── netx/netx.v       # join_host_port、双向拷贝等
 ├── server/
-│   ├── service.v             # 监听、连接分发（control vs work conn）
+│   ├── service.v             # 监听、连接分发（control vs work conn vs visitor conn）
 │   ├── control.v             # 单个客户端的控制会话
 │   ├── proxy.v               # TCP 代理（listener + work conn 对接）
+│   ├── visitor.v             # STCP VisitorManager（sk/allow_users 鉴权）
 │   └── ports.v               # 端口分配与占用检查
 ├── client/
 │   ├── service.v             # 登录、重连（指数退避）、心跳
 │   ├── control.v             # 控制连接消息处理
-│   └── proxy.v               # TCP 代理客户端（work conn ↔ local）
+│   ├── proxy.v               # TCP 代理客户端（work conn ↔ local）
+│   └── visitor.v             # STCP visitor（本地监听 + NewVisitorConn）
 └── test/
-    └── e2e/tcp_proxy_test.v  # 端到端：起 vfrps+vfrpc+echo 服务，验证转发
+    └── e2e/                  # tcp_proxy_test.v / stcp_proxy_test.v（各自自包含）
 ```
 
 ## 4. 消息协议（v1 帧格式）
@@ -160,7 +162,7 @@ remote_port = 6000
 | P6 | UDP 代理（M2） | e2e UDP 测试 |
 | P7 | HTTP vhost 路由（M3） | 域名分流测试 |
 | P8 | TLS 传输（M4） | TLS 连接打通 |
-| P9+ | STCP/XTCP/tcpmux/metrics/KCP/WS/wire v2（可选，按需） | — |
+| P9+ | ~~STCP~~（已完成，见 todo.md P9 节）/XTCP/tcpmux/metrics/KCP/WS/wire v2（可选，按需） | — |
 
 ## 9. 风险与对策
 

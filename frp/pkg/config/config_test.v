@@ -259,6 +259,204 @@ remote_port = 8080
 	assert err.contains('proxies[0]'), 'expected position hint, got: ${err}'
 }
 
+// stcp 代理：合法配置（带 sk/allow_users，无 remote_port）通过校验。
+fn test_proxy_stcp_valid() {
+	path := write_tmp('proxy_stcp_valid', '
+server_addr = "127.0.0.1"
+
+[[proxies]]
+name = "ssh-stcp"
+type = "stcp"
+local_ip = "127.0.0.1"
+local_port = 22
+sk = "shared-secret"
+allow_users = ["alice", "bob"]
+')
+	defer {
+		os.rm(path) or {}
+	}
+	cfg := load_client_config(path) or { panic(err.msg()) }
+	assert cfg.proxies.len == 1
+	assert cfg.proxies[0].type == 'stcp'
+	assert cfg.proxies[0].sk == 'shared-secret'
+	assert cfg.proxies[0].allow_users == ['alice', 'bob']
+	assert cfg.proxies[0].local_port == 22
+	assert cfg.proxies[0].remote_port == 0 // stcp 不要求 remote_port
+}
+
+// stcp 代理缺 sk → 报错；提示信息含位置和字段名。
+fn test_proxy_stcp_missing_sk() {
+	path := write_tmp('proxy_stcp_no_sk', '
+server_addr = "127.0.0.1"
+
+[[proxies]]
+name = "ssh-stcp"
+type = "stcp"
+local_port = 22
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('proxies[0]'), 'expected position hint, got: ${err}'
+	assert err.contains('"ssh-stcp"'), 'expected proxy name in error, got: ${err}'
+	assert err.contains('(stcp)'), 'expected stcp tag in error, got: ${err}'
+	assert err.contains('"sk"'), 'expected sk field in error, got: ${err}'
+}
+
+// stcp 代理缺 local_port → 报错（与 tcp 行为一致）。
+fn test_proxy_stcp_missing_local_port() {
+	path := write_tmp('proxy_stcp_no_port', '
+server_addr = "127.0.0.1"
+
+[[proxies]]
+name = "ssh-stcp"
+type = "stcp"
+sk = "shared-secret"
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('"ssh-stcp"'), 'got: ${err}'
+	assert err.contains('"local_port"'), 'got: ${err}'
+}
+
+// visitor 缺 secret_key → 报错。
+fn test_visitor_missing_secret_key() {
+	path := write_tmp('visitor_no_sk', '
+server_addr = "127.0.0.1"
+
+[[visitors]]
+name = "v1"
+type = "stcp"
+server_name = "ssh-stcp"
+bind_port = 6000
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('visitors[0]'), 'expected position hint, got: ${err}'
+	assert err.contains('"v1"'), 'expected visitor name in error, got: ${err}'
+	assert err.contains('"secret_key"'), 'expected secret_key field, got: ${err}'
+}
+
+// visitor 类型非 stcp → 报错。
+fn test_visitor_unknown_type() {
+	path := write_tmp('visitor_bad_type', '
+server_addr = "127.0.0.1"
+
+[[visitors]]
+name = "v1"
+type = "xtcp"
+server_name = "ssh-stcp"
+secret_key = "shared-secret"
+bind_port = 6000
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('unknown visitor type "xtcp"'), 'got: ${err}'
+	assert err.contains('want stcp'), 'got: ${err}'
+}
+
+// visitor bind_port 越界 → 报错（走 check_port）。
+fn test_visitor_invalid_bind_port() {
+	path := write_tmp('visitor_bad_port', '
+server_addr = "127.0.0.1"
+
+[[visitors]]
+name = "v1"
+type = "stcp"
+server_name = "ssh-stcp"
+secret_key = "shared-secret"
+bind_port = 70000
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('bind_port'), 'got: ${err}'
+	assert err.contains('1-65535'), 'got: ${err}'
+}
+
+// 合法配置（含 [[visitors]] 数组）完整解析。
+fn test_client_config_with_visitors() {
+	path := write_tmp('client_visitors', '
+server_addr = "127.0.0.1"
+server_port = 7000
+auth_token = "tok"
+
+[[proxies]]
+name = "ssh-stcp"
+type = "stcp"
+local_port = 22
+sk = "shared-secret"
+
+[[visitors]]
+name = "v-ssh"
+type = "stcp"
+server_name = "ssh-stcp"
+server_user = "alice"
+secret_key = "shared-secret"
+bind_addr = "127.0.0.1"
+bind_port = 6000
+')
+	defer {
+		os.rm(path) or {}
+	}
+	cfg := load_client_config(path) or { panic(err.msg()) }
+	assert cfg.proxies.len == 1
+	assert cfg.visitors.len == 1
+	assert cfg.visitors[0].name == 'v-ssh'
+	assert cfg.visitors[0].type == 'stcp'
+	assert cfg.visitors[0].server_name == 'ssh-stcp'
+	assert cfg.visitors[0].server_user == 'alice'
+	assert cfg.visitors[0].secret_key == 'shared-secret'
+	assert cfg.visitors[0].bind_addr == '127.0.0.1'
+	assert cfg.visitors[0].bind_port == 6000
+}
+
+// visitor 缺 name → 报错（含位置）。
+fn test_visitor_missing_name() {
+	path := write_tmp('visitor_no_name', '
+server_addr = "127.0.0.1"
+
+[[visitors]]
+type = "stcp"
+server_name = "ssh-stcp"
+secret_key = "k"
+bind_port = 6000
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('visitors[0]'), 'got: ${err}'
+	assert err.contains('"name"'), 'got: ${err}'
+}
+
+// visitor 缺 server_name → 报错。
+fn test_visitor_missing_server_name() {
+	path := write_tmp('visitor_no_srv', '
+server_addr = "127.0.0.1"
+
+[[visitors]]
+name = "v1"
+type = "stcp"
+secret_key = "k"
+bind_port = 6000
+')
+	defer {
+		os.rm(path) or {}
+	}
+	err := client_err(path)
+	assert err.contains('"v1"'), 'got: ${err}'
+	assert err.contains('"server_name"'), 'got: ${err}'
+}
+
 fn test_client_config_empty_proxies() {
 	path := write_tmp('client_no_proxies', '
 server_addr = "127.0.0.1"

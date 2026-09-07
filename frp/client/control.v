@@ -18,9 +18,10 @@ import pkg.util.log
 // - stopped 由 Service 在重连前置位（stop），心跳线程轮询（is_stopped）退出。
 pub struct Control {
 pub:
-	cfg    config.ClientConfig
-	run_id string
+	cfg config.ClientConfig
 mut:
+	// run_id 登录后由 LoginResp 回显覆盖（client/service.v login()），故须在 mut 区块。
+	run_id    string
 	conn      &net.TcpConn
 	write_mu  sync.Mutex
 	stop_mu   sync.Mutex
@@ -34,11 +35,11 @@ pub fn new_control(cfg config.ClientConfig, run_id string) !&Control {
 	addr := netx.join_host_port(cfg.server_addr, cfg.server_port)
 	mut conn := net.dial_tcp(addr) or { return error('dial server ${addr} failed: ${err.msg()}') }
 	return &Control{
-		cfg:      cfg
-		run_id:   run_id
-		conn:     conn
+		cfg: cfg
+		run_id: run_id
+		conn: conn
 		write_mu: sync.new_mutex()
-		stop_mu:  sync.new_mutex()
+		stop_mu: sync.new_mutex()
 	}
 }
 

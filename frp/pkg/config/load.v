@@ -63,7 +63,7 @@ fn validate_auth_scopes(scopes []string, where string) ! {
 // validate_allow_ports 校验 allow_ports 每项格式：单端口或 start-end 区间，
 // 端口范围 1-65535 且 end >= start。
 // pub：server 模块的 new_port_manager 复用本校验，避免两套解析器行为漂移
-//（见 server/ports.v parse_allow_ports）。
+// （见 server/ports.v parse_allow_ports）。
 pub fn validate_allow_ports(ports []string) ! {
 	for p in ports {
 		entry := p.trim_space()
@@ -113,11 +113,15 @@ fn (cfg ClientConfig) validate() ! {
 	for i, p in cfg.proxies {
 		p.validate(i)!
 	}
+	for i, v in cfg.visitors {
+		v.validate(i)!
+	}
 }
 
 // validate 校验单条代理规则：name/type/local_port/remote_port 必填；
-// type 取 tcp/udp/http。tcp/udp 需 remote_port，http 需 custom_domains 与
-// subdomain 至少一个（subdomain 须配合 subdomain_host）。idx 用于错误信息定位。
+// type 取 tcp/udp/http/stcp。tcp/udp 需 remote_port，http 需 custom_domains 与
+// subdomain 至少一个（subdomain 须配合 subdomain_host），stcp 需 sk 且不需 remote_port。
+// idx 用于错误信息定位。
 fn (p ProxyConfig) validate(idx int) ! {
 	where := 'proxies[${idx}]'
 	if p.name == '' {
@@ -149,8 +153,46 @@ fn (p ProxyConfig) validate(idx int) ! {
 			}
 			check_port(p.local_port, '${where} "${p.name}" local_port')!
 		}
+		'stcp' {
+			if p.local_port == 0 {
+				return error('${where} "${p.name}": missing required field "local_port"')
+			}
+			if p.sk == '' {
+				return error('${where} "${p.name}" (stcp): missing required field "sk"')
+			}
+			check_port(p.local_port, '${where} "${p.name}" local_port')!
+		}
 		else {
-			return error('${where} "${p.name}": unknown proxy type "${p.type}", want tcp/udp/http')
+			return error('${where} "${p.name}": unknown proxy type "${p.type}", want tcp/udp/http/stcp')
 		}
 	}
+}
+
+// validate 校验单条 visitor 规则：name/type/server_name/secret_key 必填；
+// type 仅允许 stcp（xtcp 留待后续扩展）；bind_port 必须 1-65535；bind_addr 非空。
+// idx 用于错误信息定位。
+fn (v VisitorConfig) validate(idx int) ! {
+	where := 'visitors[${idx}]'
+	if v.name == '' {
+		return error('${where}: missing required field "name"')
+	}
+	if v.type == '' {
+		return error('${where} "${v.name}": missing required field "type"')
+	}
+	if v.type != 'stcp' {
+		return error('${where} "${v.name}": unknown visitor type "${v.type}", want stcp')
+	}
+	if v.server_name == '' {
+		return error('${where} "${v.name}": missing required field "server_name"')
+	}
+	if v.secret_key == '' {
+		return error('${where} "${v.name}": missing required field "secret_key"')
+	}
+	if v.bind_addr == '' {
+		return error('${where} "${v.name}": bind_addr must not be empty')
+	}
+	if v.bind_port == 0 {
+		return error('${where} "${v.name}": missing required field "bind_port"')
+	}
+	check_port(v.bind_port, '${where} "${v.name}" bind_port')!
 }

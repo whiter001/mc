@@ -24,12 +24,12 @@ const max_probe_tries = 5
 // 只在白名单内挑（对齐 Go 版 ports.Manager 的 allowPorts 语义；空 = 不限制）。
 pub struct PortManager {
 mut:
-	mu        sync.Mutex      // 保护 used
-	bind      string          // 探测端口时的绑定地址（与服务端 bind_addr 一致）
+	mu        sync.Mutex // 保护 used
+	bind      string // 探测端口时的绑定地址（与服务端 bind_addr 一致）
 	used      map[string]bool // 协议隔离：key = "<proto>:<port>"，避免 TCP/UDP 同端口冲突
-	allow_map map[int]bool    // 白名单端口集合（has_allow=false 时忽略）
-	has_allow bool            // 是否配置了白名单
-	allow_seq []int           // 白名单端口有序数组（随机分配时从中挑选）
+	allow_map map[int]bool // 白名单端口集合（has_allow=false 时忽略）
+	has_allow bool // 是否配置了白名单
+	allow_seq []int // 白名单端口有序数组（随机分配时从中挑选）
 }
 
 // new_port_manager 创建端口管理器。bind 用于端口占用探测，须与代理实际
@@ -38,9 +38,9 @@ mut:
 pub fn new_port_manager(bind string, allow_ports []string) &PortManager {
 	allow_map, allow_seq, has_allow := parse_allow_ports(allow_ports)
 	return &PortManager{
-		mu:        sync.new_mutex()
-		bind:      bind
-		used:      map[string]bool{}
+		mu: sync.new_mutex()
+		bind: bind
+		used: map[string]bool{}
 		allow_map: allow_map
 		has_allow: has_allow
 		allow_seq: allow_seq
@@ -51,7 +51,7 @@ pub fn new_port_manager(bind string, allow_ports []string) &PortManager {
 // 返回 (集合, 有序数组, 是否配置了白名单)。
 // 畸形项（多段区间、空段、非数字、越界等）直接整体放弃白名单（返回空 + 记 warn）：
 // 复用 pkg/config 的 validate_allow_ports 校验，避免两套解析器行为漂移
-//（load_server_config 已在入口校验，但 new_port_manager 是 pub API，不能依赖该前置）。
+// （load_server_config 已在入口校验，但 new_port_manager 是 pub API，不能依赖该前置）。
 fn parse_allow_ports(allow_ports []string) (map[int]bool, []int, bool) {
 	mut valid := true
 	config.validate_allow_ports(allow_ports) or {
