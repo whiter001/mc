@@ -113,3 +113,188 @@ fn test_clipboard_size_label_mib_decimal() {
 	// 2.3 MiB: mib=2, dec = 314573 * 10 / 1048576 = 3 (3145730/1048576=3).
 	assert clipboard_size_label(2 * 1024 * 1024 + 314573) == '2.3 MiB'
 }
+
+fn test_prompt_prev_codepoint_ascii() {
+	assert prompt_prev_codepoint('abc', 0) == 0
+	assert prompt_prev_codepoint('abc', 1) == 0
+	assert prompt_prev_codepoint('abc', 2) == 1
+	assert prompt_prev_codepoint('abc', 3) == 2
+	// Off past the end clamps to len.
+	assert prompt_prev_codepoint('abc', 99) == 2
+}
+
+fn test_prompt_prev_codepoint_utf8() {
+	// '漢' is 3 bytes; '𝄞' is 4 bytes.
+	s := 'a漢𝄞b'
+	// s = 'a' (1) + '漢' (3) + '𝄞' (4) + 'b' (1) = 9 bytes.
+	assert s.len == 9
+	// Walking back from each byte boundary lands on the previous codepoint.
+	assert prompt_prev_codepoint(s, 1) == 0
+	assert prompt_prev_codepoint(s, 4) == 1
+	assert prompt_prev_codepoint(s, 8) == 4
+	assert prompt_prev_codepoint(s, 9) == 8
+	// Walking back from a continuation byte lands on the lead byte.
+	assert prompt_prev_codepoint(s, 2) == 1
+	assert prompt_prev_codepoint(s, 3) == 1
+}
+
+fn test_prompt_next_codepoint_utf8() {
+	s := 'a漢𝄞b'
+	// From each lead byte, advance to the next codepoint's lead.
+	assert prompt_next_codepoint(s, 0) == 1
+	assert prompt_next_codepoint(s, 1) == 4
+	assert prompt_next_codepoint(s, 4) == 8
+	// Past end clamps to len (9).
+	assert prompt_next_codepoint(s, 99) == 9
+	// Negative offsets clamp to 0.
+	assert prompt_next_codepoint(s, -5) == 0
+}
+
+fn test_prompt_effective_cursor_clamps() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'foo'
+	// The default (-1) and any out-of-range offset both become len().
+	assert ed.prompt_effective_cursor() == 3
+	ed.prompt_cursor = 2
+	assert ed.prompt_effective_cursor() == 2
+	ed.prompt_cursor = 99
+	assert ed.prompt_effective_cursor() == 3
+	ed.prompt_cursor = -10
+	assert ed.prompt_effective_cursor() == 3
+}
+
+fn test_prompt_insert_at_cursor() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'helloworld'
+	ed.prompt_cursor = 5 // between 'hello' and 'world'
+	ed.prompt_insert(' ')
+	assert ed.prompt_text == 'hello world'
+	assert ed.prompt_cursor == 6
+
+	// Inserting again at the new cursor.
+	ed.prompt_insert('!')
+	assert ed.prompt_text == 'hello !world'
+	assert ed.prompt_cursor == 7
+}
+
+fn test_prompt_backspace_respects_cursor() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+	ed.prompt_backspace()
+	assert ed.prompt_text == 'hell'
+	assert ed.prompt_cursor == 4
+
+	// Cursor at 0 is a no-op.
+	ed.prompt_cursor = 0
+	ed.prompt_backspace()
+	assert ed.prompt_text == 'hell'
+	assert ed.prompt_cursor == 0
+}
+
+fn test_prompt_delete_removes_forward_codepoint() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'a漢b'
+	ed.prompt_cursor = 1 // before '漢'
+	ed.prompt_delete()
+	assert ed.prompt_text == 'ab'
+	assert ed.prompt_cursor == 1
+
+	// Deleting past the end is a no-op.
+	ed.prompt_text = 'ab'
+	ed.prompt_cursor = 2
+	ed.prompt_delete()
+	assert ed.prompt_text == 'ab'
+}
+
+fn test_prompt_kill_to_end() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'abcdef'
+	ed.prompt_cursor = 2
+	ed.prompt_kill_to_end()
+	assert ed.prompt_text == 'ab'
+	assert ed.prompt_cursor == 2
+
+	// Cursor at end is a no-op.
+	ed.prompt_text = 'ab'
+	ed.prompt_cursor = 2
+	ed.prompt_kill_to_end()
+	assert ed.prompt_text == 'ab'
+}
+
+fn test_prompt_kill_line() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'abc'
+	ed.prompt_cursor = 1
+	ed.prompt_kill_line()
+	assert ed.prompt_text == ''
+	assert ed.prompt_cursor == 0
+}
+
+fn test_prompt_move_home_end_left_right() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'a漢b' // bytes: a=1 漢=3 b=1 → len 5
+	ed.prompt_cursor = 5
+	ed.prompt_move_home()
+	assert ed.prompt_cursor == 0
+	ed.prompt_move_end()
+	assert ed.prompt_cursor == 5
+	ed.prompt_move_left()
+	assert ed.prompt_cursor == 4 // back over 'b'
+	ed.prompt_move_left()
+	assert ed.prompt_cursor == 1 // back over '漢' (3 bytes)
+	ed.prompt_move_right()
+	assert ed.prompt_cursor == 4 // forward over '漢'
+}
+
+fn test_handle_prompt_key_arrow_home_end_delete() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	wr(mut ed.docs[ed.active].buf, 'foo')
+	ed.start_prompt(.search)
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = ed.prompt_text.len // cursor at end
+
+	// ← moves one codepoint back.
+	ed.handle_prompt_key(InputKey(vk_left))
+	assert ed.prompt_cursor == 4
+	// Home jumps to 0.
+	ed.handle_prompt_key(InputKey(vk_home))
+	assert ed.prompt_cursor == 0
+	// End jumps to len.
+	ed.handle_prompt_key(InputKey(vk_end))
+	assert ed.prompt_cursor == 5
+	// Delete removes the codepoint at the cursor (now end → no-op).
+	ed.handle_prompt_key(InputKey(vk_delete))
+	assert ed.prompt_text == 'hello'
+	// Move back one and delete forward.
+	ed.handle_prompt_key(InputKey(vk_left))
+	ed.handle_prompt_key(InputKey(vk_delete))
+	assert ed.prompt_text == 'hell'
+	assert ed.prompt_cursor == 4
+}
+
+fn test_handle_prompt_key_ctrl_a_k_u() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.start_prompt(.search)
+	ed.prompt_text = 'abcdef'
+	ed.prompt_cursor = 3
+
+	// Ctrl+K kills from cursor to end.
+	ed.handle_prompt_key(InputKey(vk_k | kbmod_ctrl))
+	assert ed.prompt_text == 'abc'
+	assert ed.prompt_cursor == 3
+
+	// Ctrl+U kills the whole line regardless of cursor.
+	ed.prompt_cursor = 1
+	ed.handle_prompt_key(InputKey(vk_u | kbmod_ctrl))
+	assert ed.prompt_text == ''
+	assert ed.prompt_cursor == 0
+
+	// Ctrl+A moves to start (no in-prompt selection model yet).
+	ed.prompt_text = 'xyz'
+	ed.prompt_cursor = 2
+	ed.handle_prompt_key(InputKey(vk_a | kbmod_ctrl))
+	assert ed.prompt_cursor == 0
+}

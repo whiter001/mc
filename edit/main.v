@@ -100,6 +100,11 @@ mut:
 	mode             EditMode
 	prompt_kind      PromptKind
 	prompt_text      string
+	// Cursor within prompt_text, as a byte offset (0..len). Clamped at the
+	// bounds by every handler. Out-of-range values are tolerated and treated
+	// as "at end" by the insert/delete paths. Used for ←/→/Home/End/Delete
+	// line editing inside the prompt (Rust editline is a full TextBuffer).
+	prompt_cursor    int = -1
 	// Last search, for F3 (= find next).
 	last_search      string
 	// Last replacement text; persists across Ctrl+R invocations like Rust's
@@ -266,6 +271,9 @@ fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 		.replace_with { 'with: ' }
 		.goto_line { 'go to line: ' }
 	}
+	// Clamp the cursor to a usable offset so a stray value from earlier code
+	// paths doesn't make us slice past the end of prompt_text below.
+	off := ed.prompt_effective_cursor()
 	text := ' ${label}${ed.prompt_text}'
 	ed.fb.replace_text(status_y, 0, ed.size.width, text)
 
@@ -290,9 +298,12 @@ fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 		}
 		ed.fb.reverse(mut rect)
 	}
-	// text.len is bytes, not terminal columns (wide glyphs count double),
-	// so measure the display width via MeasurementConfig.
-	mut cfg := new_measurement_config(StringDocument{ text: text })
+	// Position the terminal cursor at the prompt-text cursor (not always at
+	// end-of-text now that the prompt supports ←/→/Home/End). text.len is
+	// bytes, not terminal columns (wide glyphs count double), so measure the
+	// display width via MeasurementConfig.
+	cursor_text := ' ${label}${ed.prompt_text[..off]}'
+	mut cfg := new_measurement_config(StringDocument{ text: cursor_text })
 	cursor_x := cfg.goto_visual(Point{ x: coord_type_max, y: 0 }).visual_pos.x
 	ed.fb.set_cursor(Point{ x: cursor_x, y: status_y }, false)
 }
@@ -630,7 +641,9 @@ fn (mut ed Editor) handle_event(ev Input) {
 				if idx >= 0 {
 					s = s[..idx]
 				}
-			ed.prompt_text += s
+			if s.len > 0 {
+				ed.prompt_insert(s)
+			}
 			// Incremental search: re-run the search as the needle changes
 			// (Rust editline change -> SearchAction::Search, draw_editor.rs:81).
 			if ed.prompt_kind == .search || ed.prompt_kind == .replace {
@@ -689,6 +702,8 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 			}
 		}
 	}
+	// New cursor sits at end of the prefilled text, ready for edits.
+	ed.prompt_cursor = ed.prompt_text.len
 	// A freshly opened prompt starts in the "not failed" state.
 	ed.search_failed = false
 }
@@ -712,8 +727,62 @@ fn (mut ed Editor) start_replace() {
 fn (mut ed Editor) cancel_prompt() {
 	ed.mode = .edit
 	ed.prompt_text = ''
+	ed.prompt_cursor = -1
 	ed.search_buttons = []
 	ed.search_failed = false
+}
+
+// prompt_effective_cursor returns the prompt cursor clamped to a usable byte
+// offset inside prompt_text. Out-of-range values are treated as the end, which
+// is the natural "append" position when no cursor has been set yet.
+fn (ed &Editor) prompt_effective_cursor() int {
+	c := ed.prompt_cursor
+	if c < 0 || c > ed.prompt_text.len {
+		return ed.prompt_text.len
+	}
+	return c
+}
+
+// prompt_prev_codepoint returns the byte offset one UTF-8 codepoint before
+// `off`, or 0 if `off` is at or past the start of `text`. Continuation bytes
+// (0x80-0xBF) are skipped; an invalid lead is treated as one byte.
+fn prompt_prev_codepoint(text string, off int) int {
+	mut i := off
+	if i > text.len {
+		i = text.len
+	}
+	for i > 0 && (text[i - 1] & 0xC0) == 0x80 {
+		i--
+	}
+	if i > 0 {
+		i--
+	}
+	return i
+}
+
+// prompt_next_codepoint returns the byte offset one UTF-8 codepoint after
+// `off`, or `text.len` if `off` is at or past the end. A lead byte is followed
+// by all its continuation bytes (up to 3); an invalid lead is treated as one
+// byte.
+fn prompt_next_codepoint(text string, off int) int {
+	if off < 0 {
+		return 0
+	}
+	if off >= text.len {
+		return text.len
+	}
+	mut i := off
+	c := text[i]
+	if c < 0x80 {
+		return i + 1
+	}
+	if c >= 0xF0 {
+		return i + 4
+	}
+	if c >= 0xE0 {
+		return i + 3
+	}
+	return i + 2
 }
 
 fn (ed &Editor) prompt_search_needle() string {
@@ -722,6 +791,74 @@ fn (ed &Editor) prompt_search_needle() string {
 		.replace_with { ed.replace_needle }
 		else { '' }
 	}
+}
+
+// prompt_insert inserts `s` at the current prompt cursor and advances the cursor
+// past it. Mirrors Rust's TextBuffer::insert at the editline cursor.
+fn (mut ed Editor) prompt_insert(s string) {
+	off := ed.prompt_effective_cursor()
+	ed.prompt_text = ed.prompt_text[..off] + s + ed.prompt_text[off..]
+	ed.prompt_cursor = off + s.len
+}
+
+// prompt_backspace deletes one UTF-8 codepoint before the prompt cursor, if
+// any. Falls back to a no-op when the cursor is already at offset 0.
+fn (mut ed Editor) prompt_backspace() {
+	off := ed.prompt_effective_cursor()
+	if off <= 0 {
+		return
+	}
+	prev := prompt_prev_codepoint(ed.prompt_text, off)
+	ed.prompt_text = ed.prompt_text[..prev] + ed.prompt_text[off..]
+	ed.prompt_cursor = prev
+}
+
+// prompt_delete deletes one UTF-8 codepoint at the prompt cursor, if any.
+fn (mut ed Editor) prompt_delete() {
+	off := ed.prompt_effective_cursor()
+	if off >= ed.prompt_text.len {
+		return
+	}
+	nxt := prompt_next_codepoint(ed.prompt_text, off)
+	ed.prompt_text = ed.prompt_text[..off] + ed.prompt_text[nxt..]
+}
+
+// prompt_kill_to_end deletes from the cursor to the end of the prompt.
+fn (mut ed Editor) prompt_kill_to_end() {
+	off := ed.prompt_effective_cursor()
+	if off >= ed.prompt_text.len {
+		return
+	}
+	ed.prompt_text = ed.prompt_text[..off]
+	ed.prompt_cursor = off
+}
+
+// prompt_kill_line empties the prompt text entirely.
+fn (mut ed Editor) prompt_kill_line() {
+	ed.prompt_text = ''
+	ed.prompt_cursor = 0
+}
+
+// prompt_move_home moves the cursor to offset 0.
+fn (mut ed Editor) prompt_move_home() {
+	ed.prompt_cursor = 0
+}
+
+// prompt_move_end moves the cursor past the end of the text.
+fn (mut ed Editor) prompt_move_end() {
+	ed.prompt_cursor = ed.prompt_text.len
+}
+
+// prompt_move_left moves the cursor one UTF-8 codepoint backward.
+fn (mut ed Editor) prompt_move_left() {
+	off := ed.prompt_effective_cursor()
+	ed.prompt_cursor = prompt_prev_codepoint(ed.prompt_text, off)
+}
+
+// prompt_move_right moves the cursor one UTF-8 codepoint forward.
+fn (mut ed Editor) prompt_move_right() {
+	off := ed.prompt_effective_cursor()
+	ed.prompt_cursor = prompt_next_codepoint(ed.prompt_text, off)
 }
 
 fn (mut ed Editor) run_prompt_search() {
@@ -803,19 +940,51 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 			}
 		}
 		vk_back {
-			if mods == kbmod_none && ed.prompt_text.len > 0 {
-				// Drop the last UTF-8 codepoint.
-				mut n := 1
-				for n < ed.prompt_text.len && n < 4
-					&& (ed.prompt_text[ed.prompt_text.len - n] & 0xC0) == 0x80 {
-					n++
-				}
-				ed.prompt_text = ed.prompt_text[..ed.prompt_text.len - n]
-				// Re-run the search after deleting a character (Rust re-searches
-				// on every editline change).
-				if ed.prompt_kind == .search || ed.prompt_kind == .replace {
-					ed.run_prompt_search()
-				}
+			if mods == kbmod_none {
+				ed.prompt_backspace()
+			}
+		}
+		vk_delete {
+			if mods == kbmod_none {
+				ed.prompt_delete()
+			}
+		}
+		vk_left {
+			if mods == kbmod_none {
+				ed.prompt_move_left()
+			}
+		}
+		vk_right {
+			if mods == kbmod_none {
+				ed.prompt_move_right()
+			}
+		}
+		vk_home {
+			if mods == kbmod_none {
+				ed.prompt_move_home()
+			}
+		}
+		vk_end {
+			if mods == kbmod_none {
+				ed.prompt_move_end()
+			}
+		}
+		vk_a {
+			if mods == kbmod_ctrl {
+				// Ctrl+A in Rust's editline is Select All; without a selection
+				// model in the prompt, the most useful single action is to
+				// jump to the start so the user can edit from there.
+				ed.prompt_move_home()
+			}
+		}
+		vk_k {
+			if mods == kbmod_ctrl {
+				ed.prompt_kill_to_end()
+			}
+		}
+		vk_u {
+			if mods == kbmod_ctrl {
+				ed.prompt_kill_line()
 			}
 		}
 		vk_c {
