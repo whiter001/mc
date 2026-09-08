@@ -48,11 +48,11 @@ P0 — 语义/交互对齐
 - [x] 大小写折叠扩展到 Latin-1/希腊/西里尔常用区段（`text_buffer.v:2423` `fold_rune`：ASCII + Latin-1 `À-Ö Ø-Þ` + Greek `Α-Ω` + Cyrillic `А-Я`；`fold_text` 编码后字节数相等，所以可安全复用 `text_buffer.v:2485` 的折叠后位置）
 
 P1 — 性能
-- [ ] `find_substring_match` 改分块流式匹配：走 `gap_buffer.read_forward` 零拷贝视图，不再 `read_all()`
-- [ ] 折叠按需进行：只折叠与 pattern 等长的窗口，或按块折叠，不再整文档两份拷贝
-- [ ] 首字节 `memchr` 快速跳过 + 长 needle 加 Boyer-Moore-Horspool
-- [ ] 折叠结果按 `GapBuffer.generation` 缓存，连续 F3 不重复折叠
-- [ ] `find_and_replace_all` 去掉循环内 `read_all()`：一次扫描收集全部命中区间，再按累计偏移 delta 逐个替换
+- [ ] `find_substring_match` 改分块流式匹配：走 `gap_buffer.read_forward` 零拷贝视图，不再 `read_all()`（缓存落地后收益只剩省一份只读拷贝，做不做再评估）
+- [x] ~~折叠按需进行~~（被 generation 缓存覆盖：缓存命中时折叠成本为零，无需再做窗口折叠）
+- [x] 首字节快速跳过 + 长 needle Boyer-Moore-Horspool（`find_substring_match` 字面量路径已整体换 BMH：256 项 skip 表 + 尾向前比较，whole_word 拒绝的候选也按 skip 表前进；BMH 的首字节 skip 已涵盖 memchr 意图）
+- [x] 折叠/read_all 按 `GapBuffer.generation` 缓存（`TextBuffer.search_text`：read_all 快照 + 惰性折叠副本，generation 变化自动失效；折叠已提出 `find_substring_match` 热路径，连续 F3 和增量搜索只付 BMH 扫描）
+- [x] `find_and_replace_all` 去掉循环内 `read_all()`：一次扫描收集全部命中区间（步进与 `search_match_stats` 一致），再从后往前逐个替换使偏移保持有效；语义不变（不重复匹配替换结果、零宽命中=插入、一次 undo group）
 
 P2 — 可选增强
 - [x] Shift+F3 反向查找（Rust 无，V 侧自加）；prompt 内 ↑/↓ = 上/下一个（免 fn 键替代）

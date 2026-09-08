@@ -181,6 +181,14 @@ mut:
 	selection_generation      u32
 	search                    ActiveSearch
 
+	// Search text cache: a read_all() snapshot and (lazily) its case-folded
+	// form, keyed by buffer generation. Repeated searches within one edit
+	// generation reuse them instead of copying/folding the whole document.
+	search_cache_text   []u8
+	search_cache_folded []u8
+	search_cache_gen    u32
+	search_cache_valid  bool
+
 	width                   CoordType
 	margin_width            CoordType
 	margin_enabled          bool
@@ -307,6 +315,28 @@ fn (b TextBuffer) read_all() []u8 {
 		off += chunk.len
 	}
 	return out
+}
+
+// search_text returns the buffer contents prepared for find_substring_match:
+// the raw read_all() snapshot for regex or case-sensitive searches, or its
+// case-folded form for case-insensitive literal searches (fold_text preserves
+// byte length, so folded offsets are valid offsets into the original text).
+// Both snapshots are cached by buffer generation.
+fn (mut b TextBuffer) search_text(options SearchOptions) []u8 {
+	gen := b.buffer.generation()
+	if !b.search_cache_valid || b.search_cache_gen != gen {
+		b.search_cache_text = b.read_all()
+		b.search_cache_folded = []u8{}
+		b.search_cache_gen = gen
+		b.search_cache_valid = true
+	}
+	if options.use_regex || options.match_case {
+		return b.search_cache_text
+	}
+	if b.search_cache_folded.len == 0 {
+		b.search_cache_folded = fold_text(b.search_cache_text)
+	}
+	return b.search_cache_folded
 }
 
 // ---- Basic accessors ---------------------------------------------------------
@@ -2473,6 +2503,12 @@ fn fold_text(text []u8) []u8 {
 // search. With `use_regex` enabled, `pattern` is interpreted as a minimal
 // regular expression (see find_regex_match). `whole_word` and `match_case` are
 // applied to both paths.
+//
+// Calling convention: for case-insensitive literal searches, the caller must
+// pre-fold `text` via TextBuffer.search_text (which caches by buffer
+// generation) so the per-call cost is just folding the (usually short)
+// `pattern`. The regex path always operates on the raw un-folded text — the
+// regex engine applies case folding itself via fold_rune.
 fn find_substring_match(text []u8, pattern []u8, start int, options SearchOptions) (int, int) {
 	if pattern.len == 0 || start > text.len {
 		return -1, -1
@@ -2486,37 +2522,44 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 		return find_regex_match(text, pattern, s, options)
 	}
 
-	mut text_folded := text.clone()
-	mut pattern_folded := pattern.clone()
-	if !options.match_case {
-		text_folded = fold_text(text)
-		pattern_folded = fold_text(pattern)
+	pattern_folded := if options.match_case { pattern } else { fold_text(pattern) }
+
+	// Boyer-Moore-Horspool over the (possibly folded) bytes: compare
+	// tail-first, and on mismatch skip ahead by the bad-character table.
+	mut skip := [256]int{}
+	for i in 0 .. 256 {
+		skip[i] = pattern_folded.len
+	}
+	for i in 0 .. pattern_folded.len - 1 {
+		skip[int(pattern_folded[i])] = pattern_folded.len - 1 - i
 	}
 
-	last := text_folded.len - pattern_folded.len
-	for off := s; off <= last; off++ {
-		mut matched := true
-		for i in 0..pattern_folded.len {
-			if text_folded[off + i] != pattern_folded[i] {
-				matched = false
-				break
-			}
+	mut off := s
+	last := text.len - pattern_folded.len
+	for off <= last {
+		mut i := pattern_folded.len - 1
+		for i >= 0 && text[off + i] == pattern_folded[i] {
+			i--
 		}
-		if !matched {
-			continue
-		}
-		// Whole-word check: the character before and after the match must not
-		// be a word character (ASCII [A-Za-z0-9_], or any non-ASCII byte).
-		if options.whole_word {
-			if off > 0 && is_word_byte(text_folded[off - 1]) {
-				continue
+		if i < 0 {
+			// Whole-word check: the character before and after the match must
+			// not be a word character (ASCII [A-Za-z0-9_], or any non-ASCII
+			// byte). A rejected candidate still advances by the skip table,
+			// which never skips over a possible match.
+			if options.whole_word {
+				if off > 0 && is_word_byte(text[off - 1]) {
+					off += skip[int(text[off + pattern_folded.len - 1])]
+					continue
+				}
+				end := off + pattern_folded.len
+				if end < text.len && is_word_byte(text[end]) {
+					off += skip[int(text[off + pattern_folded.len - 1])]
+					continue
+				}
 			}
-			end := off + pattern_folded.len
-			if end < text_folded.len && is_word_byte(text_folded[end]) {
-				continue
-			}
+			return off, off + pattern_folded.len
 		}
-		return off, off + pattern.len
+		off += skip[int(text[off + pattern_folded.len - 1])]
 	}
 	return -1, -1
 }
@@ -2534,6 +2577,10 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 // the end of the buffer, a zero-width hit at EOF (beg == end == text.len) has
 // beg == end_at and is therefore rejected; that's acceptable since there's
 // nothing to select after it.
+//
+// `text` must be pre-folded by the caller (see TextBuffer.search_text) for
+// case-insensitive literal searches; the pattern is folded on each inner call
+// (it's short, so this is cheap).
 fn find_substring_match_before(text []u8, pattern []u8, end_at int, options SearchOptions) (int, int) {
 	if pattern.len == 0 || end_at <= 0 {
 		return -1, -1
@@ -2899,7 +2946,7 @@ fn (mut b TextBuffer) find_select_next(mut search ActiveSearch, offset int, wrap
 
 	mut range_beg := -1
 	mut range_end := 0
-	text := b.read_all()
+	text := b.search_text(search.options)
 
 	range_beg, range_end = find_substring_match(text, search.pattern.bytes(),
 		search.next_search_offset, search.options)
@@ -2960,7 +3007,7 @@ fn (mut b TextBuffer) find_select_prev(mut search ActiveSearch, offset int, wrap
 
 	mut range_beg := -1
 	mut range_end := 0
-	text := b.read_all()
+	text := b.search_text(search.options)
 
 	range_beg, range_end = find_substring_match_before(text, search.pattern.bytes(),
 		search.next_search_offset, search.options)
@@ -3118,11 +3165,11 @@ pub fn (mut b TextBuffer) find_and_select_prev(pattern string, options SearchOpt
 // currently selected match (0 when the selection is not on a match). The scan
 // advances exactly like find_select_next (no overlapping hits, zero-width
 // hits step one grapheme forward), so the count matches what F3 visits.
-pub fn (b TextBuffer) search_match_stats(pattern string, options SearchOptions) (int, int) {
+pub fn (mut b TextBuffer) search_match_stats(pattern string, options SearchOptions) (int, int) {
 	if pattern.len == 0 {
 		return 0, 0
 	}
-	text := b.read_all()
+	text := b.search_text(options)
 	mut sel_beg := -1
 	if b.selection.valid {
 		beg, _ := minmax_points(b.selection.beg, b.selection.end)
@@ -3180,20 +3227,41 @@ pub fn (mut b TextBuffer) find_and_replace_all(pattern string, options SearchOpt
 		return 0
 	}
 
-	b.edit_begin_grouping()
-
-	mut count := 0
-	mut offset := 0
-	for {
-		range_beg, range_end := find_substring_match(b.read_all(), pattern.bytes(),
-			offset, options)
-		if range_beg < 0 {
+	// Collect all match ranges with a single scan of the original text,
+	// stepping exactly like search_match_stats (no overlapping hits,
+	// zero-width hits step one grapheme forward), so the replaced count
+	// matches the hit counter. Ranges are gathered up front because edits
+	// would invalidate offsets for a scan interleaved with write_raw().
+	text := b.search_text(options)
+	mut begs := []int{}
+	mut ends := []int{}
+	mut off := 0
+	for off <= text.len {
+		beg, end := find_substring_match(text, pattern.bytes(), off, options)
+		if beg < 0 {
 			break
 		}
+		begs << beg
+		ends << end
+		if end == beg {
+			next := b.find_advance_past_zero_width(end)
+			if next <= off {
+				break
+			}
+			off = next
+		} else {
+			off = end
+		}
+	}
+	if begs.len == 0 {
+		return 0
+	}
 
-		// Select the match and replace it via write_raw().
-		beg_cursor := b.cursor_move_to_offset_internal(b.cursor, range_beg)
-		end_cursor := b.cursor_move_to_offset_internal(beg_cursor, range_end)
+	b.edit_begin_grouping()
+	// Replace from last to first so earlier match offsets stay valid.
+	for i := begs.len - 1; i >= 0; i-- {
+		beg_cursor := b.cursor_move_to_offset_internal(b.cursor, begs[i])
+		end_cursor := b.cursor_move_to_offset_internal(beg_cursor, ends[i])
 		b.set_cursor(end_cursor)
 		b.set_selection(OptSelection{
 			valid: true
@@ -3201,22 +3269,9 @@ pub fn (mut b TextBuffer) find_and_replace_all(pattern string, options SearchOpt
 			end:   end_cursor.logical_pos
 		})
 		b.write_raw(replacement)
-
-		// The `active_edit_off` points to the end of the last edit made by
-		// write_raw(). This differs from self.cursor.offset, if write_raw()
-		// did an insert_final_newline.
-		offset = b.active_edit_off
-
-		// Avoid infinite loops when hitting zero-length matches by advancing
-		// past the zero-length match location.
-		if range_end == range_beg {
-			offset = b.find_advance_past_zero_width(offset)
-		}
-		count++
 	}
-
 	b.edit_end_grouping()
-	return count
+	return begs.len
 }
 
 // ---- Rendering -------------------------------------------------------------------
