@@ -31,6 +31,29 @@ V="${V:-v}"
 # measurement.v uses __global (Rust: static mut AMBIGUOUS_WIDTH).
 VFLAGS="-enable-globals"
 
+# Platform detection. Git Bash / MSYS / Cygwin all uname as MINGW*/CYGWIN*/MSYS*;
+# the OS env var (Windows-only) is a belt-and-braces check.
+is_windows=0
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|CYGWIN*|MSYS*) is_windows=1 ;;
+esac
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+    is_windows=1
+fi
+
+# Output binary suffix.
+BIN_SUFFIX=""
+if [[ $is_windows -eq 1 ]]; then
+    BIN_SUFFIX=".exe"
+fi
+
+# Per-platform cflags. WIN32_LEAN_AND_MEAN keeps <windows.h> from pulling in
+# legacy / COM / RPC headers that collide with vlib macros (min/max/interface).
+EXTRA_VFLAGS=()
+if [[ $is_windows -eq 1 ]]; then
+    EXTRA_VFLAGS=(-cflags -DWIN32_LEAN_AND_MEAN)
+fi
+
 # ---------- 工具函数 ------------------------------------------------------
 
 if [[ -t 1 ]]; then
@@ -57,6 +80,10 @@ require_v() {
 # V 工具链偶发内存失控，会把整机拖死。macOS 的 ulimit -v 不生效，所以用
 # 轮询看门狗：后台跑命令，每秒统计其进程树 RSS 总量，超限就整树杀掉。
 # MEMLIMIT_MB=0 关闭限制。
+#
+# Windows 没有 cpulimit，也没有 ps；改用 PowerShell Start-Process 以
+# BelowNormal 优先级启动进程以减少抢占；MEMLIMIT_MB 当前未生效（Job Object
+# 实现留给后续 issue），并对用户提示。
 
 MEMLIMIT_MB="${MEMLIMIT_MB:-2048}"
 TEST_MEMLIMIT_MB="${TEST_MEMLIMIT_MB:-4096}"
@@ -92,7 +119,7 @@ _tree_pids() {
         }'
 }
 
-run_with_memlimit() {
+_unix_run_with_memlimit() {
     if [[ "$MEMLIMIT_MB" == "0" ]]; then
         "$@"
         return
@@ -121,13 +148,34 @@ run_with_memlimit() {
     return "$rc"
 }
 
+_win_run_with_memlimit() {
+    # No cpulimit / ps / /proc on Windows. PowerShell Start-Process -Priority
+    # is not in this PS version, and `cmd /c start /low /wait` has a title-
+    # parsing gotcha that swallows the executable name. So: run V directly
+    # (bash resolves V via PATH) and warn that neither CPU nor memory cap
+    # is enforced. A Win32 Job Object wrapper is tracked as future work.
+    if [[ "${MEMLIMIT_MB:-0}" != "0" ]]; then
+        warn "Windows：MEMLIMIT_MB=${MEMLIMIT_MB} 当前未生效（CPU 限流 + 内存上限均需 Job Object，后续 issue）"
+    fi
+    "$@"
+}
+
+run_with_memlimit() {
+    if [[ $is_windows -eq 1 ]]; then
+        _win_run_with_memlimit "$@"
+    else
+        _unix_run_with_memlimit "$@"
+    fi
+}
+
 # ---------- Build 模式 ----------------------------------------------------
 
 build_dev() {
     log "dev build"
     mkdir -p "$BIN_DIR"
-    run_with_memlimit "$V" $VFLAGS -o "$BIN_DIR/$PROJECT_NAME" .
-    report_size "$BIN_DIR/$PROJECT_NAME"
+    # shellcheck disable=SC2086
+    run_with_memlimit "$V" $VFLAGS "${EXTRA_VFLAGS[@]}" -o "$BIN_DIR/$PROJECT_NAME$BIN_SUFFIX" .
+    report_size "$BIN_DIR/$PROJECT_NAME$BIN_SUFFIX"
 }
 
 build_debug() {
@@ -138,19 +186,20 @@ build_debug() {
         extra="$DEBUG_FLAGS"
     fi
     # shellcheck disable=SC2086
-    run_with_memlimit "$V" $VFLAGS -debug $extra -o "$BIN_DIR/$PROJECT_NAME-debug" .
-    report_size "$BIN_DIR/$PROJECT_NAME-debug"
-    echo "  用法: lldb $BIN_DIR/$PROJECT_NAME-debug"
+    run_with_memlimit "$V" $VFLAGS "${EXTRA_VFLAGS[@]}" -debug $extra -o "$BIN_DIR/$PROJECT_NAME-debug$BIN_SUFFIX" .
+    report_size "$BIN_DIR/$PROJECT_NAME-debug$BIN_SUFFIX"
+    echo "  用法: lldb $BIN_DIR/$PROJECT_NAME-debug$BIN_SUFFIX"
 }
 
 build_prod() {
     log "prod build（-O3 + strip）"
     mkdir -p "$BIN_DIR"
-    run_with_memlimit "$V" $VFLAGS -prod -o "$BIN_DIR/$PROJECT_NAME" .
-    if command -v strip >/dev/null 2>&1; then
-        strip "$BIN_DIR/$PROJECT_NAME" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    run_with_memlimit "$V" $VFLAGS "${EXTRA_VFLAGS[@]}" -prod -o "$BIN_DIR/$PROJECT_NAME$BIN_SUFFIX" .
+    if command -v strip >/dev/null 2>&1 && [[ $is_windows -eq 0 ]]; then
+        strip "$BIN_DIR/$PROJECT_NAME$BIN_SUFFIX" 2>/dev/null || true
     fi
-    report_size "$BIN_DIR/$PROJECT_NAME"
+    report_size "$BIN_DIR/$PROJECT_NAME$BIN_SUFFIX"
 }
 
 run_tests() {
@@ -173,19 +222,38 @@ vet_sources() {
 # ---------- 安装 ----------------------------------------------------------
 
 install_prod() {
-    local prefix="${PREFIX:-/usr/local}"
+    local prefix
+    if [[ -n "${PREFIX:-}" ]]; then
+        prefix="$PREFIX"
+    elif [[ $is_windows -eq 1 ]]; then
+        local base="${LOCALAPPDATA:-${HOME:-$USERPROFILE}/AppData/Local}"
+        prefix="${base}/Programs/edit"
+    else
+        prefix="/usr/local"
+    fi
     local bin="$prefix/bin"
     log "install to $bin"
     build_prod
     mkdir -p "$bin"
-    install -m 0755 "$BIN_DIR/$PROJECT_NAME" "$bin/$PROJECT_NAME"
-    echo "  ${C_GREEN}installed $bin/$PROJECT_NAME${C_RESET}"
+    cp -f "$BIN_DIR/$PROJECT_NAME$BIN_SUFFIX" "$bin/$PROJECT_NAME$BIN_SUFFIX"
+    if [[ $is_windows -eq 0 ]]; then
+        chmod 0755 "$bin/$PROJECT_NAME$BIN_SUFFIX"
+    fi
+    echo "  ${C_GREEN}installed $bin/$PROJECT_NAME$BIN_SUFFIX${C_RESET}"
     echo "  运行: $PROJECT_NAME --help"
 }
 
 uninstall() {
-    local prefix="${PREFIX:-/usr/local}"
-    local bin="$prefix/bin/$PROJECT_NAME"
+    local prefix
+    if [[ -n "${PREFIX:-}" ]]; then
+        prefix="$PREFIX"
+    elif [[ $is_windows -eq 1 ]]; then
+        local base="${LOCALAPPDATA:-${HOME:-$USERPROFILE}/AppData/Local}"
+        prefix="${base}/Programs/edit"
+    else
+        prefix="/usr/local"
+    fi
+    local bin="$prefix/bin/$PROJECT_NAME$BIN_SUFFIX"
     if [[ -f "$bin" ]]; then
         log "removing $bin"
         rm -f "$bin"
