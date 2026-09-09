@@ -1,1 +1,4 @@
 bin/
+*.v3cc.*/
+main_test
+text_buffer_test
