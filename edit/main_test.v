@@ -281,10 +281,12 @@ fn test_handle_prompt_key_ctrl_a_k_u() {
 	ed.prompt_text = 'abcdef'
 	ed.prompt_cursor = 3
 
-	// Ctrl+K kills from cursor to end.
+	// Ctrl+K kills from cursor to end and clears any pending selection.
+	ed.prompt_sel = 5
 	ed.handle_prompt_key(InputKey(vk_k | kbmod_ctrl))
 	assert ed.prompt_text == 'abc'
 	assert ed.prompt_cursor == 3
+	assert ed.prompt_sel == -1
 
 	// Ctrl+U kills the whole line regardless of cursor.
 	ed.prompt_cursor = 1
@@ -292,9 +294,212 @@ fn test_handle_prompt_key_ctrl_a_k_u() {
 	assert ed.prompt_text == ''
 	assert ed.prompt_cursor == 0
 
-	// Ctrl+A moves to start (no in-prompt selection model yet).
+	// Ctrl+A selects the whole field (Rust editline: Select All). Anchor at
+	// 0, cursor at len.
 	ed.prompt_text = 'xyz'
 	ed.prompt_cursor = 2
 	ed.handle_prompt_key(InputKey(vk_a | kbmod_ctrl))
+	assert ed.prompt_sel == 0
+	assert ed.prompt_cursor == 3
+}
+
+fn test_prompt_selection_no_anchor() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 3
+
+	// No anchor: no selection.
+	beg, end := ed.prompt_selection()
+	assert beg == -1
+	assert end == -1
+
+	// Anchor equals cursor (zero-width): also no selection.
+	ed.prompt_sel = 3
+	beg2, end2 := ed.prompt_selection()
+	assert beg2 == -1
+	assert end2 == -1
+}
+
+fn test_prompt_selection_range() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+
+	// Anchor before cursor: range is [anchor, cursor).
+	ed.prompt_sel = 1
+	beg, end := ed.prompt_selection()
+	assert beg == 1
+	assert end == 5
+
+	// Anchor after cursor (Shift+← from a fresh anchor at the end):
+	// range normalises to [cursor, anchor).
+	ed.prompt_sel = 4
+	ed.prompt_cursor = 2
+	beg2, end2 := ed.prompt_selection()
+	assert beg2 == 2
+	assert end2 == 4
+}
+
+fn test_prompt_insert_replaces_selection() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+	ed.prompt_sel = 1 // selection = "ello" at [1..5)
+
+	ed.prompt_insert('i')
+	assert ed.prompt_text == 'hi'
+	assert ed.prompt_cursor == 2
+	assert ed.prompt_sel == -1
+
+	// After the insert the selection is gone; further inserts append.
+	ed.prompt_insert('!')
+	assert ed.prompt_text == 'hi!'
+	assert ed.prompt_cursor == 3
+}
+
+fn test_prompt_backspace_deletes_selection() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 4
+	ed.prompt_sel = 1 // selection = "ell" at [1..4)
+
+	ed.prompt_backspace()
+	assert ed.prompt_text == 'ho'
+	assert ed.prompt_cursor == 1
+	assert ed.prompt_sel == -1
+
+	// With no selection, Backspace still removes one codepoint before the
+	// cursor.
+	ed.prompt_backspace()
+	assert ed.prompt_text == 'o'
 	assert ed.prompt_cursor == 0
+}
+
+fn test_prompt_delete_deletes_selection_not_following_char() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 4
+	ed.prompt_sel = 1 // selection = "ell" at [1..4)
+
+	// Delete with a selection drops the selection; it does NOT delete 'o'
+	// after the cursor.
+	ed.prompt_delete()
+	assert ed.prompt_text == 'ho'
+	assert ed.prompt_cursor == 1
+	assert ed.prompt_sel == -1
+}
+
+fn test_handle_prompt_key_shift_arrows_extend_selection() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.start_prompt(.search)
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+
+	// Shift+← extends the selection backwards; anchor pins at the starting
+	// cursor, cursor walks left.
+	ed.handle_prompt_key(InputKey(u32(vk_left) | kbmod_shift))
+	assert ed.prompt_cursor == 4
+	assert ed.prompt_sel == 5
+
+	ed.handle_prompt_key(InputKey(u32(vk_left) | kbmod_shift))
+	assert ed.prompt_cursor == 3
+	assert ed.prompt_sel == 5
+
+	beg, end := ed.prompt_selection()
+	assert beg == 3
+	assert end == 5
+
+	// Backspace on a selection drops the selection, not just one codepoint.
+	ed.handle_prompt_key(InputKey(vk_back))
+	assert ed.prompt_text == 'hel'
+	assert ed.prompt_cursor == 3
+	assert ed.prompt_sel == -1
+}
+
+fn test_handle_prompt_key_shift_home_end_extend_selection() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.start_prompt(.search)
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+
+	// Shift+Home selects from cursor down to offset 0.
+	ed.handle_prompt_key(InputKey(u32(vk_home) | kbmod_shift))
+	assert ed.prompt_cursor == 0
+	assert ed.prompt_sel == 5
+	beg, end := ed.prompt_selection()
+	assert beg == 0
+	assert end == 5
+
+	// Shift+End then jumps cursor to len, but the anchor (prompt_sel=5)
+	// already sits at len, so the selection collapses to zero-width —
+	// prompt_selection() reports no active range.
+	ed.handle_prompt_key(InputKey(u32(vk_end) | kbmod_shift))
+	assert ed.prompt_cursor == 5
+	assert ed.prompt_sel == 5
+	beg2, end2 := ed.prompt_selection()
+	assert beg2 == -1
+	assert end2 == -1
+
+	// A different starting cursor: Shift+End with no prior anchor pins at
+	// the cursor (was 5) and jumps to len, so anchor stays at 5.
+	ed.prompt_sel = -1
+	ed.handle_prompt_key(InputKey(u32(vk_end) | kbmod_shift))
+	assert ed.prompt_cursor == 5
+	assert ed.prompt_sel == 5
+}
+
+fn test_handle_prompt_key_plain_move_clears_selection() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.start_prompt(.search)
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+	ed.prompt_sel = 2 // selection = "llo"
+
+	// Plain ← drops the selection and moves.
+	ed.handle_prompt_key(InputKey(vk_left))
+	assert ed.prompt_cursor == 4
+	assert ed.prompt_sel == -1
+}
+
+fn test_handle_prompt_key_ctrl_a_then_type_replaces_field() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.start_prompt(.search)
+	ed.prompt_text = 'hello'
+	ed.prompt_cursor = 5
+
+	ed.handle_prompt_key(InputKey(vk_a | kbmod_ctrl))
+	assert ed.prompt_sel == 0
+	assert ed.prompt_cursor == 5
+
+	// Typing replaces the selected range (Rust editline: typing while a
+	// selection is active overwrites it, tui.rs:2734).
+	ed.prompt_insert('world')
+	assert ed.prompt_text == 'world'
+	assert ed.prompt_cursor == 5
+	assert ed.prompt_sel == -1
+}
+
+fn test_start_prompt_resets_prompt_sel() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.prompt_sel = 3
+	ed.start_prompt(.search)
+	assert ed.prompt_sel == -1
+}
+
+fn test_cancel_prompt_resets_prompt_sel() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	ed.start_prompt(.search)
+	ed.prompt_text = 'abc'
+	ed.prompt_cursor = 3
+	ed.prompt_sel = 1
+	ed.cancel_prompt()
+	assert ed.prompt_sel == -1
+	assert ed.prompt_cursor == -1
+	assert ed.prompt_text == ''
 }

@@ -57,3 +57,4 @@ P1 — 性能
 P2 — 可选增强
 - [x] Shift+F3 反向查找（Rust 无，V 侧自加）；prompt 内 ↑/↓ = 上/下一个（免 fn 键替代）
 - [x] 命中计数显示（`3/17`）：选项行右侧 + 状态栏 Ln/Col 后，`search_match_stats` 统计，buffer generation 变化即失效
+- [x] 搜索/替换面板移到顶部（menubar 之下行 1-2：输入行 + 选项行，计数随之在上方显示），对齐 Rust draw_search 布局；终端高度 < 5 回退底部

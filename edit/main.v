@@ -105,6 +105,8 @@ mut:
 	// as "at end" by the insert/delete paths. Used for ←/→/Home/End/Delete
 	// line editing inside the prompt (Rust editline is a full TextBuffer).
 	prompt_cursor    int = -1
+	// Selection anchor (byte offset) within prompt_text.
+	prompt_sel       int = -1
 	// Last search, for F3 (= find next).
 	last_search      string
 	// Last replacement text; persists across Ctrl+R invocations like Rust's
@@ -304,6 +306,22 @@ fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 			bottom: status_y + 1
 		}
 		ed.fb.reverse(mut rect)
+	}
+	// Highlight the active in-prompt selection, if any. The prompt text
+	// starts at column (1 + label.len) and column widths use byte offsets
+	// (same approximation as the terminal cursor above; wide-glyph
+	// alignment is not pixel-precise, matching the existing cursor math).
+	beg, end := ed.prompt_selection()
+	if beg >= 0 {
+		x1 := CoordType(1 + label.len + beg)
+		x2 := CoordType(1 + label.len + end)
+		mut sel_rect := Rect{
+			left:   x1
+			top:    status_y
+			right:  x2
+			bottom: status_y + 1
+		}
+		ed.fb.reverse(mut sel_rect)
 	}
 	// Position the terminal cursor at the prompt-text cursor (not always at
 	// end-of-text now that the prompt supports ←/→/Home/End). text.len is
@@ -727,6 +745,7 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 	}
 	// New cursor sits at end of the prefilled text, ready for edits.
 	ed.prompt_cursor = ed.prompt_text.len
+	ed.prompt_sel = -1
 	// A freshly opened prompt starts in the "not failed" state.
 	ed.search_failed = false
 }
@@ -751,6 +770,7 @@ fn (mut ed Editor) cancel_prompt() {
 	ed.mode = .edit
 	ed.prompt_text = ''
 	ed.prompt_cursor = -1
+	ed.prompt_sel = -1
 	ed.search_buttons = []
 	ed.search_failed = false
 }
@@ -817,16 +837,44 @@ fn (ed &Editor) prompt_search_needle() string {
 }
 
 // prompt_insert inserts `s` at the current prompt cursor and advances the cursor
-// past it. Mirrors Rust's TextBuffer::insert at the editline cursor.
+// past it. Mirrors Rust's TextBuffer::insert at the editline cursor. When a
+// selection is active the selection is replaced by `s`.
 fn (mut ed Editor) prompt_insert(s string) {
+	beg, end := ed.prompt_selection()
+	if beg >= 0 {
+		ed.prompt_text = ed.prompt_text[..beg] + s + ed.prompt_text[end..]
+		ed.prompt_cursor = beg + s.len
+		ed.prompt_sel = -1
+		return
+	}
 	off := ed.prompt_effective_cursor()
 	ed.prompt_text = ed.prompt_text[..off] + s + ed.prompt_text[off..]
 	ed.prompt_cursor = off + s.len
 }
 
+// prompt_selection returns the active byte-offset range [beg, end) of the
+// in-prompt selection, or (-1, -1) when there is none. A zero-width
+// selection (anchor == cursor) is not highlighted.
+fn (ed &Editor) prompt_selection() (int, int) {
+	if ed.prompt_sel < 0 || ed.prompt_sel == ed.prompt_cursor {
+		return -1, -1
+	}
+	if ed.prompt_sel < ed.prompt_cursor {
+		return ed.prompt_sel, ed.prompt_cursor
+	}
+	return ed.prompt_cursor, ed.prompt_sel
+}
+
 // prompt_backspace deletes one UTF-8 codepoint before the prompt cursor, if
-// any. Falls back to a no-op when the cursor is already at offset 0.
+// any. When a selection is active it deletes the whole selection instead.
 fn (mut ed Editor) prompt_backspace() {
+	beg, end := ed.prompt_selection()
+	if beg >= 0 {
+		ed.prompt_text = ed.prompt_text[..beg] + ed.prompt_text[end..]
+		ed.prompt_cursor = beg
+		ed.prompt_sel = -1
+		return
+	}
 	off := ed.prompt_effective_cursor()
 	if off <= 0 {
 		return
@@ -837,7 +885,15 @@ fn (mut ed Editor) prompt_backspace() {
 }
 
 // prompt_delete deletes one UTF-8 codepoint at the prompt cursor, if any.
+// When a selection is active it deletes the whole selection instead.
 fn (mut ed Editor) prompt_delete() {
+	beg, end := ed.prompt_selection()
+	if beg >= 0 {
+		ed.prompt_text = ed.prompt_text[..beg] + ed.prompt_text[end..]
+		ed.prompt_cursor = beg
+		ed.prompt_sel = -1
+		return
+	}
 	off := ed.prompt_effective_cursor()
 	if off >= ed.prompt_text.len {
 		return
@@ -850,16 +906,19 @@ fn (mut ed Editor) prompt_delete() {
 fn (mut ed Editor) prompt_kill_to_end() {
 	off := ed.prompt_effective_cursor()
 	if off >= ed.prompt_text.len {
+		ed.prompt_sel = -1
 		return
 	}
 	ed.prompt_text = ed.prompt_text[..off]
 	ed.prompt_cursor = off
+	ed.prompt_sel = -1
 }
 
 // prompt_kill_line empties the prompt text entirely.
 fn (mut ed Editor) prompt_kill_line() {
 	ed.prompt_text = ''
 	ed.prompt_cursor = 0
+	ed.prompt_sel = -1
 }
 
 // prompt_move_home moves the cursor to offset 0.
@@ -930,8 +989,8 @@ fn (mut ed Editor) handle_search_prompt_mouse(mouse InputMouse) bool {
 	if mouse.drag || mouse.state != .left {
 		return false
 	}
-	status_y := ed.size.height - 1
-	if status_y == 0 || mouse.position.y != status_y - 1 {
+	options_y := if ed.search_panel_top() { CoordType(2) } else { ed.size.height - 2 }
+	if mouse.position.y != options_y {
 		return false
 	}
 	for btn in ed.search_buttons {
@@ -1011,31 +1070,58 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 			}
 		}
 		vk_left {
+			// No-Shift ← clears the selection first, Shift+← extends it
+			// (Rust editline: arrow keys move, Shift+arrow extends).
 			if mods == kbmod_none {
+				ed.prompt_sel = -1
+				ed.prompt_move_left()
+			} else if mods == kbmod_shift {
+				if ed.prompt_sel < 0 {
+					ed.prompt_sel = ed.prompt_cursor
+				}
 				ed.prompt_move_left()
 			}
 		}
 		vk_right {
 			if mods == kbmod_none {
+				ed.prompt_sel = -1
+				ed.prompt_move_right()
+			} else if mods == kbmod_shift {
+				if ed.prompt_sel < 0 {
+					ed.prompt_sel = ed.prompt_cursor
+				}
 				ed.prompt_move_right()
 			}
 		}
 		vk_home {
 			if mods == kbmod_none {
+				ed.prompt_sel = -1
+				ed.prompt_move_home()
+			} else if mods == kbmod_shift {
+				if ed.prompt_sel < 0 {
+					ed.prompt_sel = ed.prompt_cursor
+				}
 				ed.prompt_move_home()
 			}
 		}
 		vk_end {
 			if mods == kbmod_none {
+				ed.prompt_sel = -1
+				ed.prompt_move_end()
+			} else if mods == kbmod_shift {
+				if ed.prompt_sel < 0 {
+					ed.prompt_sel = ed.prompt_cursor
+				}
 				ed.prompt_move_end()
 			}
 		}
 		vk_a {
 			if mods == kbmod_ctrl {
-				// Ctrl+A in Rust's editline is Select All; without a selection
-				// model in the prompt, the most useful single action is to
-				// jump to the start so the user can edit from there.
-				ed.prompt_move_home()
+				// Ctrl+A in Rust's editline is Select All (tui.rs:2734):
+				// anchor at 0, cursor at end, so any subsequent typing
+				// replaces the whole field.
+				ed.prompt_sel = 0
+				ed.prompt_cursor = ed.prompt_text.len
 			}
 		}
 		vk_k {
@@ -1938,10 +2024,10 @@ fn (mut ed Editor) make_cursor_visible() {
 	text_width := ed.text_width()
 	// ...minus the menu bar and status line.
 	mut viewport_height := ed.size.height - 2
-	// The search options row is drawn over the last text row
-	// (draw_search_prompt_options at status_y - 1), so that row is not
-	// actually usable while a search prompt is open. Rust reserves the same
-	// space via height_reduction (draw_editor.rs:21-25).
+	// While a search prompt is open the panel sits above the textarea (rows
+	// 1-2 in Rust's layout, just below the menu bar), so one more row is
+	// not usable. Rust drops the same row via height_reduction
+	// (draw_editor.rs:21-25).
 	if ed.mode == .prompt && ed.prompt_kind != .goto_line {
 		viewport_height--
 	}
@@ -1955,6 +2041,24 @@ fn (mut ed Editor) make_cursor_visible() {
 	ed.scroll.x = x
 	ed.scroll.y = y
 	ed.clamp_scroll()
+}
+
+// search_kind_prompt reports whether the active prompt is a search/replace
+// prompt (which Rust draws as a panel above the textarea), as opposed to the
+// goto-line prompt (a plain status-line input).
+fn (ed Editor) search_kind_prompt() bool {
+	return ed.mode == .prompt
+		&& match ed.prompt_kind {
+			.search, .replace, .replace_with { true }
+			else { false }
+		}
+}
+
+// search_panel_top reports whether the search UI is drawn as a top panel
+// (rows 1-2, below the menu bar, like the Rust original). On tiny terminals
+// (< 5 rows) it falls back to the bottom rows.
+fn (ed Editor) search_panel_top() bool {
+	return ed.search_kind_prompt() && ed.size.height >= 5
 }
 
 fn (mut ed Editor) draw() {
@@ -1972,10 +2076,13 @@ fn (mut ed Editor) draw() {
 	ed.fb.flip(ed.size)
 
 	// The text area covers everything but the menu bar (row 0), the
-	// last (status) line, and the scrollbar column on the right.
+	// last (status) line, and the scrollbar column on the right. When a
+	// search/replace prompt is open the panel sits above the textarea
+	// (rows 1-2 below the menu bar, like the Rust original), so the top
+	// edge jumps to row 3 in that mode.
 	destination := Rect{
 		left:   0
-		top:    1
+		top:    if ed.search_panel_top() { CoordType(3) } else { CoordType(1) }
 		right:  ed.size.width - scrollbar_width
 		bottom: ed.size.height - 1
 	}
@@ -1998,10 +2105,19 @@ fn (mut ed Editor) draw() {
 	if ed.mode == .prompt {
 		match ed.prompt_kind {
 			.search, .replace, .replace_with {
-				if status_y > 0 {
-					ed.draw_search_prompt_options(status_y - 1)
+				if ed.search_panel_top() {
+					// Rust layout: search panel above the textarea — input on
+					// row 1, options (with the hit counter) on row 2. The
+					// status bar stays put at the bottom.
+					ed.draw_prompt_line(1)
+					ed.draw_search_prompt_options(2)
+					ed.draw_statusbar(status_y)
+				} else {
+					if status_y > 0 {
+						ed.draw_search_prompt_options(status_y - 1)
+					}
+					ed.draw_prompt_line(status_y)
 				}
-				ed.draw_prompt_line(status_y)
 			}
 			else {
 				ed.draw_prompt_line(status_y)
