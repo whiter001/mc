@@ -142,6 +142,17 @@ fn lsh_language_for_path(path string) int {
 	return -1
 }
 
+// language_for_path applies user settings before the built-in associations,
+// matching Document::get_language in the Rust reference implementation.
+fn (ed &Editor) language_for_path(path string) int {
+	for a in ed.settings.file_associations {
+		if lsh_glob_match(a.pattern, path) {
+			return a.language
+		}
+	}
+	return lsh_language_for_path(path)
+}
+
 // ---- Highlighter ------------------------------------------------------------
 
 // Highlighter runs the LSH VM over successive lines of a document

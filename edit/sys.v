@@ -172,12 +172,13 @@ pub fn switch_modes() ! {
 
 	$if macos {
 		// V 编译器在 import os 时对 `u64(C.A | C.B)` 的组合表达式有 bug，
-		// 逐项单独转换再或运算可以绕开。
-		iflag_mask := u64(C.IGNBRK) | u64(C.BRKINT) | u64(C.PARMRK) | u64(C.INPCK) | u64(C.ISTRIP) | u64(C.INLCR) | u64(C.IGNCR) | u64(C.ICRNL) | u64(C.IXON)
-		oflag_mask := u64(C.OPOST)
-		cflag_mask := u64(C.CSIZE) | u64(C.PARENB)
-		lflag_mask := u64(C.ISIG) | u64(C.ICANON) | u64(C.ECHO) | u64(C.ECHONL) | u64(C.IEXTEN)
-		cs8 := u64(C.CS8)
+		// 逐项单独转换再或运算可以绕开。`struct C.termios` 的 TcFlag
+		// 在 darwin 上是 usize，在 v 0.5.2 下编译器读为 int，所以用 int。
+		iflag_mask := int(C.IGNBRK) | int(C.BRKINT) | int(C.PARMRK) | int(C.INPCK) | int(C.ISTRIP) | int(C.INLCR) | int(C.IGNCR) | int(C.ICRNL) | int(C.IXON)
+		oflag_mask := int(C.OPOST)
+		cflag_mask := int(C.CSIZE) | int(C.PARENB)
+		lflag_mask := int(C.ISIG) | int(C.ICANON) | int(C.ECHO) | int(C.ECHONL) | int(C.IEXTEN)
+		cs8 := int(C.CS8)
 
 		termios.c_iflag &= ~iflag_mask
 		// Disable output processing.

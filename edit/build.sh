@@ -28,8 +28,10 @@ set -euo pipefail
 PROJECT_NAME="edit"
 BIN_DIR="bin"
 V="${V:-v}"
+PROJECT_VERSION="$(awk -F"'" '/^[[:space:]]*version:/ { print $2; exit }' v.mod)"
+[[ -n "$PROJECT_VERSION" ]] || fail "无法从 v.mod 读取版本号"
 # measurement.v uses __global (Rust: static mut AMBIGUOUS_WIDTH).
-VFLAGS="-enable-globals"
+VFLAGS="-enable-globals -d edit_version=$PROJECT_VERSION"
 
 # ---------- 工具函数 ------------------------------------------------------
 

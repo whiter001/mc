@@ -59,3 +59,84 @@ fn test_open_preferences_uses_existing_file() {
 	assert os.exists(path)
 	assert settings_path() == path
 }
+
+fn test_normalize_glob_bare_pattern_gets_prefix() {
+	// Bare basenames auto-prefix `**/` so users can write `*.py` instead of
+	// `**/*.py`, matching the Rust reference parser.
+	assert normalize_glob('*.py') == '**/*.py'
+	assert normalize_glob('build.sh') == '**/build.sh'
+	// Patterns that already contain a separator are passed through untouched.
+	assert normalize_glob('src/**/*.rs') == 'src/**/*.rs'
+	assert normalize_glob('**/*.md') == '**/*.md'
+}
+
+fn test_load_settings_missing_file_is_empty_not_error() {
+	tmp := os.temp_dir() + os.path_separator + 'edit_settings_missing_${u64(os.getpid())}'
+	defer { os.rmdir_all(tmp) or {} }
+	os.setenv('HOME', tmp, true)
+	defer { os.unsetenv('HOME') }
+
+	mut log := []string{}
+	settings := load_settings(mut log)
+	assert settings.path == settings_path()
+	assert settings.path.ends_with('settings.json')
+	assert !settings.has_associations
+	assert settings.file_associations.len == 0
+	assert log.len == 0
+}
+
+fn test_load_settings_parses_associations_and_normalizes_globs() {
+	tmp := os.temp_dir() + os.path_separator + 'edit_settings_load_${u64(os.getpid())}'
+	defer { os.rmdir_all(tmp) or {} }
+	os.setenv('HOME', tmp, true)
+	defer { os.unsetenv('HOME') }
+
+	path := settings_path()
+	os.mkdir_all(os.dir(path)) or { panic(err) }
+	os.write_file(path, '{\n  "files.associations": {\n    "*.py": "python",\n    "**/*.md": "markdown"\n  }\n}\n') or { panic(err) }
+
+	mut log := []string{}
+	settings := load_settings(mut log)
+	assert settings.has_associations
+	assert settings.file_associations.len == 2
+	assert settings.file_associations[0].pattern == '**/*.py'
+	assert settings.file_associations[0].language == language_index('python')
+	assert settings.file_associations[1].pattern == '**/*.md'
+	assert settings.file_associations[1].language == language_index('markdown')
+	assert log.len == 0
+}
+
+fn test_load_settings_unknown_language_writes_to_log() {
+	tmp := os.temp_dir() + os.path_separator + 'edit_settings_unknown_${u64(os.getpid())}'
+	defer { os.rmdir_all(tmp) or {} }
+	os.setenv('HOME', tmp, true)
+	defer { os.unsetenv('HOME') }
+
+	path := settings_path()
+	os.mkdir_all(os.dir(path)) or { panic(err) }
+	os.write_file(path, '{\n  "files.associations": {"*.x": "klingon"}\n}\n') or { panic(err) }
+
+	mut log := []string{}
+	settings := load_settings(mut log)
+	assert !settings.has_associations
+	assert settings.file_associations.len == 0
+	assert log.len == 1
+	assert log[0].contains('klingon')
+}
+
+fn test_load_settings_invalid_json_writes_to_log() {
+	tmp := os.temp_dir() + os.path_separator + 'edit_settings_bad_${u64(os.getpid())}'
+	defer { os.rmdir_all(tmp) or {} }
+	os.setenv('HOME', tmp, true)
+	defer { os.unsetenv('HOME') }
+
+	path := settings_path()
+	os.mkdir_all(os.dir(path)) or { panic(err) }
+	os.write_file(path, '{\n  this is not json\n') or { panic(err) }
+
+	mut log := []string{}
+	settings := load_settings(mut log)
+	assert !settings.has_associations
+	assert log.len == 1
+	assert log[0].contains('settings:')
+}

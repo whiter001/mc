@@ -196,9 +196,8 @@ fn (mut ed Editor) draw_menu_dropdown(menus []MenuBarMenu) {
 fn (mut ed Editor) draw_about() {
 	lines := [
 		'',
-		'Microsoft Edit (V port)',
-		'version 0.1',
-		'Copyright (c) Microsoft Corporation',
+		'edit (V port)',
+		'version ${edit_version}',
 		'',
 		'[ OK ]',
 		'',

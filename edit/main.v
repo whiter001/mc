@@ -96,6 +96,7 @@ mut:
 	needs_redraw     bool
 	quit             bool
 	status           string
+	settings         UserSettings
 	// Mode & prompt state.
 	mode             EditMode
 	prompt_kind      PromptKind
@@ -203,10 +204,23 @@ mut:
 }
 
 fn main() {
-	mut paths := os.args[1..].clone()
-	if paths.len > 0 && (paths[0] == '-h' || paths[0] == '--help') {
-		println('usage: edit [file...]')
-		return
+	// Parse argv before doing anything terminal-related so --help / --version
+	// can print and exit without ever touching raw mode (Rust main.rs).
+	cwd := os.getwd()
+	opts := parse_cli_args(os.args[1..], cwd) or {
+		eprintln('edit: ${err}')
+		exit(2)
+	}
+	match opts.action {
+		.help {
+			print(cli_help_text())
+			return
+		}
+		.version {
+			print(cli_version_text())
+			return
+		}
+		.run {}
 	}
 
 	sys_init()
@@ -216,16 +230,53 @@ fn main() {
 		fb:           framebuffer_new()
 		needs_redraw: true
 	}
+	mut settings_errors := []string{}
+	ed.settings = load_settings(mut settings_errors)
+	for msg in settings_errors {
+		ed.error_log_add(msg)
+	}
 
-	for path in paths {
-		ed.add_document(path) or {
-			eprintln('edit: ${path}: ${err}')
+	mut initial_picker_dir := ''
+	for entry in opts.paths {
+		// Directories become picker initial dirs; non-existent paths become
+		// empty documents that point at the requested target (matches Rust
+		// main.rs path handling).
+		if os.is_dir(entry.path) {
+			initial_picker_dir = entry.path
+			continue
+		}
+		ed.add_document(entry.path) or {
+			eprintln('edit: ${entry.path}: ${err}')
 			exit(1)
+		}
+		if entry.has_goto {
+			mut doc := &ed.docs[ed.active]
+			target_y := goto_line_index(entry.goto.line, doc.buf.logical_line_count() - 1)
+			target_x := coord_max(CoordType(entry.goto.column - 1), CoordType(0))
+			doc.buf.cursor_move_to_logical(Point{ x: target_x, y: target_y })
+			doc.buf.make_cursor_visible()
 		}
 	}
 
+	// A literal '-' clears file arguments, but stdin is only consumed when it
+	// is actually redirected. This avoids blocking on a terminal waiting for
+	// EOF when `edit -` is launched interactively.
 	stdin_redirected := stdin_is_redirected()
-	if stdin_redirected {
+	if stdin_redirected && opts.stdin_input {
+		stdin_text := read_all_stdin() or {
+			eprintln('edit: failed to read stdin: ${err}')
+			exit(1)
+		}
+		if ed.docs.len == 0 {
+			ed.add_document('') or {
+				eprintln('edit: cannot create stdin document: ${err}')
+				exit(1)
+			}
+		}
+		mut doc := &ed.docs[ed.active]
+		doc.buf.copy_from_str(StringDocument{ text: stdin_text })
+		doc.buf.mark_as_dirty()
+	} else if stdin_redirected {
 		stdin_text := read_all_stdin() or {
 			eprintln('edit: failed to read stdin: ${err}')
 			exit(1)
@@ -242,6 +293,11 @@ fn main() {
 			eprintln('edit: cannot create untitled document: ${err}')
 			exit(1)
 		}
+	}
+	if initial_picker_dir != '' {
+		ed.open_picker(false)
+		ed.picker_dir = initial_picker_dir
+		ed.picker_refresh()
 	}
 
 	if stdin_redirected {
@@ -405,31 +461,47 @@ fn (mut ed Editor) draw_search_prompt_options(options_y CoordType) {
 
 // add_document opens a file (or an untitled buffer for '') and makes it active.
 fn (mut ed Editor) add_document(path string) ! {
+	mut normalized_path := path
+	if path != '' {
+		normalized_path = os.abs_path(path)
+	}
 	mut doc := Document{
 		buf:  new_text_buffer(false)
-		path: path
+		path: normalized_path
 	}
 	doc.buf.set_margin_enabled(true)
 	doc.buf.set_insert_final_newline(true)
 	doc.buf.set_line_highlight_enabled(true)
 	doc.buf.set_width(ed.width_for_margin(doc.buf.margin_width()))
-	if path != '' {
-		fid := file_id(path) or { return err }
+	if normalized_path != '' {
+		mut existing_id := FileId{}
+		mut has_existing_id := false
+		if os.exists(normalized_path) {
+			existing_id = file_id(normalized_path) or { return err }
+			has_existing_id = true
+		}
 		for i in 0 .. ed.docs.len {
 			d := &ed.docs[i]
-			if (d.has_file_id && d.file_id == fid) || (!d.has_file_id && d.path == path) {
+			if (has_existing_id && d.has_file_id && d.file_id == existing_id)
+				|| (!has_existing_id && !d.has_file_id && d.path == normalized_path) {
 				ed.active = i
 				ed.reset_view_state()
 				return
 			}
 		}
-		doc.buf.read_file(path) or { return err }
-		doc.buf.set_language(lsh_language_for_path(path))
-		doc.file_id = fid
-		doc.has_file_id = true
+		if has_existing_id {
+			doc.buf.read_file(normalized_path) or { return err }
+			doc.buf.set_language(ed.language_for_path(normalized_path))
+			doc.file_id = existing_id
+			doc.has_file_id = true
+		} else {
+			// Rust creates an empty document for a missing path so it can be
+			// edited and saved without an intermediate Save As operation.
+			doc.buf.set_language(ed.language_for_path(normalized_path))
+		}
 		// Git commit messages conventionally wrap at 72 columns
 		// (Rust documents.rs applies the same special case).
-		if os.base(path) == 'COMMIT_EDITMSG' {
+		if os.base(normalized_path) == 'COMMIT_EDITMSG' {
 			doc.buf.set_ruler(72)
 		}
 	}
@@ -773,6 +845,17 @@ fn (mut ed Editor) cancel_prompt() {
 	ed.prompt_sel = -1
 	ed.search_buttons = []
 	ed.search_failed = false
+}
+
+// restart_prompt_with_error re-opens the given prompt keeping the typed
+// text and shows a status-bar error so the user can correct the input.
+// Used by Ctrl+G when the line/column string is malformed.
+fn (mut ed Editor) restart_prompt_with_error(kind PromptKind, text string, msg string) {
+	ed.start_prompt(kind)
+	ed.prompt_text = text
+	ed.prompt_cursor = text.len
+	ed.prompt_sel = -1
+	ed.status = msg
 }
 
 // prompt_effective_cursor returns the prompt cursor clamped to a usable byte
@@ -1200,11 +1283,21 @@ fn (mut ed Editor) confirm_prompt() {
 			}
 		}
 		.goto_line {
-			n := text.int()
-			if n > 0 {
-				ed.docs[ed.active].buf.cursor_move_to_logical(Point{ x: 0, y: CoordType(n - 1) })
-				ed.docs[ed.active].buf.make_cursor_visible()
+			point := parse_prompt_goto(text) or {
+				ed.restart_prompt_with_error(.goto_line, text, err.msg())
+				return
 			}
+			mut b := &ed.docs[ed.active].buf
+			// logical_line_count is always >= 1 (an empty document still has
+			// a single empty line), so last_line is non-negative.
+			last_line := b.logical_line_count() - 1
+			target_y := goto_line_index(point.line, last_line)
+			// Column 1 is the start of the line; logical_pos.x is 0-based.
+			target_x := coord_max(CoordType(point.column - 1), CoordType(0))
+			// cursor_move_to_logical clamps at line end via measure_forward,
+			// so an out-of-range column naturally snaps to the line tail.
+			b.cursor_move_to_logical(Point{ x: target_x, y: target_y })
+			b.make_cursor_visible()
 		}
 	}
 }
@@ -1285,6 +1378,15 @@ fn (mut ed Editor) save_active() {
 		return
 	}
 	path := ed.docs[ed.active].path
+	// Mirror Rust's open_for_writing: create missing parent directories so
+	// saving into a fresh nested path doesn't require mkdir -p up front.
+	dir := os.dir(path)
+	if dir != '' && dir != '.' && !os.exists(dir) {
+		os.mkdir_all(dir) or {
+			ed.error_log_add('save failed: cannot create ${dir}: ${err}')
+			return
+		}
+	}
 	ed.docs[ed.active].buf.write_file(path) or {
 		ed.error_log_add('save failed: ${path}: ${err}')
 		return
@@ -2554,4 +2656,3 @@ fn (mut ed Editor) resolve_clipboard_warning(send bool, always bool) {
 	}
 	ed.clipboard_large_pending = false
 }
-

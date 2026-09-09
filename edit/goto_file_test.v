@@ -1,5 +1,7 @@
 module main
 
+import os
+
 // goto_file_test.v — coverage for the pure helpers in goto_file.v
 // (goto_file_rect, goto_file_list_height, goto_file_entry_text) and
 // the state mutators that don't need a Framebuffer draw pass
@@ -14,6 +16,21 @@ fn fresh_editor_with_buffer() Editor {
 	ed.size = Size{ width: CoordType(80), height: CoordType(24) }
 	ed.add_document('') or { return ed }
 	return ed
+}
+
+// add_document deliberately replaces a clean placeholder buffer when opening
+// a real path. Create the fixture briefly so these tests exercise the named
+// document path without relying on the missing-file behavior under test.
+fn add_goto_test_document(mut ed Editor, path string) ! {
+	os.write_file(path, '')!
+	// Keep the initial scratch buffer in the fixture: add_document replaces a
+	// clean placeholder when opening a named document, matching the app's
+	// normal startup behavior.
+	if ed.docs.len > 0 && ed.docs[ed.active].path == '' && !ed.docs[ed.active].buf.is_dirty() {
+		ed.docs[ed.active].buf.mark_as_dirty()
+	}
+	ed.add_document(path)!
+	os.rm(path) or {}
 }
 
 // ---- goto_file_rect / goto_file_list_height ---------------------------
@@ -68,7 +85,7 @@ fn test_goto_file_list_height_subtracts_title_and_filter() {
 fn test_goto_file_entry_text_named_clean() {
 	// A named, non-dirty document gets "  <path>" (two-space mark).
 	mut ed := fresh_editor_with_buffer()
-	ed.add_document('/tmp/foo.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/foo.txt') or { return }
 	assert ed.goto_file_entry_text(1) == '  /tmp/foo.txt'
 }
 
@@ -101,8 +118,9 @@ fn test_goto_file_clamp_scroll_keeps_selection_visible_at_top() {
 	// When the selection moves above the scroll window, scroll up.
 	mut ed := fresh_editor_with_buffer()
 	for i in 1 .. 30 {
-		ed.add_document('/tmp/x${i}.txt') or { return }
+		add_goto_test_document(mut ed, '/tmp/x${i}.txt') or { return }
 	}
+	ed.goto_file_compute_filtered()
 	ed.goto_file_scroll = 10
 	ed.goto_file_sel = 5
 	ed.goto_file_clamp_scroll()
@@ -113,8 +131,9 @@ fn test_goto_file_clamp_scroll_keeps_selection_visible_at_bottom() {
 	// When the selection moves below the scroll window, scroll down.
 	mut ed := fresh_editor_with_buffer()
 	for i in 1 .. 30 {
-		ed.add_document('/tmp/x${i}.txt') or { return }
+		add_goto_test_document(mut ed, '/tmp/x${i}.txt') or { return }
 	}
+	ed.goto_file_compute_filtered()
 	// 80x24 → list_h = 12 (title + filter rows reserved), so a selection
 	// of 25 needs scroll >= 25 - 12 + 1 = 14.
 	ed.goto_file_scroll = 0
@@ -127,8 +146,8 @@ fn test_goto_file_clamp_scroll_keeps_selection_visible_at_bottom() {
 
 fn test_goto_file_activate_switches_active_doc() {
 	mut ed := fresh_editor_with_buffer()
-	ed.add_document('/tmp/foo.txt') or { return }
-	ed.add_document('/tmp/bar.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/foo.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/bar.txt') or { return }
 	ed.goto_file_sel = 2
 	ed.goto_file_activate()
 	assert ed.active == 2
@@ -152,8 +171,9 @@ fn test_goto_file_activate_out_of_range_is_noop() {
 
 fn test_goto_file_key_up_down_moves_selection() {
 	mut ed := fresh_editor_with_buffer()
-	ed.add_document('/tmp/foo.txt') or { return }
-	ed.add_document('/tmp/bar.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/foo.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/bar.txt') or { return }
+	ed.active = 0
 	ed.open_goto_file()
 	assert ed.goto_file_sel == 0
 	ed.handle_goto_file_key(InputKey(vk_down))
@@ -175,8 +195,9 @@ fn test_goto_file_key_up_down_moves_selection() {
 fn test_goto_file_key_home_end_jumps_to_bounds() {
 	mut ed := fresh_editor_with_buffer()
 	for i in 1 .. 5 {
-		ed.add_document('/tmp/x${i}.txt') or { return }
+		add_goto_test_document(mut ed, '/tmp/x${i}.txt') or { return }
 	}
+	ed.active = 0
 	ed.open_goto_file()
 	ed.handle_goto_file_key(InputKey(vk_end))
 	assert ed.goto_file_sel == 4
@@ -187,8 +208,9 @@ fn test_goto_file_key_home_end_jumps_to_bounds() {
 fn test_goto_file_key_prior_next_pages() {
 	mut ed := fresh_editor_with_buffer()
 	for i in 1 .. 30 {
-		ed.add_document('/tmp/x${i}.txt') or { return }
+		add_goto_test_document(mut ed, '/tmp/x${i}.txt') or { return }
 	}
+	ed.active = 0
 	ed.open_goto_file()
 	// Page-down from 0 jumps by list_h (80x24 → 12 with title+filter reserved).
 	ed.handle_goto_file_key(InputKey(vk_next))
@@ -206,8 +228,9 @@ fn test_goto_file_key_prior_next_pages() {
 
 fn test_goto_file_key_return_activates() {
 	mut ed := fresh_editor_with_buffer()
-	ed.add_document('/tmp/foo.txt') or { return }
-	ed.add_document('/tmp/bar.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/foo.txt') or { return }
+	add_goto_test_document(mut ed, '/tmp/bar.txt') or { return }
+	ed.active = 0
 	ed.open_goto_file()
 	ed.goto_file_sel = 2
 	ed.handle_goto_file_key(InputKey(vk_return))

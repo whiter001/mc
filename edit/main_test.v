@@ -1,5 +1,7 @@
 module main
 
+import os
+
 // main_test.v — tests for the small set of pure helpers in main.v.
 //
 // main.v mostly hosts the Editor + its methods (which need a full
@@ -502,4 +504,103 @@ fn test_cancel_prompt_resets_prompt_sel() {
 	assert ed.prompt_sel == -1
 	assert ed.prompt_cursor == -1
 	assert ed.prompt_text == ''
+}
+
+fn test_confirm_prompt_goto_line_moves_cursor() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	// Three lines with a trailing newline, mirroring the existing search tests.
+	wr(mut ed.docs[ed.active].buf, 'first\nsecond line\nthird\n')
+
+	ed.start_prompt(.goto_line)
+	ed.prompt_text = '2'
+	ed.confirm_prompt()
+	assert ed.docs[ed.active].buf.cursor_logical_pos().y == 1
+
+	// "3:4" → line 3 (0-based 2), column 4 (0-based 3).
+	ed.start_prompt(.goto_line)
+	ed.prompt_text = '3:4'
+	ed.confirm_prompt()
+	pos := ed.docs[ed.active].buf.cursor_logical_pos()
+	assert pos.y == 2
+	assert pos.x == 3
+
+	// Out-of-range line clamps to the last line.
+	ed.start_prompt(.goto_line)
+	ed.prompt_text = '999'
+	ed.confirm_prompt()
+	last_y := ed.docs[ed.active].buf.logical_line_count() - 1
+	assert ed.docs[ed.active].buf.cursor_logical_pos().y == last_y
+}
+
+fn test_confirm_prompt_goto_line_clamps_column_and_rejects_invalid() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	// "ab" is 2 graphemes long, so column 99 should clamp to x=2.
+	wr(mut ed.docs[ed.active].buf, 'ab\nsecond\n')
+
+	ed.start_prompt(.goto_line)
+	ed.prompt_text = '1:99'
+	ed.confirm_prompt()
+	pos := ed.docs[ed.active].buf.cursor_logical_pos()
+	assert pos.y == 0
+	assert pos.x == 2
+
+	// Negative line: parse_prompt_goto rejects it; prompt stays open.
+	mut ed2 := Editor{ fb: framebuffer_new() }
+	ed2.add_document('') or { panic('add_document: ${err}') }
+	ed2.start_prompt(.goto_line)
+	ed2.prompt_text = '-1'
+	ed2.confirm_prompt()
+	assert ed2.mode == .prompt
+	assert ed2.prompt_text == '-1'
+	assert ed2.status != ''
+
+	// Garbage input: also stays open.
+	ed2.prompt_text = 'abc'
+	ed2.confirm_prompt()
+	assert ed2.mode == .prompt
+	assert ed2.prompt_text == 'abc'
+	assert ed2.status != ''
+
+	// Zero line: parse_prompt_goto rejects it; prompt stays open.
+	ed2.prompt_text = '0'
+	ed2.confirm_prompt()
+	assert ed2.mode == .prompt
+	assert ed2.prompt_text == '0'
+	assert ed2.status != ''
+}
+
+fn test_save_active_creates_missing_parent_dirs() {
+	tmp := os.temp_dir() + os.path_separator + 'edit_save_nested_${u64(os.getpid())}'
+	defer { os.rmdir_all(tmp) or {} }
+
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document('') or { panic('add_document: ${err}') }
+	wr(mut ed.docs[ed.active].buf, 'hello')
+
+	nested := os.join_path(tmp, 'a', 'b', 'c.txt')
+	ed.docs[ed.active].path = nested
+
+	ed.save_active()
+
+	assert os.exists(nested)
+	// TextBuffer appends a final newline when none is present.
+	assert os.read_file(nested) or { panic(err) } == 'hello\n'
+	// Save success: doc is no longer dirty and the file_id was populated.
+	assert !ed.docs[ed.active].buf.is_dirty()
+	assert ed.docs[ed.active].has_file_id
+}
+
+fn test_add_document_accepts_missing_path_and_normalizes_it() {
+	tmp := os.join_path(os.temp_dir(), 'edit_missing_${u64(os.getpid())}.txt')
+	os.rm(tmp) or {}
+	defer { os.rm(tmp) or {} }
+
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.add_document(tmp) or { panic('add_document: ${err}') }
+	assert ed.docs.len == 1
+	assert ed.docs[0].path == os.abs_path(tmp)
+	assert !ed.docs[0].has_file_id
+	assert !ed.docs[0].buf.is_dirty()
 }

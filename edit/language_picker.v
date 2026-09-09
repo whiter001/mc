@@ -151,7 +151,7 @@ fn (mut ed Editor) language_picker_apply(pos int) {
 			// Auto-detect from the active document's path; untitled
 			// buffers fall back to plain text (no extension to match).
 			path := ed.cur().path
-			detected := if path == '' { -1 } else { lsh_language_for_path(path) }
+			detected := if path == '' { -1 } else { ed.language_for_path(path) }
 			b.set_language(detected)
 		}
 		language_picker_pos_plain {

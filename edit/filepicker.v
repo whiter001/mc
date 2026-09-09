@@ -218,6 +218,15 @@ fn (mut ed Editor) picker_activate() {
 
 // picker_do_save saves the active document to the given path.
 fn (mut ed Editor) picker_do_save(path string) {
+	// Mirror Rust's open_for_writing: missing parent dirs are created so the
+	// user can save into a brand-new nested path without leaving the picker.
+	dir := os.dir(path)
+	if dir != '' && dir != '.' && !os.exists(dir) {
+		os.mkdir_all(dir) or {
+			ed.error_log_add('save failed: cannot create ${dir}: ${err}')
+			return
+		}
+	}
 	ed.docs[ed.active].buf.write_file(path) or {
 		ed.error_log_add('save failed: ${path}: ${err}')
 		return
