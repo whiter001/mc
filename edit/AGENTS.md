@@ -1,7 +1,8 @@
 # edit (V) agent 指南
 
 本项目是 microsoft/edit（Rust，/Volumes/Extreme/github2/edit，只读参考）的 V 语言重写。
-第一版范围：核心编辑器，仅 macOS/Linux，UTF-8 only，无 ICU / i18n / SIMD。
+第一版范围：核心编辑器，macOS / Linux / Windows（x86_64），UTF-8 only，无 ICU / i18n / SIMD。
+Windows 移植的设计与进度见 [`TODO.md`](TODO.md) 的「Windows 原生构建」与 [`WINDOWS_PORT.md`](WINDOWS_PORT.md)。
 
 ## 资源限制（必须遵守）
 
@@ -18,15 +19,20 @@ cpulimit -l 200 -z -- v fmt -w .        # fmt / vet 等直接调 v 的命令同�
 - `-l N`：允许的 CPU 百分比，按核数计（0–800，即 100 = 1 核）。默认用 200。
 - `-z`：目标进程退出后 cpulimit 自动退出，不会残留。
 - cpulimit 不在 PATH 里时先问用户，不要自己安装。
+- **仅 macOS / Linux** 需要 cpulimit；Windows 没有等价物，`build.sh` 当前不限制 CPU（会打 warning 提示，跟 Job Object 限内存一起作为后续 issue）。
 - 限制的只是构建/测试进程；对最终产出的二进制正常运行不加限制。
-- 内存限制已内置于 `build.sh`：编译和测试命令自带内存看门狗，进程树 RSS 超限会被整树杀掉。
+- 内存限制已内置于 `build.sh`：编译和测试命令自带内存看门狗，进程树 RSS 超限会被整树杀掉（仅 unix 路径；Windows 同样需 Job Object，后续 issue）。
   build 用 `MEMLIMIT_MB`（默认 2048MB），`v test` 单独用 `TEST_MEMLIMIT_MB`（默认 4096MB）；
   `MEMLIMIT_MB=0` 整体关闭。
-- 直接调用 `v` 的命令（如 `v fmt -w .`）没有经过 build.sh，没有内存限制，至少仍要包 `cpulimit`。
+- 直接调用 `v` 的命令（如 `v fmt -w .`）没有经过 build.sh，没有内存限制，至少仍要包 `cpulimit`（unix 上）。
 
 ## 构建
 
-全部走 `./build.sh`（dev/debug/prod/test/fmt/vet/clean/install/uninstall），产物在 `bin/edit`。
+全部走 `./build.sh`（dev/debug/prod/test/fmt/vet/clean/install/uninstall），产物在 `bin/edit`（Windows 为 `bin/edit.exe`）。
+脚本会按 `uname` / `$OS` 自动选路径：Windows 走 cmd / PowerShell 链路，install 用 `cp -f`，prefix 默认 `${LOCALAPPDATA}/Programs/edit`。
+
+Windows 编译需要 V + `clang`（`x86_64-pc-windows-msvc`）+ WinSDK + LLVM `lld-link`，并通过 `-cflags -DWIN32_LEAN_AND_MEAN`
+避开 `windows.h` 与 vlib 宏冲突（`build.sh` 自动加）。`CC="zig cc"` 可作交叉编译 fallback（mingw 头）。
 
 端到端冒烟用 `tools/smoke.py`（pty 驱动）：`python3 tools/smoke.py <文件1:文件2...> <hex按键>`，
 按键 hex 用 `--` 分段；每段发送后等输出静默 0.3s 再发下一段（给 100ms 的 ESC 超时
@@ -35,10 +41,14 @@ cpulimit -l 200 -z -- v fmt -w .        # fmt / vet 等直接调 v 的命令同�
 文本区的 SGR 鼠标行号从 2（1 基）开始。搜索/替换 prompt 打开时面板占行 1-2
 （对齐 Rust 布局），文本区从行 3 开始（SGR 行号 4 起）；终端高度 < 5 时
 回退到底部（行 height-2 / height-1）。
+**`tools/smoke.py` 仅在 unix 可用**（基于 `pty`）；Windows 端到端冒烟要么手工跑，要么后续用 ConPTY（`pywinpty`）写 Windows 版脚本。
 
 ## 代码约定
 
 - 扁平 `.v` 文件，统一 `module main`，测试为 `*_test.v`。
+- **平台文件命名**：V 按文件名后缀自动过滤平台文件（`vlib/v/pref/should_compile.v:266-270`），
+  `_windows.v` 仅 Windows 编，`_nix.v` 在 macOS / Linux 编。新增平台时按此命名，
+  不在函数体里塞 `$if windows` / `$if linux`。共享代码放无后缀的 `xxx.v`。
 - gap buffer 等裸内存操作集中在 unsafe 块内，用 `C.malloc/C.realloc/C.free`，绕开 GC 扫描。
 - 参考源码只读：不得修改 /Volumes/Extreme/github2/edit。
 
@@ -59,29 +69,44 @@ Enter 进目录或接受、空名 Backspace 或 Alt+Up 上级、鼠标点项直�
 另存覆盖 y/n 警告；裁剪了自动补全和 ICU 排序；Ctrl+O/Ctrl+Shift+S/无路径
 Ctrl+S 均走 picker，状态行 open/save_as prompt 已删除）、
 `text_buffer.v`（TextBuffer 全量移植，查找为纯子串语义）、`gap_buffer.v`、
-`measurement.v`、`document.v`、`framebuffer.v`、`oklab.v`、`sys.v`（raw mode、
-stdin 读取、SIGWINCH）、`input.v`（VT 输入解析）、`vt.v`、`navigation.v`、
-`clipboard.v`、`helpers.v`、`unicode_tables.v`、lsh 语法高亮（
-`lsh_runtime.v` VM 移植自 crates/lsh/src/runtime.rs、`highlighter.v` 移植自
-highlighter.rs+cache.rs+stdext/glob.rs；`lsh_tables.v` 是离线生成的字节码
-表——lsh 编译器本身未移植，表由 `tools/lsh_tables_to_v.py` 从
-`lsh-bin compile` 的输出转换而来，重新生成方式见该脚本头部注释；
-`text_buffer.v` 的 `language` 是 lsh_languages 下标（-1=无），
-打开文件时按 glob 关联自动检测，编辑从受损行起失效缓存）。
-未做：TUI 布局引擎（tui.rs 4112 行，含本地化/焦点系统）、lsh 编译器。
+`measurement.v`、`document.v`、`framebuffer.v`、`oklab.v`、
+**sys 层拆分**：`sys.v`（共享 `SysState` / `FileId` / `incomplete_utf8_tail_len` /
+`inject_window_size_into_stdin` / `stdin_hit_eof`）+ `sys_nix.v`（macOS/Linux：
+raw mode / poll 读 stdin / SIGWINCH / `TIOCGWINSZ` / `open + fstat` → FileId）+
+`sys_windows.v`（x86_64 Windows：`GetStdHandle` / `SetConsoleMode` /
+`WaitForSingleObject + ReadConsoleW` / `WriteConsoleW + WriteFile` /
+`GetConsoleScreenBufferInfo` / `CreateFileW + GetFileInformationByHandle`；
+conhost VT 输入走方案 A 直通，详见 `WINDOWS_PORT.md`）、`input.v`（VT 输入解析）、
+`vt.v`、`navigation.v`、`clipboard.v`、`helpers.v`、`unicode_tables.v`、
+lsh 语法高亮（`lsh_runtime.v` VM 移植自 crates/lsh/src/runtime.rs、
+`highlighter.v` 移植自 highlighter.rs+cache.rs+stdext/glob.rs；
+`lsh_tables.v` 是离线生成的字节码表——lsh 编译器本身未移植，表由
+`tools/lsh_tables_to_v.py` 从 `lsh-bin compile` 的输出转换而来，重新生成
+方式见该脚本头部注释；`text_buffer.v` 的 `language` 是 lsh_languages 下标
+（-1=无），打开文件时按 glob 关联自动检测，编辑从受损行起失效缓存）。
+未做：TUI 布局引擎（tui.rs 4112 行，含本地化/焦点系统）、lsh 编译器、
+**Windows CPU 限流 / Job Object 内存限流**（Windows build 当前不限制 V 进程占用，
+需后续 issue；其他 Windows 路径都已就绪，详见 TODO.md W8）。
 
 ## V 工具链 / vlib 坑（踩过的）
 
 - `os.File.read()` 到 EOF 会返回 `os.Eof{}` 错误（空消息 code=0），不是返回 0；
   读文件循环必须 `if err is os.Eof { break }`。
 - `import os` 在场时 `u64(C.A | C.B)` 组合表达式会触发编译器报错，要逐项
-  `u64(C.A) | u64(C.B)`（见 sys.v）。
+  `u64(C.A) | u64(C.B)`（见 sys_nix.v）。
 - 定长数组字面量要加 `!` 后缀；`string([]u8)` 用 `.bytestr()`；`insert` 只插单元素，
   拼大片段用 `<<`；参数名不能用 `default` 等 C 关键字；mut 参数会级联到调用处。
-- `TIOCGWINSZ` 等含 sizeof 的 C 宏无法透传，按平台硬编码 ABI 值（见 sys.v）。
+- `TIOCGWINSZ` 等含 sizeof 的 C 宏无法透传，按平台硬编码 ABI 值（见 sys_nix.v）。
 - V 无析构：Rust 的 Drop 守卫（终端恢复）要在每条退出路径显式调 `restore_terminal()`。
 - V 的 `int(u32值)` 对 > i32 max 的值会环绕成负数；Rust `u32 as usize` 不会。
   解释器/字节码里当索引用的 u32 要先钳制再转（见 lsh_runtime.v `lsh_reg_as_off`）。
 - `asm` 是 V 保留字，不能当变量名；`[]u8.index(x)` 返回 int（-1 表未找到），
   不带 Option；for 区间循环只接受整数类型，`CoordType`（i32 别名）要先 `int()`；
   数值强转枚举要包 `unsafe {}`；接口引用字段在结构体字面量里赋值也要 `unsafe { }`。
+- 同一 Win32 API 在 vlib `term` 与我们的 `sys_windows.v` 同时声明时，签名必须一致
+  （vlib 用 `C.HANDLE` + `bool` 返回，`SMALL_RECT` 字段为 `Left/Top/Right/Bottom` CamelCase u16）。
+  复用时优先 `import term` 拿 vlib 声明；不一致会被 V 当成「已用不同签名声明」报错。
+- Windows 下 `&u8(0)` / `&u32(0)` 不是合法的 null 指针字面量，要写 `unsafe { &u8(nil) }` /
+  `unsafe { &u32(nil) }`；`&slice[0]` 取切片元素地址也需 `unsafe {}`。
+- V 不允许在同一函数作用域里用 `:=` 重新声明已在父作用域出现的变量（即便跨
+  if/else 分支也不行）。共用变量要么声明在顶部 `mut`，要么每分支用新名。

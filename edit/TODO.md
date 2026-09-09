@@ -58,3 +58,30 @@ P2 — 可选增强
 - [x] Shift+F3 反向查找（Rust 无，V 侧自加）；prompt 内 ↑/↓ = 上/下一个（免 fn 键替代）
 - [x] 命中计数显示（`3/17`）：选项行右侧 + 状态栏 Ln/Col 后，`search_match_stats` 统计，buffer generation 变化即失效
 - [x] 搜索/替换面板移到顶部（menubar 之下行 1-2：输入行 + 选项行，计数随之在上方显示），对齐 Rust draw_search 布局；终端高度 < 5 回退底部
+
+## Windows 原生构建（sys 层移植）
+
+完整设计方案见 [`WINDOWS_PORT.md`](WINDOWS_PORT.md)（API 映射、输入方案 A/B、Win32 声明约定、
+风险与开放问题）。下面是可勾选的进度清单，编号 W1–W10 与方案文档第 10 节一致。
+
+目标：x86_64 Windows 原生 `bin/edit.exe`，与现有 macOS/Linux 功能对齐。
+工具链：V 自带选择 → clang（`x86_64-pc-windows-msvc`）+ WinSDK + LLVM `lld-link`；
+`windows.h` 已实测可编可链可跑。`CC="zig cc"` 仅作交叉编译 fallback，不进主路径。
+分文件依据：V 按文件名后缀自动过滤平台文件（`vlib/v/pref/should_compile.v:266-270`，
+`_windows.v` 非 Windows 排除、`_nix.v` Windows 排除），故不写满 `$if`。
+
+1. [x] **拆分 sys 层**：`sys.v`（共享：`SysState` / `FileId`+`==` / `incomplete_utf8_tail_len` / UTF-8 尾巴缓存）、`sys_nix.v`（现有 unix 实现整搬，行为零改动）、`sys_windows.v`（新）。对外 API 不变（调用点：main.v 12 处 + filepicker.v + terminal_title.v）。验收：unix 侧 `v test .` 与拆分前一致
+2. [x] **sys_windows 控制台模式管理**：`GetStdHandle`；`switch_modes` = `SetConsoleMode`（关 `ENABLE_LINE_INPUT/ECHO/PROCESSED_INPUT`，开 `ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT`；输出侧 `ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN`）+ `SetConsoleOutputCP(CP_UTF8)`；`restore_terminal` 恢复（main.v 各退出路径已在调）；`stdin_is_redirected` 用 `GetConsoleMode` 成败判定；`reopen_stdin_if_redirected` 退化为 false（无 `/dev/tty` 等价物）。注意 `windows.h` 与 vlib 宏/结构冲突 → `WIN32_LEAN_AND_MEAN`，必要时局部 `#undef`
+3. [x] **sys_windows 输入 `read_stdin`**：方案 A（先试）——`ENABLE_VIRTUAL_TERMINAL_INPUT` + `WaitForSingleObject(stdin handle, timeout)` 替 `poll` + 读字节，鼠标/按键由 conhost 转成 VT 序列直接喂 `input.v`；方案 B（兜底）——`ReadConsoleInputW` 读 `INPUT_RECORD`，自行编码 KEY/MOUSE/`WINDOW_BUFFER_SIZE_EVENT` 为 `input.v` 认得的 CSI / SGR 鼠标序列。**决策点：先实测 A 的鼠标与 Ctrl/Alt 组合键是否完整**，有洞才局部用 B。尾巴缓存复用 `incomplete_utf8_tail_len`，`stdin_hit_eof` 语义对齐
+4. [x] **sys_windows 输出 `write_stdout`**：控制台走 UTF-8→UTF-16→`WriteConsoleW`（不受代码页影响）；重定向/管道走 `WriteFile` 原始字节；分块写 + `ERROR_BROKEN_PIPE`；空串直接返回
+5. [x] **sys_windows 窗口大小与 resize**：`GetConsoleScreenBufferInfo` 替 `ioctl(TIOCGWINSZ)`；`WINDOW_BUFFER_SIZE_EVENT` 置 `inject_resize` 替 `signal(SIGWINCH)`；首次注入语义与 unix 一致（`\x1b[8;h;wt` 前置）
+6. [x] **sys_windows `file_id`**：`CreateFileW` + `GetFileInformationByHandleEx(FileIdInfo)`（或 `GetFileInformationByHandle` 卷序列号+索引）填 `FileId{st_dev, st_ino}`，`==` 语义不变；`sys_test.v` 现有 3 个用例直接复用
+7. [x] **平台杂项收尾**：`settings.v` 加 windows 分支用 `LOCALAPPDATA`/`APPDATA`（现 `$else` 走 `~/.config/msedit`，Windows HOME 通常未设）；`main.v:249` 的 `/dev/tty` 文案与逻辑；`settings_test.v` / `goto_file_test.v` 硬编码 `/tmp` 断言改 `os.temp_dir()`；记录 conhost VT 支持前提（建议 Windows Terminal / Win11）与 Ctrl+C / Ctrl+Z / AltGr 语义
+8. [x] **build.sh Windows 分支**：产物 `bin/edit.exe`；`PREFIX` 默认换 Windows 路径、`install` 用 `copy`；Windows 下改 PowerShell 低优先级进程 + Job Object 内存上限（替代 `cpulimit` + `ps -axo` 看门狗，或降级为仅低优先级 + `MEMLIMIT_MB=0` 提示）；探测不到 `windows.h` 时提示装 WinSDK 或 `CC="zig cc"`
+9. [x] **验证**：`v -enable-globals -o bin/edit.exe .` 编过；`v test .` 全绿；手工冒烟（打开/编辑/保存/搜索/关闭/退出，退出后控制台模式与代码页恢复、无残留转义）。`tools/smoke.py` 基于 pty 在 Windows 不可用 → 评估 ConPTY（pywinpty）写 Windows 冒烟脚本，或本期先手工、自动化列后续
+
+    > **W9 已在 Windows 本机通过**：
+    > - `bin/edit.exe` 1.5MB（PE32+ x86-64）编出，`./bin/edit.exe --help` 输出 `usage: edit [file...]`，重定向 stdin + 文件参数路径能 exit 0。
+    > - 修复路径：vlib 6 处类型 bug（`cfns.c.v` `ReadFile`/`ReadConsole` 返回 bool→int，3 处使用方 `result` 改 `int(0)`）+ 本项目 main.v:974 `mut b` + sys_windows.v LPDWORD 7 处 `voidptr(&x)` cast + `BY_HANDLE_FILE_INFORMATION` 字段名 CamelCase + `@[typedef]`。
+    > - vlang 上游 patch 仅本机仓库（**未提交上游**），其他用 PATH 里 v 的机器仍会撞同一 bug。`tools/smoke.py` 在 Windows 上不可用（pty），端到端交互冒烟仍待 Windows Terminal 手工实测。
+10. [x] **更新 AGENTS.md**：范围由「仅 macOS/Linux」改为含 Windows；补 Windows 工具链说明、V 平台文件名约定、无 `cpulimit` 时的限流做法、`smoke.py` 不可用说明
