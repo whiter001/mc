@@ -14,16 +14,30 @@ fn settings_path() string {
 // Returns the absolute path of the directory that holds settings.json.
 // Does NOT create the directory on disk.
 fn settings_config_dir() string {
-    home := os.getenv('HOME')
-    if home == '' { return '' }
-    $if macos {
-        return os.join_path(home, 'Library', 'Application Support', 'com.microsoft.edit')
-    } $else $if linux {
-        xdg := os.getenv('XDG_CONFIG_HOME')
-        base := if xdg != '' { xdg } else { os.join_path(home, '.config') }
-        return os.join_path(base, 'msedit')
+    $if windows {
+        // Windows usually has neither HOME nor XDG_CONFIG_HOME; prefer the
+        // user-local config dir per Microsoft's shell folder conventions.
+        // Fall back to APPDATA, then HOME (msys / git-bash users), so that
+        // tests which only set HOME still resolve on Windows.
+        base := os.getenv('LOCALAPPDATA')
+        if base != '' { return os.join_path(base, 'msedit') }
+        fallback := os.getenv('APPDATA')
+        if fallback != '' { return os.join_path(fallback, 'msedit') }
+        home := os.getenv('HOME')
+        if home != '' { return os.join_path(home, '.config', 'msedit') }
+        return ''
     } $else {
-        return os.join_path(home, '.config', 'msedit')
+        home := os.getenv('HOME')
+        if home == '' { return '' }
+        $if macos {
+            return os.join_path(home, 'Library', 'Application Support', 'com.microsoft.edit')
+        } $else $if linux {
+            xdg := os.getenv('XDG_CONFIG_HOME')
+            base := if xdg != '' { xdg } else { os.join_path(home, '.config') }
+            return os.join_path(base, 'msedit')
+        } $else {
+            return os.join_path(home, '.config', 'msedit')
+        }
     }
 }
 

@@ -246,7 +246,7 @@ fn main() {
 
 	if stdin_redirected {
 		reopen_stdin_if_redirected() or {
-			eprintln('edit: cannot reopen /dev/tty: ${err}')
+			eprintln('edit: cannot reopen tty: ${err}')
 			exit(1)
 		}
 	}
@@ -970,7 +970,7 @@ fn (mut ed Editor) update_search_stats() {
 		ed.search_hit_total = 0
 		return
 	}
-	b := &ed.docs[ed.active].buf
+	mut b := &ed.docs[ed.active].buf
 	ed.search_hit_index, ed.search_hit_total = b.search_match_stats(ed.last_search,
 		ed.search_options)
 	ed.search_hit_generation = b.buffer.generation()
