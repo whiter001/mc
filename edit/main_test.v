@@ -15,68 +15,6 @@ fn wr(mut b TextBuffer, s string) {
 	b.write_raw(s.bytes())
 }
 
-fn test_run_prompt_search_sets_search_failed() {
-	mut ed := Editor{ fb: framebuffer_new() }
-	ed.add_document('') or { panic('add_document: ${err}') }
-	wr(mut ed.docs[ed.active].buf, 'hello world')
-
-	// A needle with no match flips the failed flag (drives the red prompt line).
-	ed.mode = .prompt
-	ed.prompt_kind = .search
-	ed.prompt_text = 'zzz'
-	ed.run_prompt_search()
-	assert ed.search_failed == true
-
-	// A present needle clears the failed flag.
-	ed.prompt_text = 'world'
-	ed.run_prompt_search()
-	assert ed.search_failed == false
-}
-
-fn test_start_prompt_prefills_needle_from_selection() {
-	mut ed := Editor{ fb: framebuffer_new() }
-	ed.add_document('') or { panic('add_document: ${err}') }
-	wr(mut ed.docs[ed.active].buf, 'hello world')
-	mut b := &ed.docs[ed.active].buf
-	// Select 'world' (offset 6..11 on line 0).
-	b.set_selection(OptSelection{ valid: true, beg: Point{ x: 6, y: 0 }, end: Point{ x: 11, y: 0 } })
-
-	// Ctrl+F/Ctrl+R with a selection prefills the needle with it.
-	ed.start_prompt(.search)
-	assert ed.prompt_text == 'world'
-	ed.start_prompt(.replace)
-	assert ed.prompt_text == 'world'
-
-	// With no selection, the needle falls back to last_search.
-	ed.last_search = 'foo'
-	b.set_selection(OptSelection{ valid: false })
-	ed.start_prompt(.search)
-	assert ed.prompt_text == 'foo'
-}
-
-fn test_prompt_f3_finds_next_hit() {
-	mut ed := Editor{ fb: framebuffer_new() }
-	ed.add_document('') or { panic('add_document: ${err}') }
-	wr(mut ed.docs[ed.active].buf, 'foo\nbaz foo\nfoo\n')
-
-	ed.start_prompt(.search)
-	ed.prompt_text = 'foo'
-	ed.run_prompt_search()
-
-	mut b := &ed.docs[ed.active].buf
-	assert b.has_selection()
-	assert b.selection.beg.y == 0
-
-	// F3 works from inside the prompt, using the needle currently in it
-	// (Rust main.rs:410 runs search_execute with state.search_needle).
-	ed.handle_prompt_key(InputKey(vk_f3))
-	assert b.selection.beg.y == 1
-	ed.handle_prompt_key(InputKey(vk_f3))
-	assert b.selection.beg.y == 2
-	assert ed.search_failed == false
-	assert ed.last_search == 'foo'
-}
-
 fn test_clipboard_size_label_bytes() {
 	// Below 1 KiB is still formatted in KiB with one decimal.
 	assert clipboard_size_label(0) == '0 KiB'
@@ -253,7 +191,7 @@ fn test_handle_prompt_key_arrow_home_end_delete() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
 	wr(mut ed.docs[ed.active].buf, 'foo')
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'hello'
 	ed.prompt_cursor = ed.prompt_text.len // cursor at end
 
@@ -279,7 +217,7 @@ fn test_handle_prompt_key_arrow_home_end_delete() {
 fn test_handle_prompt_key_ctrl_a_k_u() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'abcdef'
 	ed.prompt_cursor = 3
 
@@ -394,7 +332,7 @@ fn test_prompt_delete_deletes_selection_not_following_char() {
 fn test_handle_prompt_key_shift_arrows_extend_selection() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'hello'
 	ed.prompt_cursor = 5
 
@@ -422,7 +360,7 @@ fn test_handle_prompt_key_shift_arrows_extend_selection() {
 fn test_handle_prompt_key_shift_home_end_extend_selection() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'hello'
 	ed.prompt_cursor = 5
 
@@ -455,7 +393,7 @@ fn test_handle_prompt_key_shift_home_end_extend_selection() {
 fn test_handle_prompt_key_plain_move_clears_selection() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'hello'
 	ed.prompt_cursor = 5
 	ed.prompt_sel = 2 // selection = "llo"
@@ -469,7 +407,7 @@ fn test_handle_prompt_key_plain_move_clears_selection() {
 fn test_handle_prompt_key_ctrl_a_then_type_replaces_field() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'hello'
 	ed.prompt_cursor = 5
 
@@ -489,14 +427,14 @@ fn test_start_prompt_resets_prompt_sel() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
 	ed.prompt_sel = 3
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	assert ed.prompt_sel == -1
 }
 
 fn test_cancel_prompt_resets_prompt_sel() {
 	mut ed := Editor{ fb: framebuffer_new() }
 	ed.add_document('') or { panic('add_document: ${err}') }
-	ed.start_prompt(.search)
+	ed.start_prompt(.goto_line)
 	ed.prompt_text = 'abc'
 	ed.prompt_cursor = 3
 	ed.prompt_sel = 1

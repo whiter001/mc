@@ -15,7 +15,7 @@ module main
 
 // error_log_capacity is the size of the circular error log buffer
 // (matches the Rust reference's fixed-size ring).
-const error_log_capacity = 8
+const error_log_capacity = 10
 
 // error_log_add records a new error in the ring buffer and pops the
 // modal open. Empty messages are ignored (mirrors Rust `add_error`).

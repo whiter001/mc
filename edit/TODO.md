@@ -35,10 +35,10 @@
 
 ### 搜索/替换面板
 
-- [ ] 将临时双 prompt 改为常驻搜索面板：needle、replacement、选项、Replace All、Close
-- [ ] 面板打开期间 Enter 只执行操作，不关闭面板；Esc/Close 才关闭
-- [ ] 使用统一焦点状态保存 needle/replacement/当前控件，支持 Tab/Shift+Tab
-- [ ] 保留现有增量查找、选区预填、F3/Shift+F3、命中计数和零宽命中推进逻辑
+- [x] 将临时双 prompt 改为常驻搜索面板：needle、replacement、选项、Replace All、Close
+- [x] 面板打开期间 Enter 只执行操作，不关闭面板；Esc/Close 才关闭
+- [x] 使用统一焦点状态保存 needle/replacement/当前控件，支持 Tab/Shift+Tab
+- [x] 保留现有增量查找、选区预填、F3/Shift+F3、命中计数和零宽命中推进逻辑
 
 ### settings.json
 
@@ -82,7 +82,8 @@
 
 - [ ] 引入统一 focus tree：菜单、搜索、picker、状态栏、模态框均支持 Tab/Shift+Tab
 - [ ] 补回 View > Focus Statusbar，并支持键盘操作状态栏按钮
-- [ ] 错误日志容量与 Rust 对齐为 10 条；统一错误模态的按钮和关闭行为
+- [x] 错误日志容量与 Rust 对齐为 10 条
+- [ ] 统一错误模态的按钮和关闭行为
 - [ ] 未命名文档使用 `Untitled-N.txt`，状态栏显示 basename，Go to File 显示目录信息
 - [ ] 自动检测语言时状态栏显示实际生效语言，显式 override 时显示 override
 - [ ] About 和 `--version` 显示同一个构建版本，不保留硬编码 `0.1`

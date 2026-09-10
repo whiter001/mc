@@ -14,7 +14,7 @@ import encoding.base64
 
 // Terminal setup/teardown sequences, same as the Rust original (main.rs).
 const term_init_seq = '\x1b[?1049h\x1b[?1002;1006;2004h\x1b[?1036h'
-const term_exit_seq = '\x1b[0 q\x1b[?25h\x1b]0;\x07\x1b[?1002;1006;2004l\x1b[?1049l'
+const term_exit_seq = '\x1b[0 q\x1b[?25h\x1b]0;\a\x1b[?1002;1006;2004l\x1b[?1049l'
 
 const kbmod_mask = u32(0xff000000)
 const vk_mask = u32(0x00ffffff)
@@ -24,11 +24,11 @@ const vk_mask = u32(0x00ffffff)
 // scrollarea widget, so the text never runs underneath the scrollbar.
 const scrollbar_width = CoordType(1)
 
-// PromptKind identifies what the status-line prompt is for.
+// PromptKind identifies what the status-line prompt is for. After the
+// search/replace panel refactor (PLAN §6 stage B) only the goto-line prompt
+// remains; search and replace live in their own persistent panel above the
+// textarea instead of the dual-prompt sequence.
 enum PromptKind {
-	search
-	replace
-	replace_with
 	goto_line
 }
 
@@ -57,6 +57,53 @@ enum SearchButtonKind {
 	use_regex
 }
 
+// SearchPanelKind selects between the two persistent-panel modes.
+enum SearchPanelKind {
+	search
+	replace
+}
+
+// SearchPanelFocus enumerates the focusable widgets inside the panel, in
+// tab-cycle order (PLAN §6.2.1).
+enum SearchPanelFocus {
+	needle
+	replacement
+	match_case
+	whole_word
+	regex
+	replace_btn
+	replace_all_btn
+	close_btn
+}
+
+// SearchPanel holds the persistent search/replace panel state. The needle
+// and replacement fields are the panel's editable view; they only sync to
+// last_search / last_replacement on close or on a successful action.
+struct SearchPanel {
+pub mut:
+	visible     bool
+	kind        SearchPanelKind
+	focus       SearchPanelFocus
+	focus_index int = -1 // index into search_panel_focus_items(ed.kind); -1 = uninitialized
+	needle      string
+	replacement string
+	// Byte offset within needle when focus == .needle (or replacement when
+	// focus == .replacement).
+	needle_cursor      int = -1
+	replacement_cursor int = -1
+	// Selection anchors for the two single-line edit fields. A negative
+	// anchor means there is no active selection; otherwise the range is the
+	// anchor and cursor, ordered at edit time.
+	needle_anchor      int = -1
+	replacement_anchor int = -1
+	// Soft error from the last search/replace attempt; cleared on any edit.
+	error string
+	// Search hit index/total mirrors ed.search_hit_* but lives here so the
+	// panel can refresh them in isolation from background edits.
+	hit_index int
+	hit_total int
+}
+
 // StatusButton is a clickable region on the status line. The columns are
 // rebuilt every frame while drawing, so hit-testing uses the same numbers
 // the user just saw.
@@ -66,9 +113,19 @@ struct StatusButton {
 	right CoordType
 }
 
-// SearchButton is a clickable region on the search prompt options row.
+// SearchButton is a clickable region on the search panel options row.
 struct SearchButton {
 	kind  SearchButtonKind
+	left  CoordType
+	right CoordType
+}
+
+// PanelButton is a clickable region inside the persistent search/replace
+// panel. Rebuilt every frame by draw_search_panel so hit-testing uses the
+// same coordinates the user just saw.
+struct PanelButton {
+	focus SearchPanelFocus
+	row   CoordType
 	left  CoordType
 	right CoordType
 }
@@ -98,27 +155,27 @@ mut:
 	status           string
 	settings         UserSettings
 	// Mode & prompt state.
-	mode             EditMode
-	prompt_kind      PromptKind
-	prompt_text      string
+	mode        EditMode
+	prompt_kind PromptKind
+	prompt_text string
 	// Cursor within prompt_text, as a byte offset (0..len). Clamped at the
 	// bounds by every handler. Out-of-range values are tolerated and treated
 	// as "at end" by the insert/delete paths. Used for ←/→/Home/End/Delete
 	// line editing inside the prompt (Rust editline is a full TextBuffer).
-	prompt_cursor    int = -1
+	prompt_cursor int = -1
 	// Selection anchor (byte offset) within prompt_text.
-	prompt_sel       int = -1
+	prompt_sel int = -1
 	// Last search, for F3 (= find next).
-	last_search      string
+	last_search string
 	// Last replacement text; persists across Ctrl+R invocations like Rust's
 	// state.search_replacement, so a repeat Enter repeats the same replace
 	// instead of deleting the match with an empty replacement.
 	last_replacement string
 	// Search options mirror the Rust search panel toggles.
-	search_options   SearchOptions
+	search_options SearchOptions
 	// search_failed mirrors Rust's state.search_success (inverted): true when
 	// the current prompt needle has no match, used to paint the prompt line red.
-	search_failed    bool
+	search_failed bool
 	// Hit counter for the last search ("3/17"), refreshed by update_search_stats
 	// after every find navigation. search_hit_generation invalidates the pair
 	// when the buffer is edited. search_hit_index is 0 when the selection is
@@ -127,67 +184,71 @@ mut:
 	search_hit_total      int
 	search_hit_generation u32
 	// The needle collected by the first Ctrl+R prompt, used by the second.
-	replace_needle   string
 	// Dirty-quit modal: pops up when Ctrl+W/Ctrl+Q is pressed on a dirty
 	// document. dirty_action encodes the focused button:
 	//   0=Save, 1=Discard, 2=Cancel (default). dirty_for_quit is true for
 	//   Ctrl+Q and false for Ctrl+W.
-	dirty_modal     bool
-	dirty_action    int
-	dirty_for_quit  bool
+	dirty_modal    bool
+	dirty_action   int
+	dirty_for_quit bool
 	// Menu bar state (menubar.v): menu_focus = bar highlighted via F10,
 	// menu_open = a dropdown is open, menu_idx/menu_item_idx = selection.
-	menu_focus       bool
-	menu_open        bool
-	menu_idx         int
-	menu_item_idx    int
+	menu_focus    bool
+	menu_open     bool
+	menu_idx      int
+	menu_item_idx int
 	// Go to File modal (goto_file.v).
-	goto_file            bool
-	goto_file_sel        int       // index into goto_file_filtered (not ed.docs)
-	goto_file_scroll     int
-	goto_file_filter     string    // 过滤字符串，空 = 不过滤
-	goto_file_filtered   []int     // 匹配过滤的文档 index 列表（按 ed.docs 顺序）
-	about_open       bool
-	// Set when the replace prompt pair collects a needle for
-	// find_and_replace_all (Edit > Replace All) instead of a single replace.
-	replace_all      bool
+	goto_file          bool
+	goto_file_sel      int // index into goto_file_filtered (not ed.docs)
+	goto_file_scroll   int
+	goto_file_filter   string // 过滤字符串，空 = 不过滤
+	goto_file_filtered []int // 匹配过滤的文档 index 列表（按 ed.docs 顺序）
+	about_open         bool
+	// Persistent search/replace panel (search_panel.v). Visible between the
+	// menu bar (row 0) and the text area while open; replaces the old
+	// dual-prompt sequence. last_search / last_replacement / search_options
+	// stay here as cross-panel memory.
+	search_panel SearchPanel
 	// File picker state (filepicker.v).
-	picker           bool
-	picker_save_as   bool
-	picker_dir       string
-	picker_name      string
-	picker_entries   []string
-	picker_sel       int
-	picker_scroll    int
+	picker                  bool
+	picker_save_as          bool
+	picker_dir              string
+	picker_name             string
+	picker_entries          []string
+	picker_sel              int
+	picker_scroll           int
 	picker_overwrite        string
 	picker_autocomplete     []string
 	picker_autocomplete_sel int
 	// Status-line buttons, rebuilt every frame (see draw_statusbar).
-	status_buttons   []StatusButton
+	status_buttons []StatusButton
 	// Search prompt buttons, rebuilt every frame while the search panel is visible.
-	search_buttons   []SearchButton
+	search_buttons []SearchButton
+	// Search panel clickable regions (options + action buttons), rebuilt
+	// every frame by draw_search_panel.
+	panel_buttons []PanelButton
 	// Mouse multi-click tracking (Rust tui.rs mouse_click_counter): counts
 	// consecutive presses at the same spot within 500ms to drive word/line/all
 	// selection on double/triple/quadruple click. drag_anchor_* is the screen
 	// position of the press that began the current drag (used by auto-scroll).
-	click_count      CoordType
-	last_click_x     CoordType
-	last_click_y     CoordType
-	last_click_ms    i64
-	drag_anchor_x    CoordType
-	drag_anchor_y    CoordType
+	click_count   CoordType
+	last_click_x  CoordType
+	last_click_y  CoordType
+	last_click_ms i64
+	drag_anchor_x CoordType
+	drag_anchor_y CoordType
 	// Whether the indentation picker popup above the status line is open
 	// (Rust state.wants_indentation_picker).
-	indent_picker    bool
+	indent_picker bool
 	// Left screen column of the indentation popup, recomputed each frame.
 	indent_popup_left CoordType
 	// Language picker modal (Rust draw_dialog_language_change). Selection
 	// encoding: -2 = Auto Detect, -1 = Plain Text, >= 0 = lsh_languages index.
 	// Sticky override: while -2 the picker (and `set_language`) reflect the
 	// file-extension auto-detection; any other value is an explicit override.
-	language_picker        bool
-	language_picker_sel    int
-	language_picker_scroll int
+	language_picker          bool
+	language_picker_sel      int
+	language_picker_scroll   int
 	language_picker_explicit int = -2 // -2 sentinel: auto-detect
 	// Large clipboard warning modal (Rust state.wants_large_clipboard_warning).
 	// Triggered by process_input() when the OSC 52 payload crosses the
@@ -199,8 +260,8 @@ mut:
 	error_log_index int
 	error_log_open  bool
 	// OSC 0 title cache: only emit when filename or dirty flag actually changes.
-	title_filename  string
-	title_dirty     bool
+	title_filename string
+	title_dirty    bool
 }
 
 fn main() {
@@ -328,12 +389,10 @@ fn main() {
 	restore_terminal()
 }
 
-// draw_prompt_line renders the active status-line prompt.
+// draw_prompt_line renders the active status-line prompt (goto-line only;
+// search/replace live in the persistent panel above the text area now).
 fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 	label := match ed.prompt_kind {
-		.search { 'search: ' }
-		.replace { if ed.replace_all { 'replace all: ' } else { 'replace: ' } }
-		.replace_with { 'with: ' }
 		.goto_line { 'go to line: ' }
 	}
 	// Clamp the cursor to a usable offset so a stray value from earlier code
@@ -342,9 +401,9 @@ fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 	text := ' ${label}${ed.prompt_text}'
 	ed.fb.replace_text(status_y, 0, ed.size.width, text)
 
-	// On a failed needle search, paint the whole prompt line red with bright
-	// white text (Rust draw_editor.rs:84-87, state.search_success).
-	failed := ed.search_failed && (ed.prompt_kind == .search || ed.prompt_kind == .replace)
+	// On a failed goto-line parse, paint the prompt line red with bright
+	// white text (continuation of the Rust search-success visual feedback).
+	failed := ed.search_failed
 	if failed {
 		mut rect := Rect{
 			left:   0
@@ -387,76 +446,6 @@ fn (mut ed Editor) draw_prompt_line(status_y CoordType) {
 	mut cfg := new_measurement_config(StringDocument{ text: cursor_text })
 	cursor_x := cfg.goto_visual(Point{ x: coord_type_max, y: 0 }).visual_pos.x
 	ed.fb.set_cursor(Point{ x: cursor_x, y: status_y }, false)
-}
-
-// draw_search_prompt_options renders the search option toggles above the prompt.
-fn (mut ed Editor) draw_search_prompt_options(options_y CoordType) {
-	ed.search_buttons = []SearchButton{}
-	if options_y < 0 {
-		return
-	}
-
-	mut text := ''
-	mut x := CoordType(0)
-	mut segment := ' ${if ed.search_options.match_case { '[x]' } else { '[ ]' }} Match case '
-	ed.search_buttons << SearchButton{
-		kind:  .match_case
-		left:  x
-		right: x + CoordType(segment.len)
-	}
-	text += segment + ' '
-	x += CoordType(segment.len + 1)
-
-	segment = ' ${if ed.search_options.whole_word { '[x]' } else { '[ ]' }} Whole word '
-	ed.search_buttons << SearchButton{
-		kind:  .whole_word
-		left:  x
-		right: x + CoordType(segment.len)
-	}
-	text += segment + ' '
-	x += CoordType(segment.len + 1)
-
-	segment = ' ${if ed.search_options.use_regex { '[x]' } else { '[ ]' }} Regex '
-	ed.search_buttons << SearchButton{
-		kind:  .use_regex
-		left:  x
-		right: x + CoordType(segment.len)
-	}
-	text += segment + ' '
-
-	ed.fb.replace_text(options_y, 0, ed.size.width, text)
-	// Hit counter, right-aligned ("3/17"; bare total when the selection is
-	// not on a hit, e.g. a zero-width regex match).
-	if ed.search_hit_total > 0 {
-		mut b := &ed.docs[ed.active].buf
-		if ed.search_hit_generation == b.buffer.generation() {
-			ctr := if ed.search_hit_index > 0 {
-				'${ed.search_hit_index}/${ed.search_hit_total}'
-			} else {
-				'${ed.search_hit_total}'
-			}
-			ctr_x := ed.size.width - CoordType(ctr.len) - 1
-			if ctr_x > CoordType(text.len) {
-				ed.fb.replace_text(options_y, ctr_x, ed.size.width, ctr)
-			}
-		}
-	}
-	mut opt_rect := Rect{
-		left:   0
-		top:    options_y
-		right:  ed.size.width
-		bottom: options_y + 1
-	}
-	ed.fb.reverse(mut opt_rect)
-	for btn in ed.search_buttons {
-		mut btn_rect := Rect{
-			left:   btn.left
-			top:    options_y
-			right:  btn.right
-			bottom: options_y + 1
-		}
-		ed.fb.reverse(mut btn_rect)
-	}
 }
 
 // add_document opens a file (or an untitled buffer for '') and makes it active.
@@ -633,10 +622,16 @@ fn (mut ed Editor) handle_event(ev Input) {
 			.keyboard {
 				vk := u32(ev.key) & vk_mask
 				match vk {
-					vk_left  { ed.dirty_action = (ed.dirty_action + 3 - 1) % 3 }
-					vk_right { ed.dirty_action = (ed.dirty_action + 1) % 3 }
+					vk_left {
+						ed.dirty_action = (ed.dirty_action + 3 - 1) % 3
+					}
+					vk_right {
+						ed.dirty_action = (ed.dirty_action + 1) % 3
+					}
 					vk_return { ed.resolve_dirty_modal() }
-					vk_escape { ed.dirty_modal = false }
+					vk_escape {
+						ed.dirty_modal = false
+					}
 					else {}
 				}
 			}
@@ -746,6 +741,18 @@ fn (mut ed Editor) handle_event(ev Input) {
 				ed.menu_focus = false
 				return
 			}
+			if ed.search_panel.visible {
+				// The panel fields are single-line: strip from the first
+				// newline on (like strip_newline in the Rust editline).
+				mut s := if ev.kind == .text { ev.text } else { ev.data.bytestr() }
+				idx := s.index_any('\r\n')
+				if idx >= 0 {
+					s = s[..idx]
+				}
+				if ed.handle_search_panel_text(s) {
+					return
+				}
+			}
 			if ed.mode == .prompt {
 				// The prompt is single-line: strip everything from the first
 				// newline on (like strip_newline in the Rust editline).
@@ -754,15 +761,13 @@ fn (mut ed Editor) handle_event(ev Input) {
 				if idx >= 0 {
 					s = s[..idx]
 				}
-			if s.len > 0 {
-				ed.prompt_insert(s)
-			}
-			// Incremental search: re-run the search as the needle changes
-			// (Rust editline change -> SearchAction::Search, draw_editor.rs:81).
-			if ed.prompt_kind == .search || ed.prompt_kind == .replace {
-				ed.run_prompt_search()
-			}
-		} else {
+				if s.len > 0 {
+					ed.prompt_insert(s)
+				}
+				// Go to Line prompts don't need incremental re-parsing — parse on
+				// Enter instead. Search/replace live in the persistent panel now
+				// (see search_panel.v), so no incremental-search hook stays here.
+			} else {
 				data := if ev.kind == .text { ev.text.bytes() } else { ev.data }
 				ed.docs[ed.active].buf.write_canon(data)
 				ed.preferred_column = ed.docs[ed.active].buf.cursor_visual_pos().x
@@ -777,6 +782,11 @@ fn (mut ed Editor) handle_event(ev Input) {
 					return
 				}
 			}
+			if ed.search_panel.visible {
+				if ed.handle_search_panel_key(ev.key) {
+					return
+				}
+			}
 			if ed.mode == .prompt {
 				ed.handle_prompt_key(ev.key)
 			} else {
@@ -786,6 +796,7 @@ fn (mut ed Editor) handle_event(ev Input) {
 		.mouse {
 			ed.handle_mouse(ev.mouse)
 		}
+
 		// .resize was already handled above, before the modal guards.
 		.resize {}
 	}
@@ -797,45 +808,16 @@ fn (mut ed Editor) start_prompt(kind PromptKind) {
 	ed.mode = .prompt
 	ed.prompt_kind = kind
 	ed.prompt_text = match kind {
-		// Rust has a single needle input shared by the search and replace
-		// panels (state.search_needle), so both reopen with the last needle
-		// and Enter keeps finding the next hit.
-		.search, .replace { ed.last_search }
-		.replace_with { ed.last_replacement }
-		else { '' }
-	}
-	// If the active document has a user selection, prefill the needle with it
-	// (Rust draw_editor.rs:59-62). This applies to the search and replace
-	// prompts, which both collect a needle.
-	if kind == .search || kind == .replace {
-		mut b := &ed.docs[ed.active].buf
-		if b.has_selection() {
-			if sel := b.extract_user_selection(false) {
-				ed.prompt_text = sel.bytestr()
-			}
-		}
+		// After the search/replace panel refactor (PLAN §6 stage B) only
+		// the Go to Line prompt remains; search and replace live in the
+		// persistent panel above the textarea.
+		.goto_line { '' }
 	}
 	// New cursor sits at end of the prefilled text, ready for edits.
 	ed.prompt_cursor = ed.prompt_text.len
 	ed.prompt_sel = -1
 	// A freshly opened prompt starts in the "not failed" state.
 	ed.search_failed = false
-}
-
-// start_replace opens the replace prompt pair. With a selection, Rust fills
-// the needle from it and puts the focus on the replacement field right away
-// (draw_editor.rs:59-62), so here the second prompt opens directly.
-fn (mut ed Editor) start_replace() {
-	mut b := &ed.docs[ed.active].buf
-	if b.has_selection() {
-		if sel := b.extract_user_selection(false) {
-			ed.replace_needle = sel.bytestr()
-			ed.last_search = ed.replace_needle
-			ed.start_prompt(.replace_with)
-			return
-		}
-	}
-	ed.start_prompt(.replace)
 }
 
 fn (mut ed Editor) cancel_prompt() {
@@ -909,14 +891,6 @@ fn prompt_next_codepoint(text string, off int) int {
 		return i + 3
 	}
 	return i + 2
-}
-
-fn (ed &Editor) prompt_search_needle() string {
-	return match ed.prompt_kind {
-		.search, .replace { ed.prompt_text }
-		.replace_with { ed.replace_needle }
-		else { '' }
-	}
 }
 
 // prompt_insert inserts `s` at the current prompt cursor and advances the cursor
@@ -1026,25 +1000,6 @@ fn (mut ed Editor) prompt_move_right() {
 	ed.prompt_cursor = prompt_next_codepoint(ed.prompt_text, off)
 }
 
-fn (mut ed Editor) run_prompt_search() {
-	needle := ed.prompt_search_needle()
-	// The Rust editline writes state.search_needle as you type, so the needle
-	// stays active even if the prompt is dismissed with Escape.
-	ed.last_search = needle
-	if needle == '' {
-		ed.search_failed = false
-		return
-	}
-	mut b := &ed.docs[ed.active].buf
-	b.find_and_select(needle, ed.search_options)
-	b.make_cursor_visible()
-	ed.search_failed = !b.has_selection()
-	if !b.has_selection() {
-		ed.status = 'not found: ${needle}'
-	}
-	ed.update_search_stats()
-}
-
 // update_search_stats refreshes the hit counter (index/total) shown on the
 // search options row and the status bar.
 fn (mut ed Editor) update_search_stats() {
@@ -1053,36 +1008,9 @@ fn (mut ed Editor) update_search_stats() {
 		ed.search_hit_total = 0
 		return
 	}
-	b := &ed.docs[ed.active].buf
-	ed.search_hit_index, ed.search_hit_total = b.search_match_stats(ed.last_search,
-		ed.search_options)
+	mut b := &ed.docs[ed.active].buf
+	ed.search_hit_index, ed.search_hit_total = b.search_match_stats(ed.last_search, ed.search_options)
 	ed.search_hit_generation = b.buffer.generation()
-}
-
-fn (mut ed Editor) toggle_search_option(kind SearchButtonKind) {
-	match kind {
-		.match_case { ed.search_options.match_case = !ed.search_options.match_case }
-		.whole_word { ed.search_options.whole_word = !ed.search_options.whole_word }
-		.use_regex { ed.search_options.use_regex = !ed.search_options.use_regex }
-	}
-	ed.run_prompt_search()
-}
-
-fn (mut ed Editor) handle_search_prompt_mouse(mouse InputMouse) bool {
-	if mouse.drag || mouse.state != .left {
-		return false
-	}
-	options_y := if ed.search_panel_top() { CoordType(2) } else { ed.size.height - 2 }
-	if mouse.position.y != options_y {
-		return false
-	}
-	for btn in ed.search_buttons {
-		if mouse.position.x >= btn.left && mouse.position.x < btn.right {
-			ed.toggle_search_option(btn.kind)
-			return true
-		}
-	}
-	return true
 }
 
 fn (mut ed Editor) handle_prompt_key(key InputKey) {
@@ -1097,49 +1025,19 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 			if mods == kbmod_none {
 				ed.confirm_prompt()
 			} else if mods == kbmod_ctrl_alt {
-				// Ctrl+Alt+Enter in the replacement field replaces every
-				// occurrence (Rust draw_editor.rs:109, SearchAction::ReplaceAll).
-				// The needle field only handles plain Enter in Rust, so this
-				// stays limited to the second prompt.
-				if ed.prompt_kind == .replace_with {
-					ed.replace_all = true
-					ed.confirm_prompt()
-				}
+				// Ctrl+Alt+Enter at the goto-line prompt is a no-op (the
+				// search/replace panel handles Ctrl+Alt+Enter for ReplaceAll
+				// inside its own key router in search_panel.v).
 			}
 		}
 		vk_f3 {
-			// F3 works from inside the prompt as well (Rust main.rs:410 runs
-			// search_execute globally), using the needle currently in the
-			// prompt, which the Rust editline edits in place.
+			// F3 works from inside the goto-line prompt as well (Rust
+			// main.rs:410 runs search_execute globally); it reuses the
+			// remembered needle, since the prompt no longer edits one.
 			if mods == kbmod_none {
-				needle := ed.prompt_search_needle()
-				if needle != '' {
-					ed.last_search = needle
-				}
 				ed.find_next()
 			} else if mods == kbmod_shift {
-				needle := ed.prompt_search_needle()
-				if needle != '' {
-					ed.last_search = needle
-				}
 				ed.find_previous()
-			}
-		}
-		vk_up, vk_down {
-			// ↑/↓ step through hits without the F-keys: Mac keyboards need
-			// fn+F3 unless the system "standard function keys" toggle is on,
-			// and terminals can't distinguish Shift+Enter without the kitty
-			// keyboard protocol.
-			if mods == kbmod_none && ed.prompt_kind != .goto_line {
-				needle := ed.prompt_search_needle()
-				if needle != '' {
-					ed.last_search = needle
-				}
-				if vk == vk_up {
-					ed.find_previous()
-				} else {
-					ed.find_next()
-				}
 			}
 		}
 		vk_back {
@@ -1217,21 +1115,6 @@ fn (mut ed Editor) handle_prompt_key(key InputKey) {
 				ed.prompt_kill_line()
 			}
 		}
-		vk_c {
-			if mods == kbmod_alt {
-				ed.toggle_search_option(.match_case)
-			}
-		}
-		vk_w {
-			if mods == kbmod_alt {
-				ed.toggle_search_option(.whole_word)
-			}
-		}
-		vk_r {
-			if mods == kbmod_alt {
-				ed.toggle_search_option(.use_regex)
-			}
-		}
 		else {}
 	}
 }
@@ -1241,47 +1124,10 @@ fn (mut ed Editor) confirm_prompt() {
 	kind := ed.prompt_kind
 	ed.cancel_prompt()
 
+	// After the search/replace panel refactor only the Go to Line prompt
+	// reaches this function; search/replace live in the persistent panel
+	// and use panel_action_activate / panel_action_replace_all instead.
 	match kind {
-		.search {
-			if text == '' {
-				ed.move_cursor_to_selection_beg()
-				return
-			}
-			ed.last_search = text
-			ed.find_next()
-		}
-		.replace {
-			if text == '' {
-				return
-			}
-			// Collect the needle, then ask for the replacement.
-			ed.replace_needle = text
-			ed.start_prompt(.replace_with)
-		}
-		.replace_with {
-			// Remember the replacement so the next Ctrl+R can repeat it.
-			ed.last_replacement = text
-			if ed.replace_all {
-				// Edit > Replace All: replace every occurrence in one edit
-				// group and report the count (Rust SearchAction::ReplaceAll).
-				ed.replace_all = false
-				needle := ed.replace_needle
-				if needle == '' {
-					return
-				}
-				ed.last_search = needle
-				mut b := &ed.docs[ed.active].buf
-				count := b.find_and_replace_all(needle, ed.search_options, text.bytes())
-				b.make_cursor_visible()
-				ed.status = if count > 0 {
-					'replaced ${count} occurrences'
-				} else {
-					'not found: ${needle}'
-				}
-			} else {
-				ed.replace_active(text)
-			}
-		}
 		.goto_line {
 			point := parse_prompt_goto(text) or {
 				ed.restart_prompt_with_error(.goto_line, text, err.msg())
@@ -1349,23 +1195,6 @@ fn (mut ed Editor) find_previous() {
 		ed.status = 'not found: ${ed.last_search}'
 	}
 	ed.update_search_stats()
-}
-
-// replace_active replaces the current search hit (if the selection is one) and
-// selects the next hit, like search_execute(SearchAction::Replace) in the Rust
-// original. The first Ctrl+R on a fresh search just selects the first hit.
-fn (mut ed Editor) replace_active(replacement string) {
-	needle := ed.replace_needle
-	if needle == '' {
-		return
-	}
-	ed.last_search = needle
-	mut b := &ed.docs[ed.active].buf
-	b.find_and_replace(needle, ed.search_options, replacement.bytes())
-	b.make_cursor_visible()
-	if !b.has_selection() {
-		ed.status = 'not found: ${needle}'
-	}
 }
 
 // ---- Document management --------------------------------------------------------
@@ -1438,7 +1267,6 @@ fn (mut ed Editor) request_exit() {
 	ed.quit = true
 }
 
-
 // ---- Editing keys ---------------------------------------------------------------
 
 fn (mut ed Editor) handle_key(key InputKey) {
@@ -1456,7 +1284,11 @@ fn (mut ed Editor) handle_key(key InputKey) {
 	match vk {
 		vk_back {
 			// Any modifier deletes (Rust tui.rs vk::BACK).
-			granularity := if mods == kbmod_ctrl { CursorMovement.word } else { CursorMovement.grapheme }
+			granularity := if mods == kbmod_ctrl {
+				CursorMovement.word
+			} else {
+				CursorMovement.grapheme
+			}
 			ed.docs[ed.active].buf.delete(granularity, -1)
 			handled = true
 		}
@@ -1556,7 +1388,7 @@ fn (mut ed Editor) handle_key(key InputKey) {
 		}
 		vk_f {
 			if mods == kbmod_ctrl {
-				ed.start_prompt(.search)
+				ed.open_search_panel()
 				handled = true
 			} else {
 				// macOS terminals emit ESC f for Alt+Right (Emacs style).
@@ -1612,10 +1444,8 @@ fn (mut ed Editor) handle_key(key InputKey) {
 		}
 		vk_r {
 			if mods == kbmod_ctrl {
-				// Plain Ctrl+R is one-at-a-time replace; Edit > Replace All
-				// sets ed.replace_all instead.
-				ed.replace_all = false
-				ed.start_prompt(.replace)
+				// Open the persistent replace panel (PLAN §6 stage B).
+				ed.open_replace_panel()
 				handled = true
 			}
 		}
@@ -1892,14 +1722,16 @@ fn (mut ed Editor) handle_page(vk u32, mods u32) {
 // and menu bar interaction (title clicks toggle dropdowns, item clicks
 // activate, clicks elsewhere close an open menu).
 fn (mut ed Editor) handle_mouse(mouse InputMouse) {
+	// Search/replace panel swallows its own mouse events (button clicks,
+	// scroll outside the textarea). Routing happens before the editor's
+	// text-area click handling so panel buttons don't reach the buffer.
+	if ed.search_panel.visible {
+		if ed.handle_search_panel_mouse(mouse) {
+			return
+		}
+	}
 	// Mouse input only applies to the text area, not to the status-line prompt.
 	if ed.mode != .edit {
-		if ed.mode == .prompt && (ed.prompt_kind == .search || ed.prompt_kind == .replace
-			|| ed.prompt_kind == .replace_with) {
-			if ed.handle_search_prompt_mouse(mouse) {
-				return
-			}
-		}
 		return
 	}
 
@@ -1992,7 +1824,7 @@ fn (mut ed Editor) handle_mouse(mouse InputMouse) {
 	mut b := &ed.docs[ed.active].buf
 	margin := b.margin_width()
 	if !mouse.drag && mouse.position.x < margin {
-		visual_y := coord_max(mouse.position.y - 1 + ed.scroll.y, 0)
+		visual_y := coord_max(mouse.position.y - ed.text_area_top() + ed.scroll.y, 0)
 		// Resolve the clicked visual row to its logical line, then select it.
 		b.cursor_move_to_visual(Point{ x: 0, y: visual_y })
 		logical_y := b.cursor_logical_pos().y
@@ -2005,7 +1837,7 @@ fn (mut ed Editor) handle_mouse(mouse InputMouse) {
 	// Visual position under the cursor, in document coordinates.
 	pos := Point{
 		x: coord_max(mouse.position.x - margin + ed.scroll.x, 0)
-		y: coord_max(mouse.position.y - 1 + ed.scroll.y, 0)
+		y: coord_max(mouse.position.y - ed.text_area_top() + ed.scroll.y, 0)
 	}
 
 	if mouse.drag {
@@ -2070,7 +1902,7 @@ fn (mut ed Editor) update_click_count(pos Point) {
 // calc()/read_timeout auto-scroll). Mirrors the zone-based speed table.
 fn (mut ed Editor) autoscroll_drag(mouse InputMouse, status_y CoordType) {
 	mut b := &ed.docs[ed.active].buf
-	text_top := CoordType(1)
+	text_top := ed.text_area_top()
 	text_bottom := status_y - 1
 	height := text_bottom - text_top
 	if height < 2 {
@@ -2091,8 +1923,7 @@ fn (mut ed Editor) autoscroll_drag(mouse InputMouse, status_y CoordType) {
 	ed.scroll.y += dy
 	ed.clamp_scroll()
 	// Re-extend the selection to the visible edge so it grows with the scroll.
-	edge_y := coord_clamp(mouse.position.y - 1 + ed.scroll.y, ed.scroll.y,
-		ed.scroll.y + height - 1)
+	edge_y := coord_clamp(mouse.position.y - text_top + ed.scroll.y, ed.scroll.y, ed.scroll.y + height - 1)
 	x := coord_max(mouse.position.x - b.margin_width() + ed.scroll.x, 0)
 	b.selection_update_visual(Point{ x: x, y: edge_y })
 }
@@ -2124,15 +1955,9 @@ fn (mut ed Editor) make_cursor_visible() {
 	mut b := &ed.docs[ed.active].buf
 	cursor := b.cursor_visual_pos()
 	text_width := ed.text_width()
-	// ...minus the menu bar and status line.
-	mut viewport_height := ed.size.height - 2
-	// While a search prompt is open the panel sits above the textarea (rows
-	// 1-2 in Rust's layout, just below the menu bar), so one more row is
-	// not usable. Rust drops the same row via height_reduction
-	// (draw_editor.rs:21-25).
-	if ed.mode == .prompt && ed.prompt_kind != .goto_line {
-		viewport_height--
-	}
+	// The usable height is derived from the same text-area top used by draw().
+	mut viewport_height := ed.size.height - 1 - ed.text_area_top()
+	if viewport_height < 1 { viewport_height = 1 }
 
 	mut x := ed.scroll.x
 	mut y := ed.scroll.y
@@ -2145,22 +1970,30 @@ fn (mut ed Editor) make_cursor_visible() {
 	ed.clamp_scroll()
 }
 
-// search_kind_prompt reports whether the active prompt is a search/replace
-// prompt (which Rust draws as a panel above the textarea), as opposed to the
-// goto-line prompt (a plain status-line input).
+// search_kind_prompt reports whether the search/replace panel is currently
+// visible. Kept as a thin alias because several callers — including the
+// viewport-height math and the options-row drawing — were originally
+// branched on "search-kind prompt vs goto-line prompt"; after the panel
+// refactor that question collapses to "is the panel open?".
 fn (ed Editor) search_kind_prompt() bool {
-	return ed.mode == .prompt
-		&& match ed.prompt_kind {
-			.search, .replace, .replace_with { true }
-			else { false }
-		}
+	return ed.search_panel.visible
 }
 
-// search_panel_top reports whether the search UI is drawn as a top panel
-// (rows 1-2, below the menu bar, like the Rust original). On tiny terminals
-// (< 5 rows) it falls back to the bottom rows.
+// search_panel_top reports whether the persistent panel is drawn as a top
+// panel (rows 1-N, below the menu bar, like the Rust original). On tiny
+// terminals (< 5 rows) it falls back to the bottom rows.
 fn (ed Editor) search_panel_top() bool {
-	return ed.search_kind_prompt() && ed.size.height >= 5
+	return ed.search_panel.visible && ed.size.height >= 5
+}
+
+// text_area_top is the single source of truth for the first row available to
+// document rendering and mouse/cursor coordinate conversion.
+fn (ed Editor) text_area_top() CoordType {
+	if ed.search_panel_top() {
+		row, has_repl := ed.search_panel_layout()
+		return row + if has_repl { 3 } else { 2 }
+	}
+	return 1
 }
 
 fn (mut ed Editor) draw() {
@@ -2178,13 +2011,13 @@ fn (mut ed Editor) draw() {
 	ed.fb.flip(ed.size)
 
 	// The text area covers everything but the menu bar (row 0), the
-	// last (status) line, and the scrollbar column on the right. When a
-	// search/replace prompt is open the panel sits above the textarea
-	// (rows 1-2 below the menu bar, like the Rust original), so the top
-	// edge jumps to row 3 in that mode.
+	// last (status) line, and the scrollbar column on the right. When the
+	// search/replace panel is open above the textarea, the top edge jumps
+	// past it (PLAN §6.2.1: 2 rows for search, 3 for replace).
+	text_top := ed.text_area_top()
 	destination := Rect{
 		left:   0
-		top:    if ed.search_panel_top() { CoordType(3) } else { CoordType(1) }
+		top:    text_top
 		right:  ed.size.width - scrollbar_width
 		bottom: ed.size.height - 1
 	}
@@ -2202,29 +2035,22 @@ fn (mut ed Editor) draw() {
 		}, ed.scroll.y, b.visual_line_count())
 	}
 
-	// Status line / prompt.
+	// Status line / prompt / search panel.
 	status_y := ed.size.height - 1
-	if ed.mode == .prompt {
-		match ed.prompt_kind {
-			.search, .replace, .replace_with {
-				if ed.search_panel_top() {
-					// Rust layout: search panel above the textarea — input on
-					// row 1, options (with the hit counter) on row 2. The
-					// status bar stays put at the bottom.
-					ed.draw_prompt_line(1)
-					ed.draw_search_prompt_options(2)
-					ed.draw_statusbar(status_y)
-				} else {
-					if status_y > 0 {
-						ed.draw_search_prompt_options(status_y - 1)
-					}
-					ed.draw_prompt_line(status_y)
-				}
-			}
-			else {
-				ed.draw_prompt_line(status_y)
-			}
+	if ed.search_panel.visible {
+		if ed.search_panel_top() {
+			// Persistent panel above the textarea (PLAN §6.2.1).
+			ed.draw_search_panel()
+		} else {
+			// Tiny terminal: drop the panel to the bottom rows above the
+			// status line so it stays usable on a 3- or 4-row viewport.
+			ed.draw_search_panel()
+			// The panel draws its own top_row when terminal is too short, so
+			// we don't redraw the status bar over it.
 		}
+		ed.draw_statusbar(status_y)
+	} else if ed.mode == .prompt {
+		ed.draw_prompt_line(status_y)
 	} else {
 		ed.draw_statusbar(status_y)
 	}
@@ -2501,7 +2327,6 @@ fn (mut ed Editor) handle_indent_popup_click(x CoordType, row CoordType) {
 	}
 }
 
-
 // ---- Large clipboard warning ------------------------------------------------------
 //
 // Centered modal that gates OSC 52 sync of payloads >= 128 KiB. Three actions:
@@ -2583,10 +2408,22 @@ fn (mut ed Editor) handle_clipboard_warning_key(key InputKey) {
 fn (mut ed Editor) handle_clipboard_warning_text(text string) {
 	for c in text {
 		match c {
-			`y`, `Y` { ed.resolve_clipboard_warning(true, false); return }
-			`n`, `N` { ed.resolve_clipboard_warning(false, false); return }
-			`a`, `A` { ed.resolve_clipboard_warning(true, true); return }
-			`\n`, `\r` { ed.resolve_clipboard_warning(true, false); return }
+			`y`, `Y` {
+				ed.resolve_clipboard_warning(true, false)
+				return
+			}
+			`n`, `N` {
+				ed.resolve_clipboard_warning(false, false)
+				return
+			}
+			`a`, `A` {
+				ed.resolve_clipboard_warning(true, true)
+				return
+			}
+			`\n`, `\r` {
+				ed.resolve_clipboard_warning(true, false)
+				return
+			}
 			else {}
 		}
 	}

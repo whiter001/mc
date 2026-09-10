@@ -2,15 +2,25 @@
 
 ## 当前执行决策（2026-09-10）
 
-下一项实现常驻搜索/替换面板。CLI、路径、`-g`、settings、保存父目录和基础文件错误流程已经完成，并通过 `./build.sh test` 的 20/20 测试及目录/缺失文件 smoke；当前最大的用户可见缺口是搜索仍使用一次性双 prompt。
+阶段 B（常驻搜索/替换面板）已完成，实现在 `search_panel.v`，回归覆盖在 `search_panel_test.v`，
+`./build.sh test` 为 21/21 通过。P0 至此全部完成。
 
-选择搜索面板作为下一主线的原因：
+2026-09-10 审查修复已完成：replacement 编辑不再推进搜索命中；面板非文本焦点和空白区域不会
+穿透到正文；搜索/替换的正文视口、光标滚动、鼠标点击和拖拽统一使用实际面板高度；输入框恢复
+Shift+方向键/Ctrl+A 选择替换语义；Search 模式 Close 控件可见可操作；窄终端保留状态栏并降级
+为单行面板。新增回归测试覆盖这些事件路由和布局边界，PTY 冒烟验证 Ctrl+F/输入/Esc/Ctrl+Q。
 
-1. 现有 `TextBuffer` 已经具备增量查找、F3/Shift+F3、选项、命中统计、零宽命中推进和 Replace All，下一步主要是 UI 状态与事件路由，风险和改动面可控。
-2. 常驻面板是后续完整正则、替换模板和统一焦点管理的承载点；先完成面板可以避免同时改动搜索引擎、编码和 TUI 布局。
-3. 编码转换和完整 ICU 正则涉及数据安全或外部依赖，应在搜索交互稳定并有回归测试后再做。
+面板落地的取舍：
 
-当前不提前实现完整全局 FocusManager。搜索面板先使用局部焦点枚举和明确的 modal 路由；当文件/语言/编码 picker 也需要 Tab 导航时，再抽取通用焦点树。
+1. 只改交互层，不动搜索后端：仍复用 `TextBuffer` 的增量查找、F3/Shift+F3、选项、命中统计、
+   零宽命中推进和一次 undo group 的 Replace All。
+2. 旧的双 prompt 分支（`run_prompt_search`、`toggle_search_option`、
+   `handle_search_prompt_mouse`、`draw_search_prompt_options` 及 `PromptKind.search/.replace/
+   .replace_with`）已删除，`PromptKind` 只剩 `.goto_line`，避免两套搜索状态并存。
+3. 未提前实现全局 FocusManager：面板使用局部 `SearchPanelFocus` 枚举和显式路由；等文件/语言/
+   编码 picker 也需要 Tab 导航时再抽取通用焦点树（见 P2）。
+
+下一项主线：P1 的搜索语义（完整正则/替换模板）与编码能力，或 P2 的统一焦点树。
 
 ## 1. 目标和边界
 
@@ -267,6 +277,12 @@ CompiledSearch.captures() []Range
 - 面板完成后删除或停用旧的双 prompt 专用分支，避免两套搜索状态同时存在。
 
 阶段 B 完成标准：用户可以在不关闭面板的情况下连续执行搜索、下一命中、替换当前命中和全部替换；Esc 后回到编辑区，且原有搜索回归测试全部保持通过。
+
+阶段 B 实测结果（已完成）：`search_panel.v` 提供状态、布局、绘制、键盘/鼠标路由和四个动作函数
+（`run_panel_search` / `panel_action_replace` / `panel_action_replace_all` / `panel_action_activate`）。
+终端高度 ≥ 5 时面板位于菜单栏与文本区之间（needle 行、选项+命中计数行、replacement+动作按钮行），
+更矮时回落到状态栏上方。pty smoke 已验证 Ctrl+F 增量搜索 1/3→2/3→3/3、Esc 关闭回到编辑区，以及
+Ctrl+R + Tab 导航到 [Replace All] 后一次替换三处，退出码均为 0。
 
 ## 7. 编码设计
 

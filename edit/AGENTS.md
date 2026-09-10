@@ -32,9 +32,10 @@ cpulimit -l 200 -z -- v fmt -w .        # fmt / vet 等直接调 v 的命令同�
 按键 hex 用 `--` 分段；每段发送后等输出静默 0.3s 再发下一段（给 100ms 的 ESC 超时
 冲刷留时间，固定 sleep 的旧写法会踩这个时序）。干净退出标志：输出尾部有
 `\x1b[?1049l` 且最后一行 `=== editor exit code: 0`。注意菜单栏占行 0，
-文本区的 SGR 鼠标行号从 2（1 基）开始。搜索/替换 prompt 打开时面板占行 1-2
-（对齐 Rust 布局），文本区从行 3 开始（SGR 行号 4 起）；终端高度 < 5 时
-回退到底部（行 height-2 / height-1）。
+文本区的 SGR 鼠标行号从 2（1 基）开始。常驻搜索面板打开时占行 1-2
+（search 模式：needle 行 + 选项/命中计数行），replace 模式再多占行 3
+（replacement + [Replace] [Replace All] [Close]）；文本区相应从行 3 或行 4
+开始；终端高度 < 5 时回退到状态栏上方。
 
 ## 代码约定
 
@@ -44,16 +45,21 @@ cpulimit -l 200 -z -- v fmt -w .        # fmt / vet 等直接调 v 的命令同�
 
 ## 移植状态（2026-08）
 
-已实现：`main.v`（主循环：多文档 Ctrl+N/O/W/P/Ctrl+PgUp/PgDn、状态栏模态输入行
-搜索 Ctrl+F+F3/替换 Ctrl+R（两段输入：先 needle 后 replacement，语义对齐
-Rust 的首次只选中、再次才替换；needle 和 replacement 都跨调用记忆，重复
-Ctrl+R+Enter+Enter 即重复上次替换）/跳转 Ctrl+G、鼠标点击定位+滚轮+左键拖拽
-选择、脏文件关闭/退出二次确认、底部状态栏；prompt 已支持 Ctrl+A 全选和
-Shift+方向键选区，对齐 Rust editline）、`menubar.v`（菜单栏
+已实现：`main.v`（主循环：多文档 Ctrl+N/O/W/P/Ctrl+PgUp/PgDn、跳转 Ctrl+G、
+鼠标点击定位+滚轮+左键拖拽选择、脏文件关闭/退出二次确认、底部状态栏；
+`PromptKind` 现在只剩 `.goto_line`，搜索/替换已迁到 `search_panel.v`；
+prompt 仍支持 Ctrl+A 全选和 Shift+方向键选区，对齐 Rust editline）、
+`search_panel.v`（常驻搜索/替换面板：Ctrl+F 开 search、Ctrl+R 开 replace，
+有选区时预填 needle、Ctrl+R 还把焦点直接放到 replacement；Tab/Shift+Tab 在
+needle/replacement/三个选项/[Replace]/[Replace All]/[Close] 之间循环；
+Enter 只执行不关闭，Ctrl+Alt+Enter 直接 Replace All，Esc 关闭并把 needle/
+replacement 存回 `last_search`/`last_replacement`；F3/Shift+F3 和 ↑/↓ 在任何
+焦点下都能跳命中；Alt+C/W/R 切换大小写/整词/正则；鼠标可点选项、动作按钮和
+输入行；Replace All 复用 `find_and_replace_all` 的一次 undo group）、`menubar.v`（菜单栏
 File/Edit/View/Help + 下拉 + About 对话框：F10 聚焦、方向键导航、鼠标点击，
 是 tui.rs 菜单的务实简化版而非布局引擎移植；行 0 为菜单栏，文本区从行 1
-开始；Edit > Replace All 走 replace 双段 prompt + find_and_replace_all，
-对齐 Rust SearchAction::ReplaceAll 无确认框）、`filepicker.v`（打开/另存
+开始；Edit > Find/Replace 打开常驻面板，Replace All 打开 replace 面板并把焦点
+落在 [Replace All]，对齐 Rust SearchAction::ReplaceAll 无确认框）、`filepicker.v`（打开/另存
 文件选择器：居中模态、目录列表 ../目录/文件 分组排序、Up/Down 选择、
 Enter 进目录或接受、空名 Backspace 或 Alt+Up 上级、鼠标点项直接激活、
 另存覆盖 y/n 警告；裁剪了自动补全和 ICU 排序；Ctrl+O/Ctrl+Shift+S/无路径

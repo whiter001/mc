@@ -337,17 +337,17 @@ fn (mut ed Editor) activate_menu_item(action MenuAction) {
 			ed.docs[ed.active].buf.paste(ed.clipboard, false)
 		}
 		.edit_find {
-			ed.start_prompt(.search)
+			ed.open_search_panel()
 		}
 		.edit_replace {
-			ed.replace_all = false
-			ed.start_prompt(.replace)
+			ed.open_replace_panel()
 		}
 		.edit_replace_all {
-			// Replace All reuses the replace prompt pair; the flag makes the
-			// second prompt run find_and_replace_all (Rust SearchAction::ReplaceAll).
-			ed.replace_all = true
-			ed.start_prompt(.replace)
+			// Replace All opens the replace panel and focuses the
+			// [Replace All] button (Rust SearchAction::ReplaceAll).
+			ed.open_replace_panel()
+			ed.search_panel.focus = .replace_all_btn
+			search_panel_normalize_focus(mut ed.search_panel)
 		}
 		.edit_select_all {
 			ed.docs[ed.active].buf.select_all()
