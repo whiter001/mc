@@ -11,10 +11,12 @@ module main
 //   lsh_runtime.v, tables in lsh_tables.v generated offline by
 //   tools/lsh_tables_to_v.py; the lsh compiler itself is not ported).
 //   `language` is an index into `lsh_languages` (-1 = none).
-// * No ICU regex: find_and_select/find_and_replace/find_and_replace_all are
-//   pure byte-substring searches. SearchOptions.use_regex is kept for API
-//   compatibility but ignored; whole_word uses ASCII word boundaries;
-//   match_case=false folds ASCII letters only.
+// * No ICU regex: without SearchOptions.use_regex, find_and_select/
+//   find_and_replace/find_and_replace_all are pure byte-substring searches.
+//   With it, patterns go through the ported engine in regex.v (quantifiers,
+//   groups, alternation; no look-around or backreferences). whole_word uses
+//   ASCII word boundaries; match_case=false folds ASCII plus Latin-1, Greek
+//   and Cyrillic.
 // * read_file/write_file read/write in 64KiB chunks (Rust uses SIMD scans +
 //   virtual-memory gap allocation) and have no progress callbacks.
 // * Rust's simd::lines_fwd/lines_bwd are replaced with plain byte scans.
@@ -109,10 +111,9 @@ pub mut:
 	match_case bool
 	// If true, the search matches whole words.
 	whole_word bool
-	// When true, `find_and_select` etc. interpret the pattern as a minimal
-	// regular expression (literals, `.`, `^`, `$`, `\b`, `\w`/`\W`, `\s`/`\S`,
-	// `\d`/`\D`, escapes, and `[...]` classes). When false (default), the
-	// pattern is a literal byte substring.
+	// When true, `find_and_select` etc. interpret the pattern as a regular
+	// expression (see regex.v for the supported subset). When false (default),
+	// the pattern is a literal byte substring.
 	use_regex bool
 }
 
@@ -2375,28 +2376,57 @@ fn (mut b TextBuffer) undo_redo(undo bool) {
 // ---- Searching -------------------------------------------------------------------
 //
 // The Rust original uses ICU regular expressions. This port implements a pure
-// byte-substring search by default, plus a minimal regex engine (see
-// find_regex_match) enabled via SearchOptions.use_regex. whole_word treats any
-// non-ASCII byte as a word character (matching ICU's Unicode `\w` for boundary
-// purposes), and match_case=false folds ASCII plus the common Latin-1, Greek
-// and Cyrillic uppercase blocks.
+// byte-substring search by default, plus a self-contained regex engine (see
+// regex.v and find_regex_match) enabled via SearchOptions.use_regex. That
+// engine covers literals, classes, anchors, quantifiers, groups and
+// alternation, but not ICU's look-around, backreferences or full Unicode
+// property escapes. whole_word uses a documented range-based Unicode word
+// approximation, and match_case=false folds ASCII plus the common Latin-1,
+// Greek and Cyrillic uppercase blocks.
 
-// is_word_byte reports whether the byte is a word character, matching the
-// Unicode `\b` semantics used by the Rust original's ICU `\w`/word boundary:
-// ASCII [A-Za-z0-9_], plus any non-ASCII byte (a UTF-8 lead or continuation
-// byte >= 0x80 is treated as part of a word — sufficient for boundary
-// detection without pulling in a Unicode table).
-fn is_word_byte(c u8) bool {
-	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || (c >= `0` && c <= `9`)
-		|| c == `_` || c >= 0x80
+// is_word_rune is the no-ICU approximation of Unicode `\w`: ASCII letters,
+// digits and underscore, plus the major alphabetic/decimal/combining ranges
+// used in source text. Punctuation and emoji are intentionally excluded so a
+// search for `\bcat\b` does not treat `🙂` as part of a word. Unknown scripts
+// are treated as non-word rather than classifying every non-ASCII byte as one.
+fn is_word_rune(cp rune) bool {
+	if (cp >= `a` && cp <= `z`) || (cp >= `A` && cp <= `Z`) || (cp >= `0` && cp <= `9`)
+		|| cp == `_` {
+		return true
+	}
+	return (cp >= 0x00c0 && cp <= 0x02af) || (cp >= 0x0300 && cp <= 0x036f)
+		|| (cp >= 0x0370 && cp <= 0x052f) || (cp >= 0x0530 && cp <= 0x058f)
+		|| (cp >= 0x0590 && cp <= 0x06ff) || (cp >= 0x0700 && cp <= 0x074f)
+		|| (cp >= 0x0780 && cp <= 0x07bf) || (cp >= 0x0900 && cp <= 0x0dff)
+		|| (cp >= 0x0e00 && cp <= 0x0eff) || (cp >= 0x1000 && cp <= 0x1fff)
+		|| (cp >= 0x2e80 && cp <= 0x2fff) || (cp >= 0x3040 && cp <= 0x30ff)
+		|| (cp >= 0x3400 && cp <= 0x9fff) || (cp >= 0xac00 && cp <= 0xd7af)
+		|| (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xff10 && cp <= 0xff19)
+		|| (cp >= 0xff21 && cp <= 0xff3a) || (cp >= 0xff41 && cp <= 0xff5a)
 }
 
-// is_word_rune reports whether a codepoint is a word character (see
-// is_word_byte). Any non-ASCII codepoint is treated as a word character.
-fn is_word_rune(cp rune) bool {
-	c := u8(cp)
-	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || (c >= `0` && c <= `9`)
-		|| c == `_` || cp >= 0x80
+fn utf8_prev_start(text []u8, pos int) int {
+	mut i := pos - 1
+	for i > 0 && (text[i] & 0xc0) == 0x80 {
+		i--
+	}
+	return i
+}
+
+fn is_word_before(text []u8, pos int) bool {
+	if pos <= 0 || pos > text.len {
+		return false
+	}
+	cp, _ := utf8_decode(text, utf8_prev_start(text, pos))
+	return is_word_rune(cp)
+}
+
+fn is_word_after(text []u8, pos int) bool {
+	if pos < 0 || pos >= text.len {
+		return false
+	}
+	cp, _ := utf8_decode(text, pos)
+	return is_word_rune(cp)
 }
 
 fn is_space(c u8) bool {
@@ -2500,8 +2530,8 @@ fn fold_text(text []u8) []u8 {
 // `start`. Returns (-1, -1) if there's no match.
 //
 // With `use_regex` disabled (the default) this is a pure literal byte-substring
-// search. With `use_regex` enabled, `pattern` is interpreted as a minimal
-// regular expression (see find_regex_match). `whole_word` and `match_case` are
+// search. With `use_regex` enabled, `pattern` is interpreted by the fallback
+// regular expression engine (see find_regex_match). `whole_word` and `match_case` are
 // applied to both paths.
 //
 // Calling convention: for case-insensitive literal searches, the caller must
@@ -2542,17 +2572,17 @@ fn find_substring_match(text []u8, pattern []u8, start int, options SearchOption
 			i--
 		}
 		if i < 0 {
-			// Whole-word check: the character before and after the match must
-			// not be a word character (ASCII [A-Za-z0-9_], or any non-ASCII
-			// byte). A rejected candidate still advances by the skip table,
+			// Whole-word check: the codepoint before and after the match must
+			// not be a Unicode word character. A rejected candidate still
+			// advances by the skip table,
 			// which never skips over a possible match.
 			if options.whole_word {
-				if off > 0 && is_word_byte(text[off - 1]) {
+				if is_word_before(text, off) {
 					off += skip[int(text[off + pattern_folded.len - 1])]
 					continue
 				}
 				end := off + pattern_folded.len
-				if end < text.len && is_word_byte(text[end]) {
+				if is_word_after(text, end) {
 					off += skip[int(text[off + pattern_folded.len - 1])]
 					continue
 				}
@@ -2616,297 +2646,30 @@ fn find_substring_match_before(text []u8, pattern []u8, end_at int, options Sear
 // at the very start or end of the text (no character on that side) counts as a
 // boundary against a word character.
 fn is_word_boundary(text []u8, t int) bool {
-	left := if t > 0 { is_word_byte(text[t - 1]) } else { false }
-	right := if t < text.len { is_word_byte(text[t]) } else { false }
+	left := is_word_before(text, t)
+	right := is_word_after(text, t)
 	return left != right
 }
 
-// find_regex_match searches `text` for `pattern` (a minimal regex; see
-// re_seq_match) starting at byte offset `start`. `whole_word` and `match_case`
-// from `options` are applied. Returns (beg, end) byte offsets, or (-1, -1).
+// find_regex_match searches `text` for the regex `pattern` starting at byte
+// offset `start`. `whole_word` and `match_case` from `options` are applied.
+// Returns (beg, end) byte offsets, or (-1, -1). An invalid pattern simply has
+// no matches; use regex_error() to tell the two apart.
 fn find_regex_match(text []u8, pattern []u8, start int, options SearchOptions) (int, int) {
-	for off := start; off <= text.len; off++ {
-		end := re_seq_match(pattern, 0, text, off, options)
-		if end < 0 {
-			continue
-		}
-		// Whole-word check: the characters immediately around the match must
-		// not be word characters.
-		if options.whole_word {
-			if off > 0 && is_word_byte(text[off - 1]) {
-				continue
-			}
-			if end < text.len && is_word_byte(text[end]) {
-				continue
-			}
-		}
-		return off, end
-	}
-	return -1, -1
+	m := find_regex_match_ex(text, pattern, start, options)
+	return m.beg, m.end
 }
 
-// re_seq_match tries to match the regex `pat` against `text` starting at byte
-// offset `ti`, from pattern position `pi` onward. On success it returns the end
-// byte offset of the match in `text`; on failure it returns -1. It implements a
-// minimal subset: literals, `.`, `^`, `$`, `\b`/`\B`, `\w`/`\W`, `\s`/`\S`,
-// `\d`/`\D`, escaped characters, and character classes `[...]` (with ranges and
-// negation). It does not support quantifiers or groups.
-fn re_seq_match(pat []u8, pi int, text []u8, ti int, options SearchOptions) int {
-	mut p := pi
-	mut t := ti
-	for p < pat.len {
-		c := pat[p]
-		match c {
-			`\\` {
-				p++
-				if p >= pat.len {
-					return -1
-				}
-				e := pat[p]
-				p++
-				nt := re_escape_match(e, text, t, options)
-				if nt < 0 {
-					return -1
-				}
-				t = nt
-			}
-			`.` {
-				// Any character except newline.
-				if t >= text.len {
-					return -1
-				}
-				cp, n := utf8_decode(text, t)
-				if cp == `\n` {
-					return -1
-				}
-				t += n
-				p++
-			}
-			`^` {
-				if !(t == 0 || (t > 0 && text[t - 1] == `\n`)) {
-					return -1
-				}
-				p++
-			}
-			`$` {
-				if !(t == text.len || text[t] == `\n`) {
-					return -1
-				}
-				p++
-			}
-			`[` {
-				ok, np, nt := re_class_match(pat, p, text, t, options)
-				if !ok {
-					return -1
-				}
-				p = np
-				t = nt
-			}
-			else {
-				if t >= text.len {
-					return -1
-				}
-				pcp, pn := utf8_decode(pat, p)
-				tcp, tn := utf8_decode(text, t)
-				if options.match_case {
-					if tcp != pcp {
-						return -1
-					}
-				} else {
-					if fold_rune(tcp) != fold_rune(pcp) {
-						return -1
-					}
-				}
-				t += tn
-				p += pn
-			}
+// find_regex_match_ex is find_regex_match plus the capture slots of the match,
+// which the replace paths need in order to expand `$1`-style templates.
+fn find_regex_match_ex(text []u8, pattern []u8, start int, options SearchOptions) RegexMatch {
+	re := regex_compile(pattern) or {
+		return RegexMatch{
+			beg: -1
+			end: -1
 		}
 	}
-	return t
-}
-
-// re_escape_match handles an escape sequence `\<e>` at the matcher position.
-// Returns the new text offset, or -1 if the assertion/character does not match.
-fn re_escape_match(e u8, text []u8, t int, options SearchOptions) int {
-	match e {
-		`b` {
-			if !is_word_boundary(text, t) {
-				return -1
-			}
-			return t
-		}
-		`B` {
-			if is_word_boundary(text, t) {
-				return -1
-			}
-			return t
-		}
-		`w` {
-			if t >= text.len {
-				return -1
-			}
-			cp, n := utf8_decode(text, t)
-			if !is_word_rune(cp) {
-				return -1
-			}
-			return t + n
-		}
-		`W` {
-			if t >= text.len {
-				return -1
-			}
-			cp, n := utf8_decode(text, t)
-			if is_word_rune(cp) {
-				return -1
-			}
-			return t + n
-		}
-		`s` {
-			if t >= text.len || !is_space(text[t]) {
-				return -1
-			}
-			return t + 1
-		}
-		`S` {
-			if t >= text.len || is_space(text[t]) {
-				return -1
-			}
-			return t + 1
-		}
-		`d` {
-			if t >= text.len || !(text[t] >= `0` && text[t] <= `9`) {
-				return -1
-			}
-			return t + 1
-		}
-		`D` {
-			if t >= text.len || (text[t] >= `0` && text[t] <= `9`) {
-				return -1
-			}
-			return t + 1
-		}
-		`n` {
-			if t >= text.len || text[t] != `\n` {
-				return -1
-			}
-			return t + 1
-		}
-		`t` {
-			if t >= text.len || text[t] != `\t` {
-				return -1
-			}
-			return t + 1
-		}
-		`r` {
-			if t >= text.len || text[t] != `\r` {
-				return -1
-			}
-			return t + 1
-		}
-		else {
-			// Any other escaped byte is a literal (e.g. `\*` is a literal '*').
-			if t >= text.len {
-				return -1
-			}
-			pcp, _ := utf8_decode([e], 0)
-			tcp, tn := utf8_decode(text, t)
-			if options.match_case {
-				if tcp != pcp {
-					return -1
-				}
-			} else {
-				if fold_rune(tcp) != fold_rune(pcp) {
-					return -1
-				}
-			}
-			return t + tn
-		}
-	}
-}
-
-// re_class_match matches a character class starting at pattern position `p`
-// (which points at '['). Returns (matched, new_p after ']', new_t).
-fn re_class_match(pat []u8, p int, text []u8, t int, options SearchOptions) (bool, int, int) {
-	mut pi := p + 1
-	mut negated := false
-	if pi < pat.len && pat[pi] == `^` {
-		negated = true
-		pi++
-	}
-	if t >= text.len {
-		// Consume the class so the parser stays in sync, but report no match.
-		for pi < pat.len && pat[pi] != `]` {
-			pi++
-		}
-		if pi < pat.len && pat[pi] == `]` {
-			pi++
-		}
-		return false, pi, t
-	}
-	cp, n := utf8_decode(text, t)
-	mut found := false
-	for pi < pat.len && pat[pi] != `]` {
-		if pat[pi] == `\\` {
-			pi++
-			if pi >= pat.len {
-				break
-			}
-			e := pat[pi]
-			pi++
-			if re_class_char_matches(e, cp, options) {
-				found = true
-			}
-		} else {
-			lo_cp, lo_n := utf8_decode(pat, pi)
-			pi += lo_n
-			// Range `a-z` (a literal dash is matched literally when it is the
-			// first or last element, which we approximate by only treating '-'
-			// as a range operator when followed by another class element).
-			if pi < pat.len && pat[pi] == `-` && pi + 1 < pat.len && pat[pi + 1] != `]` {
-				pi++ // consume '-'
-				hi_cp, hi_n := utf8_decode(pat, pi)
-				pi += hi_n
-				lo := if options.match_case { lo_cp } else { fold_rune(lo_cp) }
-				hi := if options.match_case { hi_cp } else { fold_rune(hi_cp) }
-				fc := if options.match_case { cp } else { fold_rune(cp) }
-				if fc >= lo && fc <= hi {
-					found = true
-				}
-			} else if cp == lo_cp {
-				found = true
-			}
-		}
-	}
-	if pi < pat.len && pat[pi] == `]` {
-		pi++
-	}
-	if found != negated {
-		return true, pi, t + n
-	}
-	return false, pi, t
-}
-
-// re_class_char_matches tests whether codepoint `cp` satisfies the class escape
-// `e` (used inside `[...]`).
-fn re_class_char_matches(e u8, cp rune, options SearchOptions) bool {
-	match e {
-		`w` { return is_word_rune(cp) }
-		`W` { return !is_word_rune(cp) }
-		`s` { return is_space_rune(cp) }
-		`S` { return !is_space_rune(cp) }
-		`d` { return cp >= `0` && cp <= `9` }
-		`D` { return !(cp >= `0` && cp <= `9`) }
-		`n` { return cp == `\n` }
-		`t` { return cp == `\t` }
-		`r` { return cp == `\r` }
-		else {
-			pcp, _ := utf8_decode([e], 0)
-			if options.match_case {
-				return cp == pcp
-			}
-			return fold_rune(cp) == fold_rune(pcp)
-		}
-	}
+	return regex_find(re, text, start, options)
 }
 
 // find_construct_search builds a cached search state for the given pattern.
@@ -3207,7 +2970,8 @@ pub fn (mut b TextBuffer) find_and_replace(pattern string, options SearchOptions
 	// possible one.
 	if b.search.valid && b.search.selection_generation == b.selection_generation {
 		zero_width := !b.selection.valid
-		b.write_raw(replacement)
+		repl := b.render_replacement_for_hit(pattern, options, replacement)
+		b.write_raw(repl)
 
 		// After replacing a zero-width match, advance past it so that
 		// find_and_select wraps to the next match rather than finding the same
@@ -3220,6 +2984,41 @@ pub fn (mut b TextBuffer) find_and_replace(pattern string, options SearchOptions
 	b.find_and_select(pattern, options)
 }
 
+// render_replacement_for_hit expands a replacement template (`$1`, `$$`,
+// `\n`, ...) against the currently selected hit. Without `use_regex` there is
+// no template at all; without a group reference the template renders to fixed
+// bytes and no capture slots are needed.
+fn (mut b TextBuffer) render_replacement_for_hit(pattern string, options SearchOptions, replacement []u8) []u8 {
+	if !options.use_regex {
+		return replacement
+	}
+	re := regex_compile(pattern.bytes()) or { return replacement }
+	parts := parse_replacement(replacement, re.group_count, true)
+	mut want_caps := false
+	for p in parts {
+		if p.kind == .group {
+			want_caps = true
+			break
+		}
+	}
+	if !want_caps {
+		return expand_replacement(parts, []u8{}, [])
+	}
+	// find_select_* keeps the selection but not the capture slots, so re-run
+	// the match at the hit's start offset to recover them.
+	off := if b.selection.valid {
+		b.cursor_move_to_logical_internal(b.cursor, b.selection.beg).offset
+	} else {
+		b.cursor.offset
+	}
+	text := b.search_text(options)
+	m := find_regex_match_ex(text, pattern.bytes(), off, options)
+	if m.beg < 0 {
+		return expand_replacement(parts, []u8{}, [])
+	}
+	return expand_replacement(parts, text, m.caps)
+}
+
 // find_and_replace_all finds all occurrences of the given `pattern` and
 // replaces them with `replacement`. Returns the number of replacements made.
 pub fn (mut b TextBuffer) find_and_replace_all(pattern string, options SearchOptions, replacement []u8) int {
@@ -3227,22 +3026,60 @@ pub fn (mut b TextBuffer) find_and_replace_all(pattern string, options SearchOpt
 		return 0
 	}
 
+	// Parse the replacement template once instead of per hit. Only patterns
+	// whose template actually references a capture group need the (slightly
+	// more expensive) capture-collecting scan below.
+	mut re := Regex{}
+	mut re_ok := false
+	mut parts := []ReplPart{}
+	mut want_caps := false
+	if options.use_regex {
+		re = regex_compile(pattern.bytes()) or { return 0 }
+		re_ok = true
+		parts = parse_replacement(replacement, re.group_count, true)
+		for p in parts {
+			if p.kind == .group {
+				want_caps = true
+				break
+			}
+		}
+	}
+	mut fixed := []u8{}
+	if !want_caps {
+		fixed = if re_ok { expand_replacement(parts, []u8{}, []) } else { copy_u8(replacement) }
+	}
+
 	// Collect all match ranges with a single scan of the original text,
 	// stepping exactly like search_match_stats (no overlapping hits,
 	// zero-width hits step one grapheme forward), so the replaced count
 	// matches the hit counter. Ranges are gathered up front because edits
 	// would invalidate offsets for a scan interleaved with write_raw().
+	// Captures index into this same snapshot.
 	text := b.search_text(options)
 	mut begs := []int{}
 	mut ends := []int{}
+	mut caps := [][]int{}
 	mut off := 0
 	for off <= text.len {
-		beg, end := find_substring_match(text, pattern.bytes(), off, options)
+		mut beg := -1
+		mut end := 0
+		mut hit_caps := []int{}
+		if re_ok {
+			m := regex_find(&re, text, off, options)
+			beg = m.beg
+			end = m.end
+			if want_caps {
+				hit_caps = copy_int(m.caps)
+			}
+		} else {
+			beg, end = find_substring_match(text, pattern.bytes(), off, options)
+		}
 		if beg < 0 {
 			break
 		}
 		begs << beg
 		ends << end
+		caps << hit_caps
 		if end == beg {
 			next := b.find_advance_past_zero_width(end)
 			if next <= off {
@@ -3268,7 +3105,7 @@ pub fn (mut b TextBuffer) find_and_replace_all(pattern string, options SearchOpt
 			beg:   beg_cursor.logical_pos
 			end:   end_cursor.logical_pos
 		})
-		b.write_raw(replacement)
+		b.write_raw(if want_caps { expand_replacement(parts, text, caps[i]) } else { fixed })
 	}
 	b.edit_end_grouping()
 	return begs.len

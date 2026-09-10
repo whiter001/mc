@@ -204,8 +204,8 @@ fn (mut ed Editor) run_panel_search() {
 		return
 	}
 	needle := ed.search_panel.needle
-	ed.last_search = needle
 	if needle == '' {
+		ed.last_search = needle
 		ed.search_failed = false
 		ed.search_panel.error = ''
 		ed.search_panel.hit_index = 0
@@ -213,6 +213,17 @@ fn (mut ed Editor) run_panel_search() {
 		ed.move_cursor_to_selection_beg()
 		return
 	}
+	if ed.search_options.use_regex {
+		err := regex_error(needle)
+		if err != '' {
+			// Keep the previous successful query and selection intact while the
+			// user is correcting an invalid pattern.
+			ed.search_failed = true
+			ed.search_panel.error = 'invalid regex: ${err}'
+			return
+		}
+	}
+	ed.last_search = needle
 	mut b := &ed.docs[ed.active].buf
 	b.find_and_select(needle, ed.search_options)
 	b.make_cursor_visible()
@@ -250,6 +261,13 @@ fn (mut ed Editor) panel_action_replace() {
 		ed.search_panel.error = 'no needle'
 		return
 	}
+	if ed.search_options.use_regex {
+		err := regex_error(needle)
+		if err != '' {
+			ed.search_panel.error = 'invalid regex: ${err}'
+			return
+		}
+	}
 	ed.last_search = needle
 	mut b := &ed.docs[ed.active].buf
 	b.find_and_replace(needle, ed.search_options, ed.search_panel.replacement.bytes())
@@ -269,6 +287,13 @@ fn (mut ed Editor) panel_action_replace_all() {
 	if needle == '' {
 		ed.search_panel.error = 'no needle'
 		return
+	}
+	if ed.search_options.use_regex {
+		err := regex_error(needle)
+		if err != '' {
+			ed.search_panel.error = 'invalid regex: ${err}'
+			return
+		}
 	}
 	ed.last_search = needle
 	ed.last_replacement = ed.search_panel.replacement

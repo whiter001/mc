@@ -143,6 +143,24 @@ fn test_search_panel_missing_needle_sets_search_failed() {
 	assert !ed.search_failed
 }
 
+fn test_search_panel_invalid_regex_preserves_previous_match() {
+	mut ed := panel_ed('foo bar foo')
+	ed.open_search_panel()
+	ed.search_options.use_regex = true
+	ed.search_panel.needle = 'foo'
+	ed.run_panel_search()
+	assert !ed.search_failed
+	assert ed.last_search == 'foo'
+	previous := ed.docs[ed.active].buf.selection.beg
+
+	ed.search_panel.needle = '('
+	ed.run_panel_search()
+	assert ed.search_failed
+	assert ed.search_panel.error.starts_with('invalid regex:')
+	assert ed.last_search == 'foo'
+	assert ed.docs[ed.active].buf.selection.beg == previous
+}
+
 fn test_search_panel_toggle_option_reruns_search() {
 	mut ed := panel_ed('Foo foo')
 	ed.open_search_panel()

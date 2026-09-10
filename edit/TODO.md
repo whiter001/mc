@@ -56,19 +56,19 @@
 
 ## P1：搜索语义和编码能力
 
-### 完整正则语义（可选 ICU 后端）
+### 正则语义（无 ICU fallback）
 
-- [ ] 为 `SearchOptions.use_regex` 定义后端接口，保留当前最小正则作为无 ICU fallback
-- [ ] 支持 Rust/ICU 版本的分组、量词、交替、Unicode 字符类和捕获组
-- [ ] 支持替换模板 `$1`、`$$`、`\\n`、`\\r`、`\\t`
-- [ ] 明确非法正则的错误展示，不破坏上一次有效搜索状态
-- [ ] 用参考版测试用例验证 forward、reverse、wrap、zero-width、Replace All
+- [x] 为 `SearchOptions.use_regex` 定义 literal/regex 后端接口；无 ICU 时使用自包含 fallback
+- [x] 支持 fallback 的分组、量词、交替、字符类和捕获组（look-around/backreference 仍明确不支持）
+- [x] 支持替换模板 `$1`、`$$`、`\\n`、`\\r`、`\\t`
+- [x] 非法正则显示错误且不破坏上一次有效搜索状态
+- [x] 用回归测试覆盖 forward、reverse、wrap、zero-width 和 Replace All
 
-### Unicode 大小写和整词
+### Unicode 大小写和整词（无 ICU）
 
-- [ ] 在没有 ICU 时补齐可接受的 Unicode Case Folding 策略并写明覆盖范围
-- [ ] 整词边界按 Unicode 标准定义，而不是把所有非 ASCII 字节简单视为词字符
-- [ ] 增加希腊、西里尔、组合字符、emoji 和 CJK 的回归测试
+- [x] 在没有 ICU 时采用并注明 ASCII、Latin-1、希腊和西里尔的 Case Folding 覆盖范围
+- [x] 整词边界按 UTF-8 code point 和文档化 Unicode 范围近似，不再把所有非 ASCII 字节视为词字符
+- [x] 增加希腊、西里尔、组合字符、emoji 和 CJK 的回归测试
 
 ### 编码 picker / 转换
 

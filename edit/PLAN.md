@@ -1,6 +1,6 @@
 # edit V 版兼容性路线与详细设计
 
-## 当前执行决策（2026-09-10）
+## 当前执行决策（2026-09-11）
 
 阶段 B（常驻搜索/替换面板）已完成，实现在 `search_panel.v`，回归覆盖在 `search_panel_test.v`，
 `./build.sh test` 为 21/21 通过。P0 至此全部完成。
@@ -20,7 +20,13 @@ Shift+方向键/Ctrl+A 选择替换语义；Search 模式 Close 控件可见可�
 3. 未提前实现全局 FocusManager：面板使用局部 `SearchPanelFocus` 枚举和显式路由；等文件/语言/
    编码 picker 也需要 Tab 导航时再抽取通用焦点树（见 P2）。
 
-下一项主线：P1 的搜索语义（完整正则/替换模板）与编码能力，或 P2 的统一焦点树。
+阶段 C（无 ICU 的正则/替换 fallback）已完成：`regex.v` 提供递归下降解析器、字节码 VM、
+分组/量词/交替/字符类/捕获组和替换模板；搜索面板对非法正则给出可见错误并保留上一条有效
+搜索。词边界已改为按 UTF-8 code point 的文档化 Unicode 范围近似，emoji 不再被当作词字符；
+回归覆盖 forward/reverse/wrap/zero-width/Replace All 以及希腊、西里尔、组合字符和 CJK。
+不支持 ICU 的 look-around、backreference 和完整 Unicode property，均在代码注释中明确说明。
+
+下一项主线：P1 编码 picker/转换；其后再推进 P2 的统一焦点树。
 
 ## 1. 目标和边界
 
@@ -264,7 +270,7 @@ CompiledSearch.captures() []Range
 
 ### 6.4 正则兼容策略
 
-以 ICU 为目标语义：多行锚点、Unicode case-insensitive、Unicode `\\b/\\w`、分组、量词、交替、字符类和替换捕获组。若暂时不能引入 ICU，UI 应显示“最小正则”能力，而不是静默宣称完全兼容。
+以 ICU 为目标语义：多行锚点、Unicode case-insensitive、Unicode `\\b/\\w`、分组、量词、交替、字符类和替换捕获组。当前首版不引入 ICU，已实现自包含 fallback：支持多行锚点、分组/量词/交替/字符类、捕获替换和非法模式错误展示；`\\b/\\w` 使用文档化的 code point 范围近似，look-around、backreference 和完整 property escape 明确报错。UI 不宣称 ICU 完整兼容。
 
 ### 6.5 阶段 B 的实现边界
 
