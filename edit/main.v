@@ -46,6 +46,8 @@ enum StatusButtonKind {
 	indentation
 	// Opens the language picker (Rust "language").
 	language
+	// Opens the Reopen/Convert encoding action picker (Rust "encoding").
+	encoding
 	// Opens the Go to File modal (Rust "filename" button).
 	filename
 }
@@ -250,6 +252,16 @@ mut:
 	language_picker_sel      int
 	language_picker_scroll   int
 	language_picker_explicit int = -2 // -2 sentinel: auto-detect
+	// Encoding picker state (encoding_picker.v). Documents with a path first
+	// choose Reopen/Convert; untitled documents go straight to Convert.
+	encoding_action_picker  bool
+	encoding_action_sel     int
+	encoding_picker         bool
+	encoding_picker_action  EncodingChange
+	encoding_picker_needle  string
+	encoding_picker_results []int
+	encoding_picker_sel     int
+	encoding_picker_scroll  int
 	// Large clipboard warning modal (Rust state.wants_large_clipboard_warning).
 	// Triggered by process_input() when the OSC 52 payload crosses the
 	// threshold; while set, all input is routed to the warning handler.
@@ -660,6 +672,27 @@ fn (mut ed Editor) handle_event(ev Input) {
 			return
 		}
 		ed.about_open = false
+		return
+	}
+
+	// The encoding action row and encoding list are modal. Route them before
+	// the other pickers so text input cannot leak into the document.
+	if ed.encoding_action_picker {
+		match ev.kind {
+			.keyboard { ed.handle_encoding_action_key(ev.key) }
+			.mouse { ed.handle_encoding_action_mouse(ev.mouse) }
+			else {}
+		}
+		return
+	}
+	if ed.encoding_picker {
+		match ev.kind {
+			.keyboard { ed.handle_encoding_picker_key(ev.key) }
+			.text { ed.handle_encoding_picker_text(ev.text) }
+			.paste { ed.handle_encoding_picker_text(ev.data.bytestr()) }
+			.mouse { ed.handle_encoding_picker_mouse(ev.mouse) }
+			else {}
+		}
 		return
 	}
 
@@ -2076,6 +2109,12 @@ fn (mut ed Editor) draw() {
 	if ed.language_picker {
 		ed.draw_language_picker(status_y)
 	}
+	if ed.encoding_action_picker {
+		ed.draw_encoding_actions(status_y)
+	}
+	if ed.encoding_picker {
+		ed.draw_encoding_picker()
+	}
 	if ed.clipboard_large_pending {
 		ed.draw_clipboard_warning()
 	}
@@ -2114,6 +2153,12 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	ed.status_buttons << StatusButton{ kind: .newline, left: x, right: x + CoordType(nl.len) }
 	text += nl + '  '
 	x += CoordType(nl.len + 2)
+
+	// Encoding button opens the Reopen/Convert action picker.
+	enc := b.encoding()
+	ed.status_buttons << StatusButton{ kind: .encoding, left: x, right: x + CoordType(enc.len) }
+	text += enc + '  '
+	x += CoordType(enc.len + 2)
 
 	// Indentation button (Rust "indentation"): click opens the picker popup.
 	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
@@ -2257,6 +2302,10 @@ fn (ed &Editor) compute_status_buttons() []StatusButton {
 	res << StatusButton{ kind: .newline, left: x, right: x + CoordType(nl.len) }
 	x += CoordType(nl.len + 2)
 
+	enc := b.encoding()
+	res << StatusButton{ kind: .encoding, left: x, right: x + CoordType(enc.len) }
+	x += CoordType(enc.len + 2)
+
 	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
 	res << StatusButton{ kind: .indentation, left: x, right: x + CoordType(ind.len) }
 	return res
@@ -2291,6 +2340,9 @@ fn (mut ed Editor) handle_status_click(x CoordType) {
 				}
 				.language {
 					ed.open_language_picker()
+				}
+				.encoding {
+					ed.open_encoding_actions()
 				}
 				.filename {
 					ed.open_goto_file()

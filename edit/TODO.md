@@ -72,11 +72,11 @@
 
 ### 编码 picker / 转换
 
-- [ ] 状态栏显示当前编码并可打开编码 picker
-- [ ] 支持 fuzzy 过滤、Reopen 和 Convert 两种动作
-- [ ] 设计 UTF-8、UTF-8 BOM、UTF-16LE/BE、UTF-32LE/BE、GB18030 等编码的读写策略
-- [ ] Reopen 前处理 dirty 文档；Convert 改变编码并标记 dirty
-- [ ] 将编码错误映射到错误日志，禁止产生静默数据损坏
+- [x] 状态栏显示当前编码并可打开编码 picker
+- [x] 支持 fuzzy 过滤、Reopen 和 Convert 两种动作
+- [x] 设计 UTF-8、UTF-8 BOM、UTF-16LE/BE、UTF-32LE/BE、GB18030 等编码的读写策略
+- [x] Reopen 前处理 dirty 文档；Convert 改变编码并标记 dirty
+- [x] 将编码错误映射到错误日志，禁止产生静默数据损坏
 
 ## P2：交互和维护性增强
 

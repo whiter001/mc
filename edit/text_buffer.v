@@ -17,8 +17,8 @@ module main
 //   groups, alternation; no look-around or backreferences). whole_word uses
 //   ASCII word boundaries; match_case=false folds ASCII plus Latin-1, Greek
 //   and Cyrillic.
-// * read_file/write_file read/write in 64KiB chunks (Rust uses SIMD scans +
-//   virtual-memory gap allocation) and have no progress callbacks.
+// * read_file/write_file transcode through encoding.iconv (Rust uses ICU) and
+//   operate on complete snapshots; they have no progress callbacks.
 // * Rust's simd::lines_fwd/lines_bwd are replaced with plain byte scans.
 // * The `small` parameter of Rust's GapBuffer::new is accepted for API
 //   parity but ignored; V's GapBuffer uses one malloc'd backing for all sizes.
@@ -33,9 +33,6 @@ const visual_space = '･'
 const visual_space_prefix_add = 2 // '･'.len_utf8() - 1
 const visual_tab = '￫       '
 const visual_tab_prefix_add = 2 // '￫'.len_utf8() - 1
-
-// bom_max_len is the max. number of bytes we read to detect a BOM.
-const bom_max_len = 4
 
 // TextBufferStatistics stores statistics about the whole document.
 pub struct TextBufferStatistics {
@@ -780,98 +777,27 @@ pub fn (mut b TextBuffer) save_as_string(mut dst WriteableDocument) {
 	b.mark_as_clean()
 }
 
-// detect_bom returns the encoding name indicated by the given BOM bytes, or
-// an empty string if there is no BOM.
-fn detect_bom(bytes []u8) string {
-	if bytes.len >= 4 {
-		if bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00 {
-			return 'UTF-32LE'
-		}
-		if bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF {
-			return 'UTF-32BE'
-		}
-		if bytes[0] == 0x84 && bytes[1] == 0x31 && bytes[2] == 0x95 && bytes[3] == 0x33 {
-			return 'GB18030'
-		}
-	}
-	if bytes.len >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
-		return 'UTF-8'
-	}
-	if bytes.len >= 2 {
-		if bytes[0] == 0xFF && bytes[1] == 0xFE {
-			return 'UTF-16LE'
-		}
-		if bytes[0] == 0xFE && bytes[1] == 0xFF {
-			return 'UTF-16BE'
-		}
-	}
-	return ''
-}
-
 // read_file reads a file from disk into the text buffer, detecting encoding
 // and BOM.
-//
-// Difference from the Rust original: the Rust version takes a `&mut File`,
-// transcodes non-UTF-8 encodings via ICU and reads with SIMD-accelerated gap
-// allocation. This port takes a path, reads in 64KiB chunks and only handles
-// UTF-8 (with BOM); other encodings are read as raw bytes without transcoding.
 pub fn (mut b TextBuffer) read_file(path string) ! {
-	mut f := os.open(path) or { return err }
-	defer { f.close() }
+	b.read_file_encoding(path, '')!
+}
 
-	// Read enough bytes to detect the BOM.
-	// NOTE: V's os.File.read() returns os.Eof at end of file; treat it
-	// like a short read of 0 bytes (Rust's read() returns Ok(0)).
-	mut first := []u8{ len: bom_max_len }
-	first_chunk_len := f.read(mut first) or {
-		if err is os.Eof {
-			0
-		} else {
-			return err
-		}
-	}
-
-	// Determine the encoding.
-	detected := detect_bom(first[..first_chunk_len])
-	if detected.len > 0 {
-		b.encoding = detected
-	} else {
-		b.encoding = 'UTF-8'
-	}
+// read_file_encoding is read_file with an explicit source encoding. An empty
+// encoding auto-detects a supported BOM and otherwise assumes strict UTF-8.
+// Decoding finishes before the live buffer is touched, so an error leaves the
+// current document unchanged.
+pub fn (mut b TextBuffer) read_file_encoding(path string, requested string) ! {
+	raw := os.read_bytes(path) or { return err }
+	encoding := if requested == '' { detect_file_encoding(raw) } else { requested }
+	decoded := decode_file(raw, encoding)!
 
 	b.buffer.clear()
-
-	done := first_chunk_len == 0
-	mut chunk := first[0..first_chunk_len].clone()
-
-	// Strip the UTF-8 BOM, if this is a UTF-8 file.
-	if b.encoding == 'UTF-8' && chunk.len >= 3 && chunk[0] == 0xEF && chunk[1] == 0xBB
-		&& chunk[2] == 0xBF {
-		b.encoding = 'UTF-8 BOM'
-		chunk = chunk[3..].clone()
+	bytes := decoded.bytes()
+	if bytes.len > 0 {
+		b.buffer.replace(0, 0, bytes)
 	}
-	if chunk.len > 0 {
-		b.buffer.replace(0, 0, chunk)
-	}
-
-	if !done {
-		// Read the rest of the file in 64KiB chunks (Rust: SIMD + gap reads).
-		mut buf := []u8{ len: 64 * kibi }
-		for {
-			n := f.read(mut buf) or {
-				if err is os.Eof {
-					0
-				} else {
-					return err
-				}
-			}
-			if n == 0 {
-				break
-			}
-			off := b.buffer.len()
-			b.buffer.replace(off, off, buf[..n])
-		}
-	}
+	b.encoding = encoding
 
 	// Figure out
 	// * the logical line count
@@ -978,27 +904,15 @@ pub fn (mut b TextBuffer) read_file(path string) ! {
 	b.recalc_after_content_swap()
 }
 
-// write_file writes the text buffer contents to a file, handling BOM and
-// encoding.
-//
-// Difference from the Rust original: takes a path instead of a `&mut File`
-// and doesn't transcode non-UTF-8 encodings (UTF-8 only in this port).
+// write_file writes the text buffer contents in its selected encoding. The
+// conversion is completed before opening the destination, so an unrepresentable
+// character cannot truncate an existing file.
 pub fn (mut b TextBuffer) write_file(path string) ! {
+	encoded := encode_text(b.read_all().bytestr(), b.encoding)!
 	mut f := os.create(path) or { return err }
 	defer { f.close() }
-
-	if b.encoding == 'UTF-8 BOM' {
-		f.write([u8(0xEF), 0xBB, 0xBF]) or { return err }
-	}
-
-	mut offset := 0
-	for offset < b.buffer.len() {
-		chunk := b.buffer.read_forward(offset)
-		if chunk.len == 0 {
-			break
-		}
-		f.write(chunk) or { return err }
-		offset += chunk.len
+	if encoded.len > 0 {
+		f.write(encoded) or { return err }
 	}
 
 	b.mark_as_clean()

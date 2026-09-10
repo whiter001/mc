@@ -311,7 +311,15 @@ decode_file(bytes, encoding) !string
 encode_text(text, encoding) ![]u8
 ```
 
-核心缓冲区只存合法 UTF-8。读取时记录 `encoding` 和 `has_bom`；写入时按记录编码生成字节。任何解码错误必须可见地失败，不能把原始 UTF-16/GB18030 字节当 UTF-8 展示后再覆盖保存。
+核心缓冲区只存合法 UTF-8。读取时记录 `encoding`；UTF-8 用 `UTF-8` / `UTF-8 BOM` 区分是否写 BOM，
+UTF-16/32 和 GB18030 写出时固定带 BOM，保证后续自动检测。任何解码错误必须可见地失败，不能把原始
+UTF-16/GB18030 字节当 UTF-8 展示后再覆盖保存。
+
+编码子阶段实测结果（已完成）：`encoding.v` 通过 `encoding.iconv` 提供严格解码和编码，支持 UTF-8、
+UTF-8 BOM、UTF-16LE/BE、UTF-32LE/BE 和 GB18030；转换完成后才打开目标文件，编码失败不会截断原文件。
+状态栏 Encoding 入口提供 Reopen/Convert 两阶段选择和 fuzzy 过滤；Untitled 只允许 Convert，Convert 会标记
+dirty，Reopen 会先保存 dirty 文档，失败时保留内存文档并写入包含路径与编码的错误日志。单元测试覆盖 BOM、
+round-trip、非法输入、过滤、dirty 和失败路径，PTY smoke 覆盖状态栏入口、Convert picker 与干净退出。
 
 ## 8. Focus tree 设计
 
@@ -383,7 +391,7 @@ cpulimit -l 200 -z -- ./build.sh vet
 
 阶段 A 完成后，CLI、打开、保存和配置相关 smoke 全部通过。
 
-### 阶段 B：常驻搜索/替换面板（当前执行）
+### 阶段 B：常驻搜索/替换面板（已完成）
 
 1. **状态隔离**：新增 `SearchPanelKind`、`SearchPanelFocus` 和面板字段；实现 `open_search_panel`、`open_replace_panel`、`close_search_panel`。
 2. **绘制替换**：新增 `draw_search_panel`，复用现有测量和 framebuffer API；实现 3 行布局、窄终端裁剪和高度不足回退。
@@ -393,18 +401,18 @@ cpulimit -l 200 -z -- ./build.sh vet
 
 阶段 B 的提交顺序必须保持可编译：先状态和测试夹具，再绘制，再事件路由，最后删除旧 prompt。每一步都使用受 CPU 限制的测试命令验证。
 
-### 阶段 C：搜索语义（阶段 B 稳定后）
+### 阶段 C：搜索语义（已完成）
 
 1. 选择 ICU 或扩展 fallback 后端。
 2. 完整正则和替换模板。
 3. Unicode case/word boundary。
-4. 大文件基准和内存审查。
+4. **转入 P2**：大文件基准和内存审查，不阻塞搜索语义阶段验收。
 
-### 阶段 D：编码和焦点完善（阶段 C 之后）
+### 阶段 D：编码和焦点完善（当前执行）
 
-1. `encoding.v` 解码/编码后端。
-2. 状态栏编码 picker、Reopen/Convert。
-3. FocusManager 接入全部 modal/statusbar。
+1. **已完成**：`encoding.v` 解码/编码后端。
+2. **已完成**：状态栏编码 picker、Reopen/Convert。
+3. **下一项**：FocusManager 接入全部 modal/statusbar。
 4. 显示细节、版本来源和错误日志容量收尾。
 
 每个阶段结束时更新 `TODO.md` 的复选框和本文档的实际差异；如果某项被确认继续留在首版范围外，应移动到“明确不纳入当前首版”，而不是留下模糊的进行中状态。
