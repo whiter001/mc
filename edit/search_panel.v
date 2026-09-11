@@ -185,7 +185,8 @@ fn search_panel_byte_width(label string, text string, offset int) CoordType {
 
 fn (mut ed Editor) draw_search_panel_selection(row CoordType, label string, text string, anchor int, cursor int) {
 	beg, end := search_panel_selection(anchor, cursor, text.len)
-	if beg < 0 {
+	// A collapsed selection has nothing to draw.
+	if beg == end {
 		return
 	}
 	mut rect := Rect{

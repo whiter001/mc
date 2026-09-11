@@ -13,7 +13,10 @@ import time
 import encoding.base64
 
 // Terminal setup/teardown sequences, same as the Rust original (main.rs).
-const term_init_seq = '\x1b[?1049h\x1b[?1002;1006;2004h\x1b[?1036h'
+// Kitty keyboard protocol: never enabled by us, but a crashed program may
+// leave flags pushed in the terminal. Reset the current stack entry's flags
+// so we neither receive CSI-u key events nor leak release events at exit.
+const term_init_seq = '\x1b[?1049h\x1b[?1002;1006;2004h\x1b[?1036h\x1b[=0;1u'
 const term_exit_seq = '\x1b[0 q\x1b[?25h\x1b]0;\a\x1b[?1002;1006;2004l\x1b[?1049l'
 
 const kbmod_mask = u32(0xff000000)
@@ -2291,15 +2294,17 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 
 	ed.fb.replace_text(status_y, 0, ed.size.width, text)
 	mut rect := Rect{ left: 0, top: status_y, right: ed.size.width, bottom: status_y + 1 }
-	ed.fb.reverse(mut rect)
-	// Buttons are highlighted by reversing their own rect a second time
-	// (same trick as the menu bar), reading as raised against the inverted row.
+	ed.fb.blend_bg(mut rect, ed.fb.indexed_alpha(IndexedColor.foreground, 1, 4))
+	// All buttons get a stronger foreground tint so they read as raised
+	// against the bar. When the status bar has keyboard focus, the focused
+	// button is strongly inverted instead, signaling where keystrokes land.
 	for i, btn in ed.status_buttons {
-		if ed.focus.target == .statusbar && i != ed.statusbar_focus_index {
-			continue
-		}
 		mut btn_rect := Rect{ left: btn.left, top: status_y, right: btn.right, bottom: status_y + 1 }
-		ed.fb.reverse(mut btn_rect)
+		if ed.focus.target == .statusbar && i == ed.statusbar_focus_index {
+			ed.fb.reverse(mut btn_rect)
+		} else {
+			ed.fb.blend_bg(mut btn_rect, ed.fb.indexed_alpha(IndexedColor.foreground, 1, 3))
+		}
 	}
 }
 
