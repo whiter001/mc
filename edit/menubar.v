@@ -27,6 +27,7 @@ enum MenuAction {
 	edit_select_all
 	view_goto_file
 	view_goto_line
+	view_focus_statusbar
 	view_word_wrap
 	help_about
 }
@@ -79,6 +80,7 @@ fn (ed &Editor) build_menus() []MenuBarMenu {
 			items: [
 				MenuItem{ label: 'Go to File', accel: 'Ctrl+P', action: .view_goto_file },
 				MenuItem{ label: 'Go to Line...', accel: 'Ctrl+G', action: .view_goto_line },
+				MenuItem{ label: 'Focus Statusbar', action: .view_focus_statusbar },
 				MenuItem{ label: 'Word Wrap', accel: 'Alt+Z', action: .view_word_wrap, checked: wrap },
 			]
 		},
@@ -230,6 +232,7 @@ fn (mut ed Editor) draw_about() {
 // is open. Returns true if the key was consumed; false means the menu state
 // was closed and the key should continue through normal processing.
 fn (mut ed Editor) handle_menu_key(key InputKey) bool {
+	mods := u32(key) & kbmod_mask
 	vk := u32(key) & vk_mask
 
 	if vk == vk_escape || vk == vk_f10 {
@@ -242,6 +245,16 @@ fn (mut ed Editor) handle_menu_key(key InputKey) bool {
 	if ed.menu_open {
 		items := menus[ed.menu_idx].items
 		match vk {
+			vk_tab {
+				if mods == kbmod_none || mods == kbmod_shift {
+					if mods == kbmod_shift {
+						ed.menu_item_idx = (ed.menu_item_idx + items.len - 1) % items.len
+					} else {
+						ed.menu_item_idx = (ed.menu_item_idx + 1) % items.len
+					}
+					return true
+				}
+			}
 			vk_up {
 				ed.menu_item_idx = (ed.menu_item_idx + items.len - 1) % items.len
 				return true
@@ -274,6 +287,16 @@ fn (mut ed Editor) handle_menu_key(key InputKey) bool {
 
 	// Only the menu bar itself is focused (no dropdown open).
 	match vk {
+		vk_tab {
+			if mods == kbmod_none || mods == kbmod_shift {
+				if mods == kbmod_shift {
+					ed.menu_idx = (ed.menu_idx + menus.len - 1) % menus.len
+				} else {
+					ed.menu_idx = (ed.menu_idx + 1) % menus.len
+				}
+				return true
+			}
+		}
 		vk_left {
 			ed.menu_idx = (ed.menu_idx + menus.len - 1) % menus.len
 			return true
@@ -292,6 +315,7 @@ fn (mut ed Editor) handle_menu_key(key InputKey) bool {
 			return false
 		}
 	}
+	return false
 }
 
 // activate_menu_item executes a menu item and closes the menu. The actions
@@ -357,6 +381,16 @@ fn (mut ed Editor) activate_menu_item(action MenuAction) {
 		}
 		.view_goto_line {
 			ed.start_prompt(.goto_line)
+		}
+		.view_focus_statusbar {
+			if ed.search_panel.visible {
+				ed.status = 'close the search panel first'
+			} else {
+				ed.mode = .edit
+				ed.focus.request(.statusbar)
+				ed.focus_sync()
+				ed.status = 'statusbar focus'
+			}
 		}
 		.view_word_wrap {
 			ed.docs[ed.active].buf.set_word_wrap(!ed.docs[ed.active].buf.is_word_wrap_enabled())

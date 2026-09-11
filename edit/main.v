@@ -137,6 +137,7 @@ struct Document {
 mut:
 	buf         TextBuffer
 	path        string
+	display_name string
 	file_id     FileId
 	has_file_id bool
 }
@@ -155,6 +156,7 @@ mut:
 	needs_redraw     bool
 	quit             bool
 	status           string
+	untitled_next    int = 1
 	settings         UserSettings
 	// Mode & prompt state.
 	mode        EditMode
@@ -224,6 +226,10 @@ mut:
 	picker_autocomplete_sel int
 	// Status-line buttons, rebuilt every frame (see draw_statusbar).
 	status_buttons []StatusButton
+	// Unified focus context. Widget-specific selection fields remain the
+	// source of truth; this field determines which focus well owns Tab/Enter.
+	focus FocusManager
+	statusbar_focus_index int
 	// Search prompt buttons, rebuilt every frame while the search panel is visible.
 	search_buttons []SearchButton
 	// Search panel clickable regions (options + action buttons), rebuilt
@@ -469,6 +475,7 @@ fn (mut ed Editor) add_document(path string) ! {
 	mut doc := Document{
 		buf:  new_text_buffer(false)
 		path: normalized_path
+		display_name: if normalized_path == '' { ed.new_untitled_name() } else { os.file_name(normalized_path) }
 	}
 	doc.buf.set_margin_enabled(true)
 	doc.buf.set_insert_final_newline(true)
@@ -529,6 +536,22 @@ fn (mut ed Editor) reset_view_state() {
 // cur returns the active document. Use `ed.docs[ed.active]` for mutation.
 fn (ed &Editor) cur() &Document {
 	return &ed.docs[ed.active]
+}
+
+fn (mut ed Editor) new_untitled_name() string {
+	name := 'Untitled-${ed.untitled_next}.txt'
+	ed.untitled_next++
+	return name
+}
+
+fn (ed &Editor) document_display_name(doc &Document) string {
+	if doc.path != '' {
+		return os.file_name(doc.path)
+	}
+	if doc.display_name != '' {
+		return doc.display_name
+	}
+	return 'Untitled-1.txt'
 }
 
 // width_for_margin returns the width available for text, given a margin width.
@@ -598,6 +621,9 @@ fn (mut ed Editor) process_input() {
 }
 
 fn (mut ed Editor) handle_event(ev Input) {
+	// Capture focus before any modal-specific routing. This also consumes a
+	// one-shot request made by View > Focus Statusbar.
+	ed.focus_sync()
 	// Resize always applies, even while a modal (About / file picker) is open.
 	if ev.kind == .resize {
 		ed.size = ev.size
@@ -620,20 +646,26 @@ fn (mut ed Editor) handle_event(ev Input) {
 		return
 	}
 
-	// Error log modal: any key dismisses it.
+	// Error log modal: only Enter/Escape or its Close row dismisses it.
 	if ed.error_log_count > 0 && ed.error_log_open {
-		if ev.kind == .keyboard || ev.kind == .text {
-			ed.error_log_close()
-			return
+		match ev.kind {
+			.keyboard { ed.handle_error_log_key(ev.key) }
+			.mouse { ed.handle_error_log_mouse(ev.mouse) }
+			else {}
 		}
+		return
 	}
 
 	// Dirty-close / dirty-quit modal.
 	if ed.dirty_modal {
 		match ev.kind {
 			.keyboard {
+				mods := u32(ev.key) & kbmod_mask
 				vk := u32(ev.key) & vk_mask
 				match vk {
+					vk_tab {
+						ed.focus_tab(mods == kbmod_shift)
+					}
 					vk_left {
 						ed.dirty_action = (ed.dirty_action + 3 - 1) % 3
 					}
@@ -679,7 +711,15 @@ fn (mut ed Editor) handle_event(ev Input) {
 	// the other pickers so text input cannot leak into the document.
 	if ed.encoding_action_picker {
 		match ev.kind {
-			.keyboard { ed.handle_encoding_action_key(ev.key) }
+			.keyboard {
+				mods := u32(ev.key) & kbmod_mask
+				vk := u32(ev.key) & vk_mask
+				if vk == vk_tab && (mods == kbmod_none || mods == kbmod_shift) {
+					ed.focus_tab(mods == kbmod_shift)
+				} else {
+					ed.handle_encoding_action_key(ev.key)
+				}
+			}
 			.mouse { ed.handle_encoding_action_mouse(ev.mouse) }
 			else {}
 		}
@@ -687,7 +727,15 @@ fn (mut ed Editor) handle_event(ev Input) {
 	}
 	if ed.encoding_picker {
 		match ev.kind {
-			.keyboard { ed.handle_encoding_picker_key(ev.key) }
+			.keyboard {
+				mods := u32(ev.key) & kbmod_mask
+				vk := u32(ev.key) & vk_mask
+				if vk == vk_tab && (mods == kbmod_none || mods == kbmod_shift) {
+					ed.focus_tab(mods == kbmod_shift)
+				} else {
+					ed.handle_encoding_picker_key(ev.key)
+				}
+			}
 			.text { ed.handle_encoding_picker_text(ev.text) }
 			.paste { ed.handle_encoding_picker_text(ev.data.bytestr()) }
 			.mouse { ed.handle_encoding_picker_mouse(ev.mouse) }
@@ -699,7 +747,15 @@ fn (mut ed Editor) handle_event(ev Input) {
 	// The language picker is modal: it swallows all input while open.
 	if ed.language_picker {
 		match ev.kind {
-			.keyboard { ed.handle_language_picker_key(ev.key) }
+			.keyboard {
+				mods := u32(ev.key) & kbmod_mask
+				vk := u32(ev.key) & vk_mask
+				if vk == vk_tab && (mods == kbmod_none || mods == kbmod_shift) {
+					ed.focus_tab(mods == kbmod_shift)
+				} else {
+					ed.handle_language_picker_key(ev.key)
+				}
+			}
 			.mouse { ed.handle_language_picker_mouse(ev.mouse) }
 			else {}
 		}
@@ -1305,6 +1361,25 @@ fn (mut ed Editor) request_exit() {
 fn (mut ed Editor) handle_key(key InputKey) {
 	mods := u32(key) & kbmod_mask
 	vk := u32(key) & vk_mask
+	// View > Focus Statusbar hands keyboard ownership to the status line
+	// until Escape returns focus to the document. Tab cycles its buttons and
+	// Enter activates the selected button. An open indentation popup keeps
+	// its normal key handling (Esc closes it first).
+	if ed.focus.target == .statusbar && !ed.indent_picker {
+		if vk == vk_tab && (mods == kbmod_none || mods == kbmod_shift) {
+			ed.focus_tab(mods == kbmod_shift)
+			return
+		}
+		if vk == vk_escape {
+			ed.focus.pop()
+			ed.statusbar_focus_index = -1
+			return
+		}
+		if vk == vk_return && mods == kbmod_none {
+			ed.activate_statusbar_focus()
+			return
+		}
+	}
 
 	// handled tracks whether the keypress was actually consumed; the shared
 	// tail below only runs for consumed keys (aligns with Rust's
@@ -2144,25 +2219,21 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	// language picker. The label is the resolved name — Auto Detect when the
 	// buffer has no explicit override, otherwise the chosen name.
 	lang := ed.statusbar_lang_label()
-	ed.status_buttons << StatusButton{ kind: .language, left: x, right: x + CoordType(lang.len) }
 	text += lang + '  '
 	x += CoordType(lang.len + 2)
 
 	// Newline button (Rust "newline"): click toggles CRLF/LF.
 	nl := if b.is_crlf() { 'CRLF' } else { 'LF' }
-	ed.status_buttons << StatusButton{ kind: .newline, left: x, right: x + CoordType(nl.len) }
 	text += nl + '  '
 	x += CoordType(nl.len + 2)
 
 	// Encoding button opens the Reopen/Convert action picker.
 	enc := b.encoding()
-	ed.status_buttons << StatusButton{ kind: .encoding, left: x, right: x + CoordType(enc.len) }
 	text += enc + '  '
 	x += CoordType(enc.len + 2)
 
 	// Indentation button (Rust "indentation"): click opens the picker popup.
 	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
-	ed.status_buttons << StatusButton{ kind: .indentation, left: x, right: x + CoordType(ind.len) }
 	text += ind + '  '
 	x += CoordType(ind.len + 2)
 
@@ -2187,7 +2258,7 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 		x += 6
 	}
 
-	name := if ed.cur().path == '' { '[untitled]' } else { ed.cur().path }
+	name := ed.document_display_name(ed.cur())
 	right := (if b.is_dirty() { '* ' } else { '' }) + name
 
 	// Filename button (Rust "filename"): right-aligned clickable region that
@@ -2223,7 +2294,10 @@ fn (mut ed Editor) draw_statusbar(status_y CoordType) {
 	ed.fb.reverse(mut rect)
 	// Buttons are highlighted by reversing their own rect a second time
 	// (same trick as the menu bar), reading as raised against the inverted row.
-	for btn in ed.status_buttons {
+	for i, btn in ed.status_buttons {
+		if ed.focus.target == .statusbar && i != ed.statusbar_focus_index {
+			continue
+		}
 		mut btn_rect := Rect{ left: btn.left, top: status_y, right: btn.right, bottom: status_y + 1 }
 		ed.fb.reverse(mut btn_rect)
 	}
@@ -2309,6 +2383,24 @@ fn (ed &Editor) compute_status_buttons() []StatusButton {
 	ind := (if b.indent_with_tabs() { 'Tabs' } else { 'Spaces' }) + ':${b.tab_size()}'
 	res << StatusButton{ kind: .indentation, left: x, right: x + CoordType(ind.len) }
 	return res
+}
+
+fn (ed &Editor) statusbar_focus_count() int {
+	// language, newline, encoding, indentation, plus the +1 for the
+	// right-aligned filename button that draw_statusbar appends.
+	return ed.compute_status_buttons().len + 1
+}
+
+fn (mut ed Editor) activate_statusbar_focus() {
+	mut b := &ed.docs[ed.active].buf
+	match ed.statusbar_focus_index {
+		0 { ed.open_language_picker() }
+		1 { b.normalize_newlines(!b.is_crlf()) }
+		2 { ed.open_encoding_actions() }
+		3 { ed.indent_picker = true }
+		4 { ed.open_goto_file() }
+		else {}
+	}
 }
 
 // statusbar_lang_label returns the language label rendered on the status

@@ -90,9 +90,9 @@ fn test_goto_file_entry_text_named_clean() {
 }
 
 fn test_goto_file_entry_text_untitled() {
-	// A document with no path is labeled [untitled].
+	// A document with no path receives a stable display name.
 	ed := fresh_editor_with_buffer()
-	assert ed.goto_file_entry_text(0) == '  [untitled]'
+	assert ed.goto_file_entry_text(0) == '  Untitled-1.txt'
 }
 
 fn test_goto_file_entry_text_dirty_mark() {
@@ -102,7 +102,7 @@ fn test_goto_file_entry_text_dirty_mark() {
 	mut ed := fresh_editor_with_buffer()
 	ed.docs[0].buf.copy_from_str(StringDocument{ text: 'x' })
 	ed.docs[0].buf.mark_as_dirty()
-	assert ed.goto_file_entry_text(0) == '* [untitled]'
+	assert ed.goto_file_entry_text(0) == '* Untitled-1.txt'
 }
 
 fn test_goto_file_entry_text_out_of_range_returns_empty() {
@@ -110,6 +110,14 @@ fn test_goto_file_entry_text_out_of_range_returns_empty() {
 	// Negative index and past-end both yield ''.
 	assert ed.goto_file_entry_text(-1) == ''
 	assert ed.goto_file_entry_text(99) == ''
+}
+
+fn test_goto_file_filter_matches_untitled_display_name() {
+	mut ed := fresh_editor_with_buffer()
+	ed.goto_file_filter = 'Untitled-1'
+	ed.goto_file_compute_filtered()
+	assert ed.goto_file_filtered.len == 1
+	assert ed.goto_file_filtered[0] == 0
 }
 
 // ---- goto_file_clamp_scroll --------------------------------------------

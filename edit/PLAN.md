@@ -17,8 +17,13 @@ Shift+方向键/Ctrl+A 选择替换语义；Search 模式 Close 控件可见可�
 2. 旧的双 prompt 分支（`run_prompt_search`、`toggle_search_option`、
    `handle_search_prompt_mouse`、`draw_search_prompt_options` 及 `PromptKind.search/.replace/
    .replace_with`）已删除，`PromptKind` 只剩 `.goto_line`，避免两套搜索状态并存。
-3. 未提前实现全局 FocusManager：面板使用局部 `SearchPanelFocus` 枚举和显式路由；等文件/语言/
-   编码 picker 也需要 Tab 导航时再抽取通用焦点树（见 P2）。
+3. 已实现轻量全局 `FocusManager`：菜单、搜索、文件/语言/编码 picker、dirty modal 和状态栏
+   共用焦点路由；保留菜单自身的方向键导航，并通过一次性 focus request 接入状态栏。
+
+性能基线（2026-09-11）：`tools/benchmark.py` 以 PTY 驱动真实编辑器，覆盖启动时的可见高亮、
+文件尾部搜索和原地保存。1/4/16/32/64/128 MiB 文件的峰值 RSS 约为 11/14/38/70/131/252 MiB；
+搜索与保存单次操作约 20ms，当前没有分块搜索的性能拐点。完整 gap buffer 保留在首版范围内，
+超过约 256 MiB 后再用内部 CPU 计时评估分块索引。
 
 阶段 C（无 ICU 的正则/替换 fallback）已完成：`regex.v` 提供递归下降解析器、字节码 VM、
 分组/量词/交替/字符类/捕获组和替换模板；搜索面板对非法正则给出可见错误并保留上一条有效
@@ -26,7 +31,7 @@ Shift+方向键/Ctrl+A 选择替换语义；Search 模式 Close 控件可见可�
 回归覆盖 forward/reverse/wrap/zero-width/Replace All 以及希腊、西里尔、组合字符和 CJK。
 不支持 ICU 的 look-around、backreference 和完整 Unicode property，均在代码注释中明确说明。
 
-下一项主线：P1 编码 picker/转换；其后再推进 P2 的统一焦点树。
+阶段 D 的编码、焦点和性能基线均已完成；当前只保留超过约 256 MiB 后再复测的后续观察项。
 
 ## 1. 目标和边界
 
@@ -47,7 +52,7 @@ Shift+方向键/Ctrl+A 选择替换语义；Search 模式 Close 控件可见可�
 
 | 优先级 | 范围 | 原因 |
 |---|---|---|
-| P0 | 常驻搜索/替换面板 | 当前唯一尚未完成的核心日常工作流 |
+| P0 | 常驻搜索/替换面板 | 已完成，作为核心日常工作流基线 |
 | P1 | 正则/替换捕获组、Unicode 语义、编码 picker | 影响与 Rust 版的内容处理兼容性，存在数据安全风险 |
 | P2 | 通用焦点树、显示细节、错误日志容量、性能 | 主要改善可访问性、可维护性和长文档体验 |
 
@@ -406,13 +411,14 @@ cpulimit -l 200 -z -- ./build.sh vet
 1. 选择 ICU 或扩展 fallback 后端。
 2. 完整正则和替换模板。
 3. Unicode case/word boundary。
-4. **转入 P2**：大文件基准和内存审查，不阻塞搜索语义阶段验收。
+4. **已完成**：大文件基准和内存审查；当前没有分块搜索的性能拐点。
 
-### 阶段 D：编码和焦点完善（当前执行）
+### 阶段 D：编码和焦点完善（已完成）
 
 1. **已完成**：`encoding.v` 解码/编码后端。
 2. **已完成**：状态栏编码 picker、Reopen/Convert。
-3. **下一项**：FocusManager 接入全部 modal/statusbar。
-4. 显示细节、版本来源和错误日志容量收尾。
+3. **已完成**：轻量 FocusManager 接入菜单、搜索、picker、编码/语言 picker、dirty modal 和状态栏；View > Focus Statusbar 可一次性把键盘焦点交给状态栏。
+4. **已完成**：错误日志使用显式 Close/Enter/Esc 行为；untitled 文档有稳定显示名，状态栏显示 basename 和实际生效语言；版本 fallback 不再硬编码 `0.1`。
+5. **已完成**：`tools/benchmark.py` 建立保存、搜索和可见高亮的大文件基线，当前不引入分块搜索。
 
 每个阶段结束时更新 `TODO.md` 的复选框和本文档的实际差异；如果某项被确认继续留在首版范围外，应移动到“明确不纳入当前首版”，而不是留下模糊的进行中状态。

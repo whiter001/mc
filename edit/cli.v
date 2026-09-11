@@ -4,7 +4,7 @@ import os
 
 // edit_version is injected by build.sh from v.mod. The fallback keeps direct
 // `v test` invocations usable for contributors.
-const edit_version = $d('edit_version', '0.1.0')
+const edit_version = $d('edit_version', 'dev')
 
 enum CliAction {
 	run

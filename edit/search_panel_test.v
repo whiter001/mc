@@ -296,6 +296,26 @@ fn test_search_panel_selection_replaces_with_typing() {
 	assert ed.search_panel.needle == 'ok'
 }
 
+fn test_search_panel_ctrl_a_selects_and_highlights_active_input() {
+	mut ed := panel_ed('hello')
+	ed.open_search_panel()
+	ed.search_panel.needle = 'abc'
+	ed.search_panel.needle_cursor = ed.search_panel.needle.len
+
+	assert ed.handle_search_panel_key(InputKey(vk_a | kbmod_ctrl))
+	assert ed.search_panel.needle_anchor == 0
+	assert ed.search_panel.needle_cursor == 3
+
+	ed.fb.flip(ed.size)
+	ed.draw_search_panel()
+	idx := int(ed.fb.frame_counter & 1)
+	row, _ := ed.search_panel_layout()
+	selected := int(row) * int(ed.size.width) + 9 // leading space + "Search: "
+	outside := selected - 1
+	assert ed.fb.buffers[idx].bg_bitmap.data[selected].to_rgba() == ed.fb.buffers[idx].fg_bitmap.data[outside].to_rgba()
+	assert ed.fb.buffers[idx].fg_bitmap.data[selected].to_rgba() == ed.fb.buffers[idx].bg_bitmap.data[outside].to_rgba()
+}
+
 fn test_search_panel_enter_toggles_option_focus() {
 	mut ed := panel_ed('Foo foo')
 	ed.open_search_panel()

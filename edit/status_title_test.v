@@ -173,3 +173,19 @@ fn test_error_log_close_does_not_drop_entries() {
 	assert ed.error_log[(beg + 0) % error_log_capacity] == 'error one'
 	assert ed.error_log[(beg + 1) % error_log_capacity] == 'error two'
 }
+
+fn test_error_log_modal_uses_explicit_close_keys() {
+	mut ed := Editor{ fb: framebuffer_new() }
+	ed.error_log_add('error')
+	ed.handle_error_log_key(InputKey(vk_a))
+	assert ed.error_log_open
+	ed.handle_error_log_key(InputKey(vk_escape))
+	assert !ed.error_log_open
+}
+
+fn test_statusbar_language_label_preserves_auto_detect_state() {
+	mut ed := fresh_editor_with_buffer()
+	ed.docs[0].buf.set_language(0)
+	ed.language_picker_explicit = -2
+	assert ed.statusbar_lang_label() == 'Auto Detect'
+}

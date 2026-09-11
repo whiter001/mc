@@ -10,8 +10,8 @@ module main
 // Wire-up lives in main.v:
 //   - draw() calls draw_error_log() when the ring is non-empty and
 //     error_log_open is true.
-//   - handle_event() dismisses the modal on any keyboard / text
-//     event before doing anything else.
+//   - handle_event() routes keyboard and mouse input to the modal's Close
+//     button before doing anything else.
 
 // error_log_capacity is the size of the circular error log buffer
 // (matches the Rust reference's fixed-size ring).
@@ -45,11 +45,36 @@ fn (mut ed Editor) error_log_close() {
 	ed.needs_redraw = true
 }
 
+fn (ed &Editor) error_log_rect() Rect {
+	box_w := CoordType(60)
+	box_h := CoordType(ed.error_log_count + 3)
+	left := coord_max((ed.size.width - box_w) / 2, 0)
+	top := coord_max((ed.size.height - box_h) / 2, 0)
+	return Rect{ left: left, top: top, right: coord_min(left + box_w, ed.size.width), bottom: top + box_h }
+}
+
+fn (mut ed Editor) handle_error_log_key(key InputKey) {
+	vk := u32(key) & vk_mask
+	if vk == vk_return || vk == vk_escape {
+		ed.error_log_close()
+	}
+}
+
+fn (mut ed Editor) handle_error_log_mouse(mouse InputMouse) {
+	if mouse.state != .left || mouse.drag {
+		return
+	}
+	r := ed.error_log_rect()
+	if mouse.position.y == r.bottom - 1 && mouse.position.x >= r.left && mouse.position.x < r.right {
+		ed.error_log_close()
+	}
+}
+
 // draw_error_log draws the red error modal centered on the screen.
 // Layout mirrors the Rust original: a title row, then one row per
-// queued message (truncated from the right), then a dismiss hint.
-// Any key dismisses the modal — both Enter/Escape and printable
-// characters (the dismiss itself lives in handle_event()).
+// queued message (truncated from the right), then a [ Close ] button
+// row. Only Enter/Escape or a click on the Close row dismisses the
+// modal (routing lives in handle_event()).
 fn (mut ed Editor) draw_error_log() {
 	mut lines := []string{}
 	lines << 'Error'
@@ -59,7 +84,7 @@ fn (mut ed Editor) draw_error_log() {
 		lines << ed.error_log[idx]
 	}
 	lines << ''
-	lines << 'Press Enter or Esc to close'
+	lines << '[ Close ]'
 
 	box_w := CoordType(60)
 	box_h := CoordType(lines.len)

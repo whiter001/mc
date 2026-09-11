@@ -174,9 +174,27 @@ fn (mut ed Editor) search_panel_active_byte_width(label string) CoordType {
 		return 0
 	}
 	mut text, cur_ref := ed.search_panel_active_text()
-	off := if *cur_ref < 0 || *cur_ref > text.len { text.len } else { *cur_ref }
+	return search_panel_byte_width(label, text, *cur_ref)
+}
+
+fn search_panel_byte_width(label string, text string, offset int) CoordType {
+	off := if offset < 0 || offset > text.len { text.len } else { offset }
 	mut cfg := new_measurement_config(StringDocument{ text: ' ${label}${text[..off]}' })
 	return cfg.goto_visual(Point{ x: coord_type_max, y: 0 }).visual_pos.x
+}
+
+fn (mut ed Editor) draw_search_panel_selection(row CoordType, label string, text string, anchor int, cursor int) {
+	beg, end := search_panel_selection(anchor, cursor, text.len)
+	if beg < 0 {
+		return
+	}
+	mut rect := Rect{
+		left: search_panel_byte_width(label, text, beg)
+		top: row
+		right: search_panel_byte_width(label, text, end)
+		bottom: row + 1
+	}
+	ed.fb.reverse(mut rect)
 }
 
 // search_panel_toggle_option flips one of the three search options and
@@ -509,15 +527,24 @@ fn (mut ed Editor) draw_search_panel() {
 		}
 	}
 
+	// The edit state already tracks selection anchors for Ctrl+A and
+	// Shift+movement. Render the active field's range so the selection is not
+	// only observable after the next edit replaces it.
+	if ed.search_panel.focus == .needle {
+		ed.draw_search_panel_selection(top_row, 'Search: ', ed.search_panel.needle, ed.search_panel.needle_anchor, ed.search_panel.needle_cursor)
+	} else if ed.search_panel.focus == .replacement && has_replace {
+		ed.draw_search_panel_selection(repl_row, 'Replace: ', ed.search_panel.replacement, ed.search_panel.replacement_anchor, ed.search_panel.replacement_cursor)
+	}
+
 	// Position the terminal cursor at the active editing field.
 	if ed.search_panel.focus == .replacement && has_replace {
 		ed.fb.set_cursor(Point{
-			x: ed.search_panel_active_byte_width('Replace:')
+			x: ed.search_panel_active_byte_width('Replace: ')
 			y: repl_row
 		}, false)
 	} else if ed.search_panel.focus == .needle {
 		ed.fb.set_cursor(Point{
-			x: ed.search_panel_active_byte_width('Search:')
+			x: ed.search_panel_active_byte_width('Search: ')
 			y: top_row
 		}, false)
 	}

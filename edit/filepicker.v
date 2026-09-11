@@ -104,7 +104,7 @@ fn (mut ed Editor) open_picker(save_as bool) {
 	ed.picker_dir = picker_normalize(dir)
 	ed.picker_name = if save_as {
 		if cur.path == '' {
-			'untitled.txt'
+			ed.document_display_name(cur)
 		} else {
 			os.file_name(cur.path)
 		}
@@ -232,6 +232,7 @@ fn (mut ed Editor) picker_do_save(path string) {
 		return
 	}
 	ed.docs[ed.active].path = path
+	ed.docs[ed.active].display_name = os.file_name(path)
 	if fid := file_id(path) {
 		ed.docs[ed.active].file_id = fid
 		ed.docs[ed.active].has_file_id = true

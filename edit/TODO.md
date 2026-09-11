@@ -80,14 +80,18 @@
 
 ## P2：交互和维护性增强
 
-- [ ] 引入统一 focus tree：菜单、搜索、picker、状态栏、模态框均支持 Tab/Shift+Tab
-- [ ] 补回 View > Focus Statusbar，并支持键盘操作状态栏按钮
+- [x] 引入统一 focus tree：菜单、搜索、picker、状态栏、模态框均支持 Tab/Shift+Tab
+- [x] 补回 View > Focus Statusbar，并支持键盘操作状态栏按钮
 - [x] 错误日志容量与 Rust 对齐为 10 条
-- [ ] 统一错误模态的按钮和关闭行为
-- [ ] 未命名文档使用 `Untitled-N.txt`，状态栏显示 basename，Go to File 显示目录信息
-- [ ] 自动检测语言时状态栏显示实际生效语言，显式 override 时显示 override
-- [ ] About 和 `--version` 显示同一个构建版本，不保留硬编码 `0.1`
-- [ ] 保存、搜索和高亮路径增加大文件基准；评估分块搜索是否值得实现
+- [x] 统一错误模态的按钮和关闭行为
+- [x] 未命名文档使用 `Untitled-N.txt`，状态栏显示 basename，Go to File 显示目录信息
+- [x] 自动检测语言时状态栏显示实际生效语言，显式 override 时显示 override
+- [x] About 和 `--version` 显示同一个构建版本，不保留硬编码 `0.1`
+- [x] 保存、搜索和高亮路径增加大文件基准；评估分块搜索是否值得实现
+  - `tools/benchmark.py` 通过真实 PTY 覆盖启动/可见高亮、文件尾部搜索和原地保存，报告耗时与峰值 RSS。
+  - 1/4/16/32/64/128 MiB fixtures 的实测峰值 RSS 约为 11/14/38/70/131/252 MiB，内存随 gap buffer
+    线性增长；搜索和保存单次操作在本机均约 20ms，未观察到需要分块搜索的性能拐点。
+  - 当前首版继续使用完整内存缓冲；若目标文件超过约 256 MiB，再以内部 CPU 计时和分块索引专项评估。
 
 ## 明确不纳入当前首版
 

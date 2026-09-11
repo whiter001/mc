@@ -11,16 +11,15 @@ module main
 // State lives on the Editor struct in main.v (title_filename,
 // title_dirty); only the method moves here.
 
-import os
-
 // update_terminal_title emits OSC 0;... ST to set the terminal
 // window title to "<dirty?● :><filename> - edit". It only writes
 // when the active document's filename or dirty flag actually
-// changes. Untracked docs use an empty filename (omitted from the
-// payload); the title then reads just "edit".
+// changes. Untracked docs surface a stable display name (e.g.
+// "Untitled-1.txt"); the filename is only empty when there is no
+// active document, in which case the title reads just "edit".
 fn (mut ed Editor) update_terminal_title() {
-	filename := if ed.active < ed.docs.len && ed.docs[ed.active].path != '' {
-		os.file_name(ed.docs[ed.active].path)
+	filename := if ed.active < ed.docs.len {
+		ed.document_display_name(&ed.docs[ed.active])
 	} else {
 		''
 	}

@@ -23,15 +23,18 @@ fn (mut ed Editor) open_goto_file() {
 }
 
 // goto_file_compute_filtered rebuilds goto_file_filtered from the current
-// filter: case-insensitive substring on the document path (with
-// '[untitled]' for empty paths). An empty filter is a no-op and yields
+// filter: case-insensitive substring on the document path, or the stable
+// display name for untitled documents. An empty filter is a no-op and yields
 // the full list in ed.docs order.
 fn (mut ed Editor) goto_file_compute_filtered() {
 	ed.goto_file_filtered = []int{cap: ed.docs.len}
 	needle := ed.goto_file_filter.to_lower()
 	for i in 0 .. ed.docs.len {
 		doc := ed.docs[i]
-		hay := (if doc.path == '' { '[untitled]' } else { doc.path }).to_lower()
+		// Keep filtering aligned with the label rendered in the list. Named
+		// documents remain searchable by their full path; untitled documents
+		// use their stable display name (e.g. `Untitled-1.txt`).
+		hay := (if doc.path == '' { ed.document_display_name(&doc) } else { doc.path }).to_lower()
 		if needle == '' || hay.contains(needle) {
 			ed.goto_file_filtered << i
 		}
@@ -92,7 +95,7 @@ fn (ed &Editor) goto_file_entry_text(idx int) string {
 		return ''
 	}
 	doc := ed.docs[idx]
-	label := if doc.path == '' { '[untitled]' } else { doc.path }
+	label := if doc.path == '' { ed.document_display_name(&doc) } else { doc.path }
 	mark := if doc.buf.is_dirty() { '* ' } else { '  ' }
 	return mark + label
 }
@@ -312,7 +315,7 @@ fn (mut ed Editor) draw_goto_file() {
 		line := if idx >= 0 && idx < ed.goto_file_filtered.len {
 			doc_idx := ed.goto_file_filtered[idx]
 			doc := ed.docs[doc_idx]
-			label := if doc.path == '' { '[untitled]' } else { os.file_name(doc.path) }
+			label := ed.document_display_name(&doc)
 			mark := if doc.buf.is_dirty() { '* ' } else { '  ' }
 			dir := ed.goto_file_entry_dir(doc_idx)
 			if dir == '' {
